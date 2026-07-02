@@ -109,6 +109,7 @@ item map block '9. lk ver3+4sv' -> grade 9 ver 3+sv: 85 items
 === zero+DA_2026_mat_9lk_v4_sv_item_scores_puhdistettu70%missing.xlsx
   booklet=9lk_v4 students=203 demo=12 attitude=6 funa=118 da_items=85 summary=8 map_items=85
   match: name=58 positional=27 unmatched=0 / 85 cols
+merged description_en for 614 items
 
 === TOTALS ===
 students: 9036 | items: 4335 | responses: 1144795

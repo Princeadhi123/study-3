@@ -150,6 +150,34 @@ DEMO_COLS = {
     "city", "school", "home_lang", "strong_lang", "friend_lang", "school_lang",
 }
 SUMMARY_PAT = re.compile(r"^(missing_all%|sum_)", re.I)
+
+# Likert coding (fi + sv), 1 = fully disagree ... 5 = fully agree
+LIKERT_CODE = {
+    "täysin eri mieltä": 1, "helt av annan åsikt": 1,
+    "jokseenkin eri mieltä": 2, "delvis av annan åsikt": 2,
+    "ei samaa eikä eri mieltä": 3, "varken av samma eller annan åsikt": 3,
+    "jokseenkin samaa mieltä": 4, "delvis av samma åsikt": 4,
+    "täysin samaa mieltä": 5, "helt av samma åsikt": 5,
+}
+PERMISSION_CODE = {"kyllä": 1, "ja": 1, "ei": 0, "nej": 0}
+
+# short english keys for attitude items (keyword -> code column name)
+ATTITUDE_KEYS = [
+    ("enjoy school", "att_enjoy_school"),
+    ("like maths", "att_like_maths"),
+    ("important to know maths", "att_maths_important"),
+    ("good at maths", "att_good_at_maths"),
+    ("good at reading", "att_good_at_reading"),
+    ("good at writing", "att_good_at_writing"),
+]
+
+
+def attitude_key(col, idx):
+    low = str(col).lower()
+    for kw, key in ATTITUDE_KEYS:
+        if kw in low:
+            return key
+    return f"att_extra{idx}"
 ITEM_PAT = re.compile(r"_(\d+)_Q:", re.I)
 
 
@@ -283,6 +311,17 @@ def main():
             seen[name] = seen.get(name, 0) + 1
             cols.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
         stu.columns = cols
+        # coded columns: Likert 1-5 + permission flag (originals kept)
+        for ai, c in enumerate(attitude, start=1):
+            src = stu[c] if c in stu.columns else None
+            if src is not None and not isinstance(src, pd.Series):
+                src = src.iloc[:, 0]
+            if src is not None:
+                stu[attitude_key(c, ai)] = (
+                    src.astype(str).str.strip().str.lower().map(LIKERT_CODE))
+        if "permission" in stu.columns:
+            stu["permission_flag"] = (
+                stu["permission"].astype(str).str.strip().str.lower().map(PERMISSION_CODE))
         stu.insert(0, "booklet", booklet)
         stu.insert(1, "grade", grade)
         stu.insert(2, "version", ver)
@@ -380,6 +419,14 @@ def main():
         items[["item_uid", "content_area1", "cognitive_level", "skill_domain",
                "oplm_id", "oplm_name", "irt_b", "task_base_name", "description"]],
         on="item_uid", how="left")
+
+    # optional English translations of item descriptions (keyed by oplm_name)
+    trans_file = OUT_DIR / "item_translations_en.csv"
+    if trans_file.exists():
+        trans = pd.read_csv(trans_file)[["oplm_name", "description_en"]].drop_duplicates("oplm_name")
+        items = items.merge(trans, on="oplm_name", how="left")
+        responses = responses.merge(trans, on="oplm_name", how="left")
+        report("merged description_en for", trans["description_en"].notna().sum(), "items")
 
     students.to_csv(OUT_DIR / "students.csv", index=False, encoding="utf-8-sig")
     items.to_csv(OUT_DIR / "items_master.csv", index=False, encoding="utf-8-sig")
