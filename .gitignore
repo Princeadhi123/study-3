@@ -1,0 +1,8 @@
+# Research data - never commit (student data, GDPR)
+Final datasets to Prince/
+Item map DA 2026 Final.xlsx
+kt_dataset/*.csv
+
+# misc
+__pycache__/
+*.pyc
