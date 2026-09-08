@@ -39,6 +39,8 @@ SCRATCH_ROOT="${KT_SCRATCH_ROOT:-/scratch/${PROJECT_ID}/math_kt}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CODE_DIR="${KT_CODE_DIR:-${SCRIPT_DIR}}"
 # LUMI-G software environment: AMD ROCm GPU + Python.
+module load LUMI/25.03
+module load partition/G
 module load cray-python/3.11.7
 module load rocm/6.2.4
 PYTHON="${KT_PYTHON:-/projappl/project_462001308/math_kt/mathkt-env/bin/python}"
