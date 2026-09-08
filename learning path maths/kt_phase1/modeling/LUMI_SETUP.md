@@ -152,8 +152,10 @@ python -c "import torch; print(torch.__version__)"
 python -c "import numpy, pandas, sklearn, sentence_transformers; print('All packages OK')"
 ```
 
-The checked-in `run_lumi.sh` loads `cray-python/3.11.7` and `rocm/6.2.4`
-automatically and uses this project virtual environment by default.
+The checked-in `run_lumi.sh` loads `LUMI/25.03`, `partition/G`,
+`cray-python/3.11.7`, and `rocm/6.2.4` automatically, uses this project
+virtual environment by default, and trains each of the three variants for 30
+epochs.
 
 **Either way, `--device cuda` in the scripts is still correct** — ROCm's
 PyTorch build keeps the `cuda` device name and `torch.cuda.is_available()`

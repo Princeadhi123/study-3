@@ -101,7 +101,7 @@ COMMON=(
     --sequences "${PREP_DIR}/sequences.jsonl.gz"
     --vocab "${PREP_DIR}/vocab.json"
     --device cuda
-    --epochs 10
+    --epochs 30
     --batch-size 256
     --max-seq-len 400
     --num-workers 2
