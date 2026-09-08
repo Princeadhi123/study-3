@@ -39,19 +39,36 @@ kt_phase1/modeling/                 -> /projappl/project_462001308/math_kt/code/
 kt_phase1/data/kt_interactions.csv.gz -> /projappl/project_462001308/math_kt/raw/kt_interactions.csv.gz
 ```
 
-### If the GitHub repository is public
+### Clone the GitHub repository
 
-On LUMI, clone the repository directly into the required `modeling` directory:
+Your repository is public:
+
+```text
+https://github.com/Princeadhi123/study-3
+```
+
+Clone it into the `code` directory:
 
 ```bash
 mkdir -p /projappl/project_462001308/math_kt/code
 cd /projappl/project_462001308/math_kt/code
-git clone https://github.com/<username>/<repository>.git modeling
-cd modeling
+git clone https://github.com/Princeadhi123/study-3.git study-3
 ```
 
-If the repository already contains a parent folder, make sure that these files
-are directly inside `modeling/`:
+The modeling code will then be located at:
+
+```text
+/projappl/project_462001308/math_kt/code/study-3/learning path maths/kt_phase1/modeling/
+```
+
+Verify it:
+
+```bash
+cd "/projappl/project_462001308/math_kt/code/study-3/learning path maths/kt_phase1/modeling"
+ls
+```
+
+You should see:
 
 ```text
 run_lumi.sh
@@ -148,7 +165,7 @@ Face the first time. Two options:
 
 ```bash
 ssh myuser@lumi.csc.fi
-cd /projappl/project_462001308/math_kt/code/modeling
+cd "/projappl/project_462001308/math_kt/code/study-3/learning path maths/kt_phase1/modeling"
 
 export KT_PROJECT_ID=project_462001308
 sbatch --account="${KT_PROJECT_ID}" run_lumi.sh

@@ -36,7 +36,8 @@ set -euo pipefail
 PROJECT_ID="${KT_PROJECT_ID:-project_462001308}"
 PROJECT_ROOT="${KT_PROJECT_ROOT:-/projappl/${PROJECT_ID}/math_kt}"
 SCRATCH_ROOT="${KT_SCRATCH_ROOT:-/scratch/${PROJECT_ID}/math_kt}"
-CODE_DIR="${KT_CODE_DIR:-${PROJECT_ROOT}/code/modeling}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CODE_DIR="${KT_CODE_DIR:-${SCRIPT_DIR}}"
 PYTHON="${KT_PYTHON:-python}"
 
 RAW_PROJECT="${PROJECT_ROOT}/raw/kt_interactions.csv.gz"
