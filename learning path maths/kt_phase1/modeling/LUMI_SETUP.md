@@ -9,19 +9,19 @@ LUMI has three relevant tiers. Use them as follows:
 
 | Tier | Path (from `run_lumi.sh`) | What goes there | Why |
 |---|---|---|---|
-| **Project (persistent)** | `/project/<project_id>/math_kt/` | Code, the one raw data file, question embeddings, trained model checkpoints, results | Survives forever (until your project allocation ends); not auto-purged |
-| **Scratch (temporary)** | `/scratch/<project_id>/math_kt/` | A working copy of the raw file, the prepared `sequences.jsonl.gz` | Faster for heavy I/O during training, but **LUMI auto-deletes scratch files after ~90 days of inactivity** — never store anything here that isn't reproducible by rerunning a script |
+| **Project (persistent)** | `/projappl/project_462001308/math_kt/` | Code, raw data, question embeddings, trained checkpoints, results | Persistent for the project lifetime |
+| **Scratch (temporary)** | `/scratch/project_462001308/math_kt/` | Working raw copy and prepared `sequences.jsonl.gz` | Faster for heavy I/O; reproducible files may be regenerated and scratch can be cleaned |
 
-Concretely, under `/project/<project_id>/math_kt/`:
+For your project, use `/projappl/project_462001308/math_kt/` (LUMI also exposes this persistent project space as `/project/project_462001308/` on systems where that path is available). Concretely:
 
 ```text
 math_kt/
   code/
-    modeling/              <- upload this whole folder (all the .py files, run_lumi.sh, README.md)
+    modeling/              <- clone/upload the GitHub modeling code here
   raw/
     kt_interactions.csv.gz <- upload this one file (~430 MB, from kt_phase1/data/)
-  embeddings/               <- created automatically by the script (Model C only)
-  runs/                     <- created automatically; trained checkpoints + metrics land here
+  embeddings/              <- created automatically by the script (Model C only)
+  runs/                    <- created automatically; trained checkpoints + metrics land here
 ```
 
 You do **not** need to upload:
@@ -32,24 +32,55 @@ You do **not** need to upload:
 
 ## What to upload
 
-From your machine:
+From your machine, upload:
 
 ```text
-kt_phase1/modeling/            -> LUMI: /project/<project_id>/math_kt/code/modeling/
-kt_phase1/data/kt_interactions.csv.gz -> LUMI: /project/<project_id>/math_kt/raw/kt_interactions.csv.gz
+kt_phase1/modeling/                 -> /projappl/project_462001308/math_kt/code/modeling/
+kt_phase1/data/kt_interactions.csv.gz -> /projappl/project_462001308/math_kt/raw/kt_interactions.csv.gz
 ```
 
-Example using `rsync` (run from your machine, adjust the LUMI username/host):
+### If the GitHub repository is public
+
+On LUMI, clone the repository directly into the required `modeling` directory:
 
 ```bash
-rsync -avP "learning path maths/kt_phase1/modeling/" \
-    myuser@lumi.csc.fi:/project/<project_id>/math_kt/code/modeling/
-
-rsync -avP "learning path maths/kt_phase1/data/kt_interactions.csv.gz" \
-    myuser@lumi.csc.fi:/project/<project_id>/math_kt/raw/kt_interactions.csv.gz
+mkdir -p /projappl/project_462001308/math_kt/code
+cd /projappl/project_462001308/math_kt/code
+git clone https://github.com/<username>/<repository>.git modeling
+cd modeling
 ```
 
-`scp` works the same way if you don't have `rsync` available.
+If the repository already contains a parent folder, make sure that these files
+are directly inside `modeling/`:
+
+```text
+run_lumi.sh
+prepare_sequences.py
+embed_questions.py
+train.py
+model.py
+dataset.py
+compare_runs.py
+```
+
+### Upload the raw data separately
+
+The raw data is intentionally gitignored, so it will not be in GitHub. From
+your local machine, use `rsync`, `scp`, or WinSCP:
+
+```bash
+rsync -avP "learning path maths/kt_phase1/data/kt_interactions.csv.gz" \
+    myuser@lumi.csc.fi:/projappl/project_462001308/math_kt/raw/kt_interactions.csv.gz
+```
+
+Create the target directory first if needed:
+
+```bash
+mkdir -p /projappl/project_462001308/math_kt/raw
+```
+
+`scp` works if `rsync` is unavailable. WinSCP can upload the file to the same
+`/projappl/project_462001308/math_kt/raw/` directory.
 
 ## Environment: LUMI-G uses AMD GPUs (ROCm), not NVIDIA
 
@@ -117,14 +148,13 @@ Face the first time. Two options:
 
 ```bash
 ssh myuser@lumi.csc.fi
-cd /project/<project_id>/math_kt/code/modeling
+cd /projappl/project_462001308/math_kt/code/modeling
 
-export KT_PROJECT_ID=project_XXXXXXX   # your real LUMI project number
+export KT_PROJECT_ID=project_462001308
 sbatch --account="${KT_PROJECT_ID}" run_lumi.sh
 ```
 
-Or edit the `PROJECT_ID="${KT_PROJECT_ID:-project_XXXXXXX}"` line directly in
-`run_lumi.sh` instead of exporting the environment variable.
+The checked-in `run_lumi.sh` already defaults to `project_462001308`, so you may omit the export. Passing `--account` explicitly is still recommended.
 
 Check status and logs:
 
@@ -150,7 +180,7 @@ tail -f math_kt_<jobid>.out
 Download the results back to your machine:
 
 ```bash
-rsync -avP myuser@lumi.csc.fi:/project/<project_id>/math_kt/runs/ \
+rsync -avP myuser@lumi.csc.fi:/projappl/project_462001308/math_kt/runs/ \
     "learning path maths/kt_phase1/modeling/runs/"
 ```
 
@@ -163,5 +193,5 @@ That brings back `comparison.json`, each variant's `best_model.pt`,
 - [ ] `kt_interactions.csv.gz` uploaded to `raw/`
 - [ ] ROCm PyTorch environment set up (container or venv) and `KT_PYTHON` set if using a container wrapper
 - [ ] Multilingual embedding model pre-cached (login node run, or copied `~/.cache/huggingface`)
-- [ ] Real project ID substituted for `project_XXXXXXX`
+- [x] Project ID configured as `project_462001308`
 - [ ] Submitted with `sbatch --account=<project_id> run_lumi.sh` (or edited into the script)

@@ -2,12 +2,12 @@
 # LUMI end-to-end runner for the three math KT variants.
 #
 # Before submitting:
-#   1. Replace project_XXXXXXX below with your real LUMI project ID, OR submit
-#      with: sbatch --account=project_XXXXXXX run_lumi.sh
+#   1. The configured LUMI project ID is project_462001308, OR submit
+#      with: sbatch --account=project_462001308 run_lumi.sh
 #   2. Put this modeling directory in:
-#        /project/<project>/math_kt/code/modeling
+#        /projappl/project_462001308/math_kt/code/modeling
 #   3. Put kt_interactions.csv.gz in:
-#        /project/<project>/math_kt/raw/
+#        /projappl/project_462001308/math_kt/raw/
 #   4. Load/activate a Python environment with torch, numpy, pandas,
 #      scikit-learn, sentence-transformers, and a ROCm-enabled PyTorch build
 #      (LUMI-G uses AMD MI250x GPUs; the device name in PyTorch is still
@@ -15,7 +15,7 @@
 #      environment's python executable (or a container-exec wrapper).
 #
 # Storage layout:
-#   /project/.../math_kt/   persistent: code, raw data, embeddings, checkpoints
+#   /projappl/.../math_kt/   persistent: code, raw data, embeddings, checkpoints
 #   /scratch/.../math_kt/   temporary: copied raw input and prepared sequences
 #
 #SBATCH --job-name=math_kt
@@ -29,12 +29,12 @@
 #SBATCH --output=math_kt_%j.out
 #SBATCH --error=math_kt_%j.err
 # Do not hard-code your account in this file if you prefer:
-# sbatch --account=project_XXXXXXX run_lumi.sh
+# sbatch --account=project_462001308 run_lumi.sh
 
 set -euo pipefail
 
-PROJECT_ID="${KT_PROJECT_ID:-project_XXXXXXX}"
-PROJECT_ROOT="${KT_PROJECT_ROOT:-/project/${PROJECT_ID}/math_kt}"
+PROJECT_ID="${KT_PROJECT_ID:-project_462001308}"
+PROJECT_ROOT="${KT_PROJECT_ROOT:-/projappl/${PROJECT_ID}/math_kt}"
 SCRATCH_ROOT="${KT_SCRATCH_ROOT:-/scratch/${PROJECT_ID}/math_kt}"
 CODE_DIR="${KT_CODE_DIR:-${PROJECT_ROOT}/code/modeling}"
 PYTHON="${KT_PYTHON:-python}"
