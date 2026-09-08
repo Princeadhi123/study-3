@@ -1,0 +1,112 @@
+#!/bin/bash -l
+# LUMI end-to-end runner for the three math KT variants.
+#
+# Before submitting:
+#   1. Replace project_XXXXXXX below with your real LUMI project ID, OR submit
+#      with: sbatch --account=project_XXXXXXX run_lumi.sh
+#   2. Put this modeling directory in:
+#        /project/<project>/math_kt/code/modeling
+#   3. Put kt_interactions.csv.gz in:
+#        /project/<project>/math_kt/raw/
+#   4. Load/activate a Python environment with torch, numpy, pandas,
+#      scikit-learn, sentence-transformers, and a ROCm-enabled PyTorch build
+#      (LUMI-G uses AMD MI250x GPUs; the device name in PyTorch is still
+#      "cuda" -- see LUMI_SETUP.md). You may set KT_PYTHON to the
+#      environment's python executable (or a container-exec wrapper).
+#
+# Storage layout:
+#   /project/.../math_kt/   persistent: code, raw data, embeddings, checkpoints
+#   /scratch/.../math_kt/   temporary: copied raw input and prepared sequences
+#
+#SBATCH --job-name=math_kt
+#SBATCH --partition=small-g
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
+#SBATCH --cpus-per-task=7
+#SBATCH --mem=60G
+#SBATCH --time=1-00:00:00
+#SBATCH --output=math_kt_%j.out
+#SBATCH --error=math_kt_%j.err
+# Do not hard-code your account in this file if you prefer:
+# sbatch --account=project_XXXXXXX run_lumi.sh
+
+set -euo pipefail
+
+PROJECT_ID="${KT_PROJECT_ID:-project_XXXXXXX}"
+PROJECT_ROOT="${KT_PROJECT_ROOT:-/project/${PROJECT_ID}/math_kt}"
+SCRATCH_ROOT="${KT_SCRATCH_ROOT:-/scratch/${PROJECT_ID}/math_kt}"
+CODE_DIR="${KT_CODE_DIR:-${PROJECT_ROOT}/code/modeling}"
+PYTHON="${KT_PYTHON:-python}"
+
+RAW_PROJECT="${PROJECT_ROOT}/raw/kt_interactions.csv.gz"
+RAW_SCRATCH="${SCRATCH_ROOT}/raw/kt_interactions.csv.gz"
+PREP_DIR="${SCRATCH_ROOT}/prepared"
+EMBED_DIR="${PROJECT_ROOT}/embeddings"
+RUNS_DIR="${PROJECT_ROOT}/runs"
+
+if [[ "${PROJECT_ID}" == "project_XXXXXXX" ]]; then
+    echo "Set KT_PROJECT_ID or edit PROJECT_ID before submitting."
+    exit 2
+fi
+if [[ ! -f "${RAW_PROJECT}" ]]; then
+    echo "Missing raw dataset: ${RAW_PROJECT}"
+    exit 2
+fi
+
+mkdir -p "${SCRATCH_ROOT}/raw" "${PREP_DIR}" "${EMBED_DIR}" "${RUNS_DIR}"
+cd "${CODE_DIR}"
+
+# Avoid filling a single Lustre location with a second copy if it is already
+# present from a previous job. Scratch copies can be regenerated at any time.
+if [[ ! -f "${RAW_SCRATCH}" ]]; then
+    cp "${RAW_PROJECT}" "${RAW_SCRATCH}"
+fi
+
+# This is CPU/I/O preparation and runs once. It creates the compact sequence
+# representation used by every model epoch.
+if [[ ! -f "${PREP_DIR}/sequences.jsonl.gz" ]]; then
+    "${PYTHON}" prepare_sequences.py \
+        --source "${RAW_SCRATCH}" \
+        --out-dir "${PREP_DIR}" \
+        --min-interactions 10 \
+        --max-seq-len 400 \
+        --cold-item-fraction 0.05
+fi
+
+# Model C only: multilingual embeddings consume Finnish text directly. The
+# embedding cache is kept in persistent project storage because it is expensive
+# to regenerate and is reusable across training runs.
+if [[ ! -f "${EMBED_DIR}/text_embeddings.npz" ]]; then
+    "${PYTHON}" embed_questions.py \
+        --sequences "${PREP_DIR}/sequences.jsonl.gz" \
+        --out "${EMBED_DIR}/text_embeddings.npz" \
+        --batch-size 512
+fi
+
+COMMON=(
+    --sequences "${PREP_DIR}/sequences.jsonl.gz"
+    --vocab "${PREP_DIR}/vocab.json"
+    --device cuda
+    --epochs 10
+    --batch-size 256
+    --max-seq-len 400
+    --num-workers 2
+)
+
+"${PYTHON}" train.py --variant skill_only \
+    "${COMMON[@]}" --out-dir "${RUNS_DIR}/skill_only"
+
+"${PYTHON}" train.py --variant skill_item \
+    "${COMMON[@]}" --out-dir "${RUNS_DIR}/skill_item"
+
+"${PYTHON}" train.py --variant skill_item_content \
+    "${COMMON[@]}" \
+    --text-embeddings "${EMBED_DIR}/text_embeddings.npz" \
+    --out-dir "${RUNS_DIR}/skill_item_content"
+
+"${PYTHON}" compare_runs.py \
+    --runs-dir "${RUNS_DIR}" \
+    --out "${RUNS_DIR}/comparison.json"
+
+printf '\nCompleted. Results are in %s\n' "${RUNS_DIR}"

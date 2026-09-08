@@ -1,8 +1,36 @@
 # Research data - never commit (student data, GDPR)
+DigiArvi data/
 Final datasets to Prince/
+chemistry data/
+chemistry_kt_dataset/
+chemistry_excel/
+eedi_data/
 Item map DA 2026 Final.xlsx
+
+# Generated KT datasets and diagnostic exports
 kt_dataset/*.csv
 
-# misc
+# Python caches
 __pycache__/
 *.pyc
+
+# Misconception-tagging embedding cache (derived, regenerable)
+misconception_cache/
+
+# Secrets
+.env
+
+# Learning-path mathematics research data (student data - never commit)
+learning path maths/*.csv
+learning path maths/*.csv.gz
+learning path maths/*.xlsx
+learning path maths/kt_phase1/data/
+learning path maths/kt_phase1/reports/
+
+# Learning-path generated sequence data, embeddings, checkpoints, and run logs
+learning path maths/kt_phase1/modeling/prepared/
+learning path maths/kt_phase1/modeling/runs/
+learning path maths/kt_phase1/modeling/embeddings/
+learning path maths/kt_phase1/modeling/*.out
+learning path maths/kt_phase1/modeling/*.err
+learning path maths/kt_phase1/modeling/*.log

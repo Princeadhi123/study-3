@@ -1,0 +1,133 @@
+# Math-path KT models: three variants
+
+Trains and compares three input configurations of the same causal
+Transformer KT architecture (SAKT/DKT-style) on the cleaned item-level math
+interactions in `kt_phase1/data/kt_interactions.csv.gz`.
+
+| Variant | Inputs | File |
+|---|---|---|
+| A `skill_only` | `skill_id` + correctness history | shared `model.py` |
+| B `skill_item` | + `item_id` (`ExerciseId + PreOrd`), response time, attempt number | shared `model.py` |
+| C `skill_item_content` | + frozen multilingual sentence embedding of the raw Finnish question `text` | shared `model.py` |
+
+All three share one architecture (`KTTransformer` in `model.py`); only the
+active input features differ, so any performance difference between runs is
+attributable to the added features, not to a different model family.
+
+## On Finnish text — no translation needed
+
+Model C embeds the raw Finnish/DSL `text` field directly with a multilingual
+sentence-transformer (`paraphrase-multilingual-MiniLM-L12-v2` by default).
+Multilingual embedding models are trained so that semantically similar
+content in different languages lands in a shared vector space, so no
+Finnish-to-English translation step is required for training. Translation is
+only useful later, for human-readable feedback/reporting, not for this model.
+
+## Files
+
+- `prepare_sequences.py` — reads `kt_interactions.csv.gz`, builds per-student
+  chronological sequences, builds skill/item vocabularies, and assigns each
+  interaction to `train` / `val` / `test_warm` / `test_cold_item` (see below).
+- `embed_questions.py` — one-time step, only needed for variant C. Embeds
+  every unique `text` value with a multilingual sentence-transformer.
+  Requires internet on first run to download the model from Hugging Face;
+  cache it once and copy `~/.cache/huggingface` across if compute nodes have
+  no internet.
+- `dataset.py` — PyTorch `Dataset`; turns each student into one fixed-length,
+  right-padded, causally-ordered sequence.
+- `model.py` — the shared `KTTransformer` architecture and `build_model()`
+  factory for the three variants.
+- `train.py` — trains one variant, evaluates every epoch, saves the best
+  checkpoint (by validation AUC) and full metric history.
+- `compare_runs.py` — after training all three, prints a side-by-side AUC
+  comparison table and writes `runs/comparison.json`.
+- `run_all_variants.sh` — SLURM-style script that runs the full pipeline
+  end-to-end on the supercomputer; adapt the `#SBATCH` header to your cluster.
+
+## Evaluation splits (why there are four, not two)
+
+Each student's own chronological history is split by time:
+
+- `train` — first ~70% of that student's interactions.
+- `val` — next ~15%, used for early-stopping / model selection.
+- `test_warm` — final ~15%, the model's ordinary held-out future.
+- `test_cold_item` — a randomly chosen 5% of `item_id`s are removed from
+  `train` *entirely* (wherever they occur in time). Any occurrence of one of
+  these items in a student's val/test range is scored separately as
+  `test_cold_item`; any occurrence in the train range is excluded from loss
+  entirely (`skip_cold_in_train`, never trained on).
+
+This directly tests the concern raised earlier: since only ~10% of exact
+question instances repeat more than twice, `test_cold_item` measures whether
+the model actually generalizes to items/questions it never trained on, rather
+than just memorizing frequently-seen `item_id`s. Compare `test_cold_item` AUC
+across A/B/C — that comparison is the main point of building variant C.
+
+## Running
+
+### Local smoke test (CPU, a few minutes, sanity-check only)
+
+```bash
+cd kt_phase1/modeling
+python prepare_sequences.py --limit-rows 300000 --min-interactions 15 \
+    --max-seq-len 100 --out-dir prepared_smoke
+python train.py --variant skill_only --sequences prepared_smoke/sequences.jsonl.gz \
+    --vocab prepared_smoke/vocab.json --out-dir runs_smoke/skill_only \
+    --max-seq-len 100 --epochs 2 --batch-size 32 --device cpu --num-workers 0
+```
+
+Repeat for `skill_item` and (after running `embed_questions.py` on the smoke
+sequences) `skill_item_content`. This has already been verified to run
+end-to-end without errors and produce sane metrics (AUC ~0.78-0.83 on a
+300k-row/585-student subset — not meaningful on its own, just confirms the
+pipeline works).
+
+### Full run on the supercomputer
+
+```bash
+cd kt_phase1/modeling
+sbatch run_all_variants.sh
+# or, inside an interactive GPU allocation:
+bash run_all_variants.sh
+```
+
+This runs data prep once (full 13.1M rows, all 27,433 students), embeds
+question text once, trains all three variants for 30 epochs each on GPU, and
+prints the comparison table.
+
+### Adjusting scale
+
+`--max-seq-len 400` keeps each student's most recent 400 interactions
+(median student has 243 total interactions, so this covers most students in
+full; heavy users are truncated to their most recent activity). Increase it
+if you have GPU memory to spare and want longer histories for the small
+number of students with 1,000+ interactions.
+
+## Reading the results
+
+`compare_runs.py` reports, per variant, the epoch with the best validation
+AUC, plus `test_warm` and `test_cold_item` AUC for that same epoch:
+
+```text
+variant                  val_auc   test_warm_auc   test_cold_auc
+----------------------------------------------------------------
+skill_only               ...           ...             ...
+skill_item               ...           ...             ...
+skill_item_content       ...           ...             ...
+```
+
+Interpretation guide (matches the plan discussed earlier):
+
+- If B beats A on `test_warm` but not on `test_cold_item`, item IDs help for
+  seen items but don't generalize — expected, since `item_id` is a bare
+  categorical lookup.
+- If C beats both A and B on `test_cold_item`, question content is carrying
+  real generalization signal, and is the right foundation for live
+  simulation (new generated questions won't have a trained `item_id` either,
+  but do have text).
+- If all three are close, the skill-only model (simplest, cheapest) is the
+  right choice for production, and the added complexity of B/C isn't paying
+  for itself yet.
+
+Do not pick a "winner" from `val`/`test_warm` alone — `test_cold_item` is the
+metric that actually answers the original generalization question.
