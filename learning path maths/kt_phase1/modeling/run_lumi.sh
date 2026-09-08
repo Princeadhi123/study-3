@@ -38,7 +38,10 @@ PROJECT_ROOT="${KT_PROJECT_ROOT:-/projappl/${PROJECT_ID}/math_kt}"
 SCRATCH_ROOT="${KT_SCRATCH_ROOT:-/scratch/${PROJECT_ID}/math_kt}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CODE_DIR="${KT_CODE_DIR:-${SCRIPT_DIR}}"
-PYTHON="${KT_PYTHON:-python}"
+# LUMI-G software environment: AMD ROCm GPU + Python.
+module load cray-python/3.11.7
+module load rocm/6.2.4
+PYTHON="${KT_PYTHON:-/projappl/project_462001308/math_kt/mathkt-env/bin/python}"
 
 RAW_PROJECT="${PROJECT_ROOT}/raw/kt_interactions.csv.gz"
 RAW_SCRATCH="${SCRATCH_ROOT}/raw/kt_interactions.csv.gz"
@@ -57,6 +60,13 @@ fi
 
 mkdir -p "${SCRATCH_ROOT}/raw" "${PREP_DIR}" "${EMBED_DIR}" "${RUNS_DIR}"
 cd "${CODE_DIR}"
+
+if [[ ! -x "${PYTHON}" ]]; then
+    echo "Python executable not found: ${PYTHON}"
+    echo "Create /projappl/project_462001308/math_kt/mathkt-env or set KT_PYTHON."
+    exit 2
+fi
+"${PYTHON}" -c "import torch; print('PyTorch:', torch.__version__); print('GPU available:', torch.cuda.is_available()); assert torch.cuda.is_available(), 'ROCm GPU is not available'"
 
 # Avoid filling a single Lustre location with a second copy if it is already
 # present from a previous job. Scratch copies can be regenerated at any time.

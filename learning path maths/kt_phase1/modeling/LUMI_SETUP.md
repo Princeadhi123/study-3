@@ -130,18 +130,30 @@ export KT_PYTHON="$(pwd)/run_python_in_container.sh"
 (`$SIF_PATH` is the path to the container image; `module spider PyTorch` /
 LUMI's documentation gives the current recommended one and load command.)
 
-### Option B: a plain virtual environment with ROCm PyTorch
+### Option B: project virtual environment with ROCm PyTorch
+
+The runner is configured for the ROCm version available on your LUMI system:
+`rocm/6.2.4`. Create the environment once in persistent project storage:
 
 ```bash
-module load cray-python
-python -m venv ~/mathkt-env
-source ~/mathkt-env/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
-pip install numpy pandas scikit-learn sentence-transformers
+module load cray-python/3.11.7
+module load rocm/6.2.4
+python -m venv /projappl/project_462001308/math_kt/mathkt-env
+source /projappl/project_462001308/math_kt/mathkt-env/bin/activate
+python -m pip install --upgrade pip
+python -m pip install torch --index-url https://download.pytorch.org/whl/rocm6.2.4
+python -m pip install numpy pandas scikit-learn sentence-transformers
 ```
 
-Check the currently supported ROCm version on LUMI (`module avail rocm`) and
-match the PyTorch ROCm wheel version to it.
+Verify imports:
+
+```bash
+python -c "import torch; print(torch.__version__)"
+python -c "import numpy, pandas, sklearn, sentence_transformers; print('All packages OK')"
+```
+
+The checked-in `run_lumi.sh` loads `cray-python/3.11.7` and `rocm/6.2.4`
+automatically and uses this project virtual environment by default.
 
 **Either way, `--device cuda` in the scripts is still correct** — ROCm's
 PyTorch build keeps the `cuda` device name and `torch.cuda.is_available()`
