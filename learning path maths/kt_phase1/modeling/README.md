@@ -63,6 +63,27 @@ the model actually generalizes to items/questions it never trained on, rather
 than just memorizing frequently-seen `item_id`s. Compare `test_cold_item` AUC
 across A/B/C — that comparison is the main point of building variant C.
 
+**Important:** none of these four splits hold out *students* — the same
+student's own history is cut into train/val/test_warm chronologically, so
+val/test_warm are "unseen" only in the sense of "later in time for that
+student", not "never touched this student/skill/item before". `test_cold_item`
+is the only split that is unseen in a stronger sense (a whole `item_id`,
+regardless of where it falls in time). If you need a fully cold-start-student
+evaluation (a model that has *never* seen the student either), that would
+require an additional student-level split, which this pipeline does not
+currently produce.
+
+**Cold items are excluded from `item_vocab`, not merely excluded from
+training loss.** They always resolve to `__UNK__` (index 1) in `skill_item`
+and `skill_item_content`. This matters: earlier versions of this pipeline
+gave every cold item its own vocab slot, whose embedding row was never a
+training target and therefore stayed at its random initialization forever —
+i.e. it injected untrained noise into the interaction/query features
+whenever a cold item appeared, artificially depressing `test_cold_item` AUC
+for the item-aware variants relative to `skill_only` (which never touches
+`item_id` at all). Routing cold items to `__UNK__` fixes that and also
+matches how a genuinely novel item would be handled at inference time.
+
 ## Running
 
 ### Local smoke test (CPU, a few minutes, sanity-check only)
@@ -105,16 +126,30 @@ number of students with 1,000+ interactions.
 
 ## Reading the results
 
-`compare_runs.py` reports, per variant, the epoch with the best validation
-AUC, plus `test_warm` and `test_cold_item` AUC for that same epoch:
+`train.py` now saves **two** checkpoints per variant, because "best" depends
+on which question you're asking:
+
+- `best_model.pt` — the epoch with the best `val` AUC (standard early
+  stopping; best pick for ordinary warm-item deployment).
+- `best_model_cold.pt` — the epoch with the best `test_cold_item` AUC (not
+  necessarily the same epoch as above; best pick if what you care about is
+  generalization to never-before-seen items/questions).
+
+`best_epochs.json` in each run directory records both. `compare_runs.py`
+reports, per variant, both views side by side:
 
 ```text
-variant                  val_auc   test_warm_auc   test_cold_auc
-----------------------------------------------------------------
-skill_only               ...           ...             ...
-skill_item               ...           ...             ...
-skill_item_content       ...           ...             ...
+variant                  val_auc   test_warm_auc   test_cold_auc  |  best_cold_auc   (epoch)
+----------------------------------------------------------------------------------------------
+skill_only               ...           ...             ...            ...             ...
+skill_item                ...           ...             ...            ...             ...
+skill_item_content       ...           ...             ...            ...             ...
 ```
+
+The left three columns are all evaluated at the val-selected epoch (as
+before); `best_cold_auc`/`(epoch)` is the best `test_cold_item` AUC reached
+at *any* epoch for that variant, showing its generalization ceiling even if
+that's not the epoch you'd deploy from val alone.
 
 Interpretation guide (matches the plan discussed earlier):
 

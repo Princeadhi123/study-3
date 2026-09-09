@@ -1,0 +1,19 @@
+{
+  "variant": "skill_item",
+  "sequences": "/scratch/project_462001308/math_kt/prepared/sequences.jsonl.gz",
+  "vocab": "/scratch/project_462001308/math_kt/prepared/vocab.json",
+  "text_embeddings": "/pfs/lustrep1/projappl/project_462001308/math_kt/code/study-3/learning path maths/kt_phase1/modeling/prepared/text_embeddings.npz",
+  "out_dir": "/projappl/project_462001308/math_kt/runs/skill_item",
+  "max_seq_len": 400,
+  "d_model": 128,
+  "n_heads": 4,
+  "n_layers": 2,
+  "dropout": 0.2,
+  "batch_size": 256,
+  "epochs": 30,
+  "lr": 0.001,
+  "weight_decay": 1e-05,
+  "device": "cuda",
+  "num_workers": 2,
+  "seed": 42
+}

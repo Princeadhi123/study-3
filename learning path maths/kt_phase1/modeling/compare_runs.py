@@ -22,11 +22,20 @@ def parse_args():
     return p.parse_args()
 
 
-def best_epoch_by_val_auc(history):
-    scored = [h for h in history if h["eval"].get("val", {}).get("auc") is not None]
+def best_epoch_by(history, split, metric="auc"):
+    scored = [h for h in history if h["eval"].get(split, {}).get(metric) is not None]
     if not scored:
         return None
-    return max(scored, key=lambda h: h["eval"]["val"]["auc"])
+    return max(scored, key=lambda h: h["eval"][split][metric])
+
+
+def _epoch_summary(best):
+    return {
+        "epoch": best["epoch"],
+        "val": {m: best["eval"]["val"].get(m) for m in METRICS},
+        "test_warm": {m: best["eval"]["test_warm"].get(m) for m in METRICS},
+        "test_cold_item": {m: best["eval"]["test_cold_item"].get(m) for m in METRICS},
+    }
 
 
 def main():
@@ -39,21 +48,28 @@ def main():
             summary[variant] = {"status": "not_trained_yet"}
             continue
         history = json.loads(history_path.read_text(encoding="utf-8"))
-        best = best_epoch_by_val_auc(history)
-        if best is None:
+        # Two views of the same run: "by_val" is the standard early-stopping
+        # choice (best for ordinary warm-item deployment); "by_cold" picks
+        # the epoch that generalizes best to never-before-seen items, which
+        # is the metric that actually answers the A/B/C question (see
+        # README) -- the two need not be the same epoch.
+        best_val = best_epoch_by(history, "val")
+        best_cold = best_epoch_by(history, "test_cold_item")
+        if best_val is None:
             summary[variant] = {"status": "no_valid_epoch"}
             continue
-        summary[variant] = {
-            "status": "ok",
-            "best_epoch": best["epoch"],
-            "val": {m: best["eval"]["val"].get(m) for m in METRICS},
-            "test_warm": {m: best["eval"]["test_warm"].get(m) for m in METRICS},
-            "test_cold_item": {m: best["eval"]["test_cold_item"].get(m) for m in METRICS},
-        }
+        entry = {"status": "ok", "by_val": _epoch_summary(best_val)}
+        # Keep legacy top-level keys (best_epoch/val/test_warm/test_cold_item)
+        # for backwards compatibility with anything reading the old format.
+        entry.update({"best_epoch": best_val["epoch"], **{k: v for k, v in _epoch_summary(best_val).items() if k != "epoch"}})
+        if best_cold is not None:
+            entry["by_cold"] = _epoch_summary(best_cold)
+        summary[variant] = entry
 
     Path(args.out).write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    header = f"{'variant':<22}{'val_auc':>10}{'test_warm_auc':>16}{'test_cold_auc':>16}"
+    header = (f"{'variant':<22}{'val_auc':>10}{'test_warm_auc':>16}{'test_cold_auc':>16}"
+              f"{'  |  best_cold_auc':>18}{'(epoch)':>10}")
     print(header)
     print("-" * len(header))
     for variant in VARIANTS:
@@ -61,7 +77,14 @@ def main():
         if s.get("status") != "ok":
             print(f"{variant:<22}{s['status']:>10}")
             continue
-        print(f"{variant:<22}{s['val']['auc']:>10.4f}{s['test_warm']['auc']:>16.4f}{s['test_cold_item']['auc']:>16.4f}")
+        bv = s["by_val"]
+        bc = s.get("by_cold")
+        cold_col = f"{bc['test_cold_item']['auc']:>18.4f}{bc['epoch']:>10d}" if bc else f"{'n/a':>18}{'':>10}"
+        print(f"{variant:<22}{bv['val']['auc']:>10.4f}{bv['test_warm']['auc']:>16.4f}"
+              f"{bv['test_cold_item']['auc']:>16.4f}{cold_col}")
+    print("\n(best_cold_auc/epoch = best test_cold_item AUC reached at ANY epoch for that "
+          "variant, not necessarily the val-selected epoch -- shows the generalization "
+          "ceiling of each variant.)")
     print(f"\nWrote {args.out}")
 
 

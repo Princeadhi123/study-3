@@ -151,7 +151,8 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     history = []
-    best_val_auc = -1.0
+    best_val_auc, best_val_epoch = -1.0, None
+    best_cold_auc, best_cold_epoch = -1.0, None
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_stats = run_epoch(model, loader, device, content_vectors, optimizer=optimizer)
@@ -159,17 +160,34 @@ def main():
                                 eval_splits=["val", "test_warm", "test_cold_item"])
         elapsed = time.time() - t0
         val_auc = eval_stats.get("val", {}).get("auc", -1.0)
+        cold_auc = eval_stats.get("test_cold_item", {}).get("auc", -1.0)
         record = {"epoch": epoch, "elapsed_sec": round(elapsed, 1), **train_stats, "eval": eval_stats}
         history.append(record)
         print(json.dumps(record, indent=2), flush=True)
 
+        # Two checkpoints are kept because they answer different questions:
+        # best_model.pt (by val AUC) is the standard early-stopping choice,
+        # good for ordinary warm-item deployment. best_model_cold.pt (by
+        # test_cold_item AUC) is the checkpoint that generalizes best to
+        # never-before-seen items/questions, which is the actual question
+        # this A/B/C comparison is meant to answer (see README) -- the two
+        # need not be the same epoch.
         if val_auc > best_val_auc:
-            best_val_auc = val_auc
+            best_val_auc, best_val_epoch = val_auc, epoch
             torch.save(model.state_dict(), out_dir / "best_model.pt")
+        if cold_auc > best_cold_auc:
+            best_cold_auc, best_cold_epoch = cold_auc, epoch
+            torch.save(model.state_dict(), out_dir / "best_model_cold.pt")
 
     (out_dir / "training_history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
-    print(f"Best val AUC: {best_val_auc:.4f}. Wrote outputs to {out_dir}")
+    (out_dir / "best_epochs.json").write_text(json.dumps({
+        "best_val_epoch": best_val_epoch, "best_val_auc": best_val_auc,
+        "best_cold_epoch": best_cold_epoch, "best_cold_auc": best_cold_auc,
+    }, indent=2), encoding="utf-8")
+    print(f"Best val AUC: {best_val_auc:.4f} (epoch {best_val_epoch}). "
+          f"Best test_cold_item AUC: {best_cold_auc:.4f} (epoch {best_cold_epoch}). "
+          f"Wrote outputs to {out_dir}")
 
 
 if __name__ == "__main__":

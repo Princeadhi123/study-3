@@ -92,20 +92,34 @@ def main():
     print(f"Read {rows_read:,} rows for {len(students):,} students, "
           f"{len(skill_ids):,} skills, {len(item_ids):,} items", flush=True)
 
-    # ---- vocabularies (index 0 reserved as PAD, 1 as UNK) ---
-    skill_vocab = {"__PAD__": 0, "__UNK__": 1}
-    for s in sorted(skill_ids):
-        skill_vocab[s] = len(skill_vocab)
-    item_vocab = {"__PAD__": 0, "__UNK__": 1}
-    for it in sorted(item_ids):
-        item_vocab[it] = len(item_vocab)
-
     # ---- choose cold items: held out of train entirely ---
+    # This MUST happen before building item_vocab (see below): cold items must
+    # never get their own trained embedding row.
     all_items_sorted = sorted(item_ids)
     random.shuffle(all_items_sorted)
     n_cold = int(len(all_items_sorted) * args.cold_item_fraction)
     cold_items = set(all_items_sorted[:n_cold])
     print(f"Cold-item holdout: {len(cold_items):,} / {len(item_ids):,} items", flush=True)
+
+    # ---- vocabularies (index 0 reserved as PAD, 1 as UNK) ---
+    # Cold items are deliberately EXCLUDED from item_vocab, so they always
+    # resolve to __UNK__ (index 1). If they got their own vocab slot instead,
+    # that embedding row would never receive a gradient update (every
+    # occurrence of a cold item is either skipped during training or scored
+    # in a held-out eval split, never used as a training target) and would
+    # sit at its random initialization forever -- i.e. it would inject
+    # untrained noise into both the "previous interaction" input and the
+    # "query" features every time a cold item appears, artificially
+    # depressing test_cold_item performance for any variant that uses
+    # item_id (skill_item, skill_item_content) relative to skill_only, which
+    # doesn't use item_id at all. Routing cold items to UNK instead matches
+    # how a genuinely novel item would be handled at inference time.
+    skill_vocab = {"__PAD__": 0, "__UNK__": 1}
+    for s in sorted(skill_ids):
+        skill_vocab[s] = len(skill_vocab)
+    item_vocab = {"__PAD__": 0, "__UNK__": 1}
+    for it in sorted(item_ids - cold_items):
+        item_vocab[it] = len(item_vocab)
 
     # ---- filter students by minimum length, then assign time-based splits ---
     kept, dropped_short = 0, 0
@@ -166,8 +180,9 @@ def main():
         "min_interactions": args.min_interactions,
         "max_seq_len_reference": args.max_seq_len,
         "n_skills": len(skill_vocab) - 2,
-        "n_items": len(item_vocab) - 2,
+        "n_items_trainable": len(item_vocab) - 2,
         "n_cold_items": len(cold_items),
+        "n_items_total": len(item_ids),
         "split_event_counts": dict(split_counts),
         "notes": [
             "'skip_cold_in_train' events are interactions on a cold-holdout item that would "
@@ -176,6 +191,9 @@ def main():
             "'test_cold_item' events are interactions on a held-out item that occurred in the "
             "val/test time range for that student -- used to measure generalization to unseen items.",
             "'test_warm' events are the model's normal held-out future interactions for known items/skills.",
+            "Cold items are NOT in item_vocab (n_items_trainable excludes them) -- they always "
+            "resolve to __UNK__ (index 1) wherever they occur, so their item embedding is never "
+            "an untrained/random row polluting the interaction or query features.",
         ],
     }
     (out_dir / "split_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
