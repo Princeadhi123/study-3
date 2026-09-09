@@ -26,8 +26,10 @@ only useful later, for human-readable feedback/reporting, not for this model.
 ## Files
 
 - `prepare_sequences.py` — reads `kt_interactions.csv.gz`, builds per-student
-  chronological sequences, builds skill/item vocabularies, and assigns each
-  interaction to `train` / `val` / `test_warm` / `test_cold_item` (see below).
+  chronological sequences, builds skill/item vocabularies, assigns each
+  interaction to `train` / `val` / `test_warm` / `test_cold_item` (see below),
+  and splits students longer than `--max-seq-len` into multiple overlapping
+  windows so no interactions are discarded (see "Adjusting scale" below).
 - `embed_questions.py` — one-time step, only needed for variant C. Embeds
   every unique `text` value with a multilingual sentence-transformer.
   Requires internet on first run to download the model from Hugging Face;
@@ -118,11 +120,30 @@ prints the comparison table.
 
 ### Adjusting scale
 
-`--max-seq-len 400` keeps each student's most recent 400 interactions
-(median student has 243 total interactions, so this covers most students in
-full; heavy users are truncated to their most recent activity). Increase it
-if you have GPU memory to spare and want longer histories for the small
-number of students with 1,000+ interactions.
+`--max-seq-len 400` is the model's fixed attention window, not a hard cap on
+how much of a student's history gets used. On the full dataset, median
+student length is 231 interactions, but the distribution has a long tail:
+34% of students (9,453 of 27,433) have **more** than 400 interactions, and
+they account for 80% of all interactions. `prepare_sequences.py` splits any
+student longer than `--max-seq-len` into multiple overlapping chronological
+windows (see `chunk_student_events`) instead of keeping only their most
+recent `max-seq-len` events — naively truncating like that would have
+discarded 51% of the entire dataset (6.7M of 13.1M rows), overwhelmingly
+from the `train` range of exactly the students who generate the most data.
+
+Each window after the first overlaps the previous one by
+`--context-overlap-frac` (default 25%) of `max-seq-len`, so a window's early
+positions have real prior history to attend to (marked `split="context"`,
+excluded from loss/eval) instead of being wrongly treated as the very start
+of that student's history. Every real interaction contributes to train/eval
+exactly once, in whichever window it's "new" in.
+
+Raising `--max-seq-len` reduces how many students need to be split into
+multiple windows (fewer, more expensive windows per long-history student) at
+the cost of GPU memory (attention is O(T²)); raising `--context-overlap-frac`
+gives long-history windows more real context per prediction at the cost of
+more (non-loss-contributing) compute per epoch. `--max-seq-len` passed to
+`prepare_sequences.py` and `train.py` must match — they are the same window.
 
 ## Reading the results
 

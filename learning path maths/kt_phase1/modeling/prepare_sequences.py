@@ -38,8 +38,16 @@ def parse_args():
     p.add_argument("--min-interactions", type=int, default=10,
                    help="Drop students with fewer than this many valid interactions.")
     p.add_argument("--max-seq-len", type=int, default=400,
-                   help="Truncate to the most recent N interactions per student "
-                        "(applied at training time too; stored here for reference).")
+                   help="Window size: students with more than this many interactions are "
+                        "split into multiple overlapping chronological windows (see "
+                        "chunk_student_events) rather than truncated, so no interactions "
+                        "are discarded. Must match --max-seq-len passed to train.py.")
+    p.add_argument("--context-overlap-frac", type=float, default=0.25,
+                   help="Fraction of --max-seq-len used as pure attention context "
+                        "(overlap) between consecutive windows for students who need "
+                        "more than one window. Higher = more real history available to "
+                        "each window's predictions, at the cost of more (redundant, "
+                        "non-loss-contributing) compute per epoch.")
     p.add_argument("--cold-item-fraction", type=float, default=0.05,
                    help="Fraction of item_ids removed from train entirely, to test "
                         "generalization to never-before-seen items.")
@@ -56,6 +64,59 @@ def safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def chunk_student_events(record_events, window_size, context_frac):
+    """Split one student's full chronological event list into one or more
+    overlapping windows of at most `window_size` events each.
+
+    Why: the model architecture (fixed causal self-attention window) and
+    training-time batching need a bounded sequence length, but simply
+    keeping each student's *last* `window_size` events and discarding the
+    rest throws away the vast majority of the data for students with long
+    histories -- on the full dataset, 34% of students have more than 400
+    interactions, and truncating to 400 discards 51% of ALL interactions
+    (10.5M of 13.1M rows), overwhelmingly from the early portion of long
+    students' histories, which is exactly the `train` range for most of
+    them. Chunking instead of truncating means every interaction is used.
+
+    Each window after the first overlaps the previous one by
+    `window_size * context_frac` events. Events in the overlapping region
+    are marked with split="context": they are still fed through the model
+    (so later positions in the window have real prior history to attend to,
+    instead of a fresh, wrong "this is the start of the sequence" signal)
+    but are excluded from training loss and eval metrics in every window
+    except the one where they were originally the "new" event -- so nothing
+    is double-counted.
+    """
+    n = len(record_events)
+    if n <= window_size:
+        return [record_events]
+
+    context_size = min(max(1, int(window_size * context_frac)), window_size - 1)
+    stride = window_size - context_size
+
+    chunks = []
+    covered_upto = 0
+    start = 0
+    while True:
+        end = min(start + window_size, n)
+        chunk = []
+        for j in range(start, end):
+            ev = dict(record_events[j])
+            if j < covered_upto:
+                ev["split"] = "context"
+            chunk.append(ev)
+        chunks.append(chunk)
+        covered_upto = max(covered_upto, end)
+        if end >= n:
+            break
+        start += stride
+        if n - start < window_size:
+            # Snap the final window so it ends exactly at n (full-length
+            # where possible) instead of leaving a small dangling window.
+            start = max(0, n - window_size)
+    return chunks
 
 
 def main():
@@ -123,6 +184,7 @@ def main():
 
     # ---- filter students by minimum length, then assign time-based splits ---
     kept, dropped_short = 0, 0
+    students_chunked, chunks_written = 0, 0
     split_counts = defaultdict(int)
     seq_path = out_dir / "sequences.jsonl.gz"
     with gzip.open(seq_path, "wt", encoding="utf-8") as out_f:
@@ -153,7 +215,6 @@ def main():
                 # so the model never trains on it.
                 if ev["item"] in cold_items:
                     split = "test_cold_item" if split != "train" else "skip_cold_in_train"
-                split_counts[split] += 1
                 record_events.append({
                     "skill": skill_vocab.get(ev["skill"], 1),
                     "item": item_vocab.get(ev["item"], 1),
@@ -165,7 +226,16 @@ def main():
                     "t": ev["t"],
                     "split": split,
                 })
-            out_f.write(json.dumps({"student_id": student_id, "events": record_events}) + "\n")
+
+            chunks = chunk_student_events(record_events, args.max_seq_len, args.context_overlap_frac)
+            if len(chunks) > 1:
+                students_chunked += 1
+            chunks_written += len(chunks)
+            for w, chunk in enumerate(chunks):
+                for ev in chunk:
+                    split_counts[ev["split"]] += 1
+                out_id = student_id if len(chunks) == 1 else f"{student_id}#w{w}"
+                out_f.write(json.dumps({"student_id": out_id, "events": chunk}) + "\n")
 
     (out_dir / "vocab.json").write_text(
         json.dumps({"skill_vocab": skill_vocab, "item_vocab": item_vocab}, ensure_ascii=False, indent=2),
@@ -178,7 +248,10 @@ def main():
         "students_kept": kept,
         "students_dropped_too_short": dropped_short,
         "min_interactions": args.min_interactions,
-        "max_seq_len_reference": args.max_seq_len,
+        "max_seq_len_window": args.max_seq_len,
+        "context_overlap_frac": args.context_overlap_frac,
+        "students_needing_multiple_windows": students_chunked,
+        "sequence_records_written": chunks_written,
         "n_skills": len(skill_vocab) - 2,
         "n_items_trainable": len(item_vocab) - 2,
         "n_cold_items": len(cold_items),
@@ -194,6 +267,13 @@ def main():
             "Cold items are NOT in item_vocab (n_items_trainable excludes them) -- they always "
             "resolve to __UNK__ (index 1) wherever they occur, so their item embedding is never "
             "an untrained/random row polluting the interaction or query features.",
+            "Students with more than max_seq_len_window interactions are split into multiple "
+            "overlapping windows (one 'sequence_records_written' row each) instead of being "
+            "truncated to their most recent max_seq_len_window events, so no interactions are "
+            "discarded. 'context' events are the overlapping lead-in of a later window: they "
+            "give the model real prior history to attend to but are excluded from training "
+            "loss and eval metrics (their original split already counted them in an earlier "
+            "window), so nothing is double-counted.",
         ],
     }
     (out_dir / "split_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

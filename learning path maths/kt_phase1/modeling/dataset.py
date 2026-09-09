@@ -18,6 +18,11 @@ from torch.utils.data import Dataset
 
 SPLIT_CODE = {
     "train": 0, "val": 1, "test_warm": 2, "test_cold_item": 3, "skip_cold_in_train": 4,
+    # Overlapping lead-in events from prepare_sequences.py's window chunking for
+    # students with more than max_seq_len interactions: real history the model
+    # can attend to, but excluded from loss/eval (same treatment as
+    # skip_cold_in_train -- present, but never a train or eval target).
+    "context": 5,
 }
 PAD_SPLIT = -1
 
@@ -60,6 +65,14 @@ class KTSequenceDataset(Dataset):
         # poisons later positions in the next encoder layer via a 0-weight *
         # NaN-value product. Right-padding guarantees every real position's
         # causal window contains only real (unmasked) earlier positions.
+        #
+        # Each record is already <= max_seq_len events long (prepare_sequences.py
+        # splits long students into multiple overlapping windows rather than
+        # producing over-length records), so this slice is normally a no-op.
+        # It's kept as a defensive fallback -- if this `max_seq_len` doesn't
+        # match the one used to build `sequences_path`, this silently
+        # truncates instead of erroring, so always pass matching values to
+        # prepare_sequences.py and train.py.
         events = self.records[idx]["events"][-self.max_seq_len:]
         n = len(events)
 

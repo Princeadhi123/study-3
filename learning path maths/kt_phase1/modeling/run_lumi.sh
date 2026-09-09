@@ -47,7 +47,12 @@ PYTHON="${KT_PYTHON:-/projappl/project_462001308/math_kt/mathkt-env/bin/python}"
 
 RAW_PROJECT="${PROJECT_ROOT}/raw/kt_interactions.csv.gz"
 RAW_SCRATCH="${SCRATCH_ROOT}/raw/kt_interactions.csv.gz"
-PREP_DIR="${SCRATCH_ROOT}/prepared"
+MAX_SEQ_LEN="${KT_MAX_SEQ_LEN:-400}"
+CONTEXT_OVERLAP_FRAC="${KT_CONTEXT_OVERLAP_FRAC:-0.25}"
+# Include preprocessing settings in the directory name so a rerun cannot
+# accidentally reuse a sequences.jsonl.gz produced by the old truncation
+# pipeline (or by a different window/overlap configuration).
+PREP_DIR="${KT_PREP_DIR:-${SCRATCH_ROOT}/prepared_w${MAX_SEQ_LEN}_o${CONTEXT_OVERLAP_FRAC//./p}}"
 EMBED_DIR="${PROJECT_ROOT}/embeddings"
 RUNS_DIR="${PROJECT_ROOT}/runs"
 
@@ -77,13 +82,17 @@ if [[ ! -f "${RAW_SCRATCH}" ]]; then
 fi
 
 # This is CPU/I/O preparation and runs once. It creates the compact sequence
-# representation used by every model epoch.
+# representation used by every model epoch. --max-seq-len here MUST match
+# --max-seq-len in COMMON below: it's the window size that long students get
+# chunked into (see chunk_student_events in prepare_sequences.py), not a
+# truncation length, so no interactions are silently dropped.
 if [[ ! -f "${PREP_DIR}/sequences.jsonl.gz" ]]; then
     "${PYTHON}" prepare_sequences.py \
         --source "${RAW_SCRATCH}" \
         --out-dir "${PREP_DIR}" \
         --min-interactions 10 \
-        --max-seq-len 400 \
+        --max-seq-len "${MAX_SEQ_LEN}" \
+        --context-overlap-frac "${CONTEXT_OVERLAP_FRAC}" \
         --cold-item-fraction 0.05
 fi
 
@@ -103,7 +112,7 @@ COMMON=(
     --device cuda
     --epochs 30
     --batch-size 256
-    --max-seq-len 400
+    --max-seq-len "${MAX_SEQ_LEN}"
     --num-workers 2
 )
 
