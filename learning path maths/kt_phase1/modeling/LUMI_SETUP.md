@@ -198,10 +198,16 @@ tail -f math_kt_<jobid>.out
 
 1. Copies `raw/kt_interactions.csv.gz` from `/project` to `/scratch` (only if
    not already copied — safe to resubmit).
-2. Runs `prepare_sequences.py` once into `/scratch/.../prepared/` (the
-   compact per-student sequence format all three models train from).
+2. Runs `prepare_sequences.py` once into `/scratch/.../prepared_w<max-seq-len>_o<context-overlap-frac>/`
+   (the directory name encodes those two settings so a rerun with different
+   values can't silently reuse a stale/incompatible `sequences.jsonl.gz`;
+   with defaults this is `prepared_w400_o0p25/`). This produces the compact
+   chunked-sequence format all three models train from — students longer
+   than `--max-seq-len` are split into multiple overlapping windows rather
+   than truncated, so no interactions are dropped (see `README.md`).
 3. Runs `embed_questions.py` once into `/project/.../embeddings/` (persistent,
-   since it's expensive to redo and only needed for Model C).
+   since it's expensive to redo, reused across window/overlap settings since
+   embeddings only depend on question text, and only needed for Model C).
 4. Trains all three variants (`skill_only`, `skill_item`, `skill_item_content`)
    into `/project/.../runs/<variant>/`.
 5. Runs `compare_runs.py`, writing `/project/.../runs/comparison.json`.

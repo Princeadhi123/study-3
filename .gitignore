@@ -28,8 +28,10 @@ learning path maths/kt_phase1/data/
 learning path maths/kt_phase1/reports/
 
 # Learning-path generated sequence data, embeddings, checkpoints, and run logs
-learning path maths/kt_phase1/modeling/prepared/
-learning path maths/kt_phase1/modeling/runs/
+# (wildcards cover prepare_sequences.py's --out-dir naming, e.g. prepared_w400_o0p25/,
+# and any local smoke-test variants like prepared_smoke*/, runs_smoke*/)
+learning path maths/kt_phase1/modeling/prepared*/
+learning path maths/kt_phase1/modeling/runs*/
 learning path maths/kt_phase1/modeling/embeddings/
 # Keep Lumi metrics/configs available for review, but do not commit large model checkpoints
 learning path maths/kt_phase1/modeling/lumi_results/**/best_model*.pt
