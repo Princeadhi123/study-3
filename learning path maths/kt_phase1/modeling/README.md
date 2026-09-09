@@ -147,30 +147,36 @@ more (non-loss-contributing) compute per epoch. `--max-seq-len` passed to
 
 ## Reading the results
 
-`train.py` now saves **two** checkpoints per variant, because "best" depends
+`train.py` saves **three** checkpoints per variant, because "best" depends
 on which question you're asking:
 
 - `best_model.pt` — the epoch with the best `val` AUC (standard early
   stopping; best pick for ordinary warm-item deployment).
 - `best_model_cold.pt` — the epoch with the best `test_cold_item` AUC (not
-  necessarily the same epoch as above; best pick if what you care about is
-  generalization to never-before-seen items/questions).
+  necessarily the same epoch as above; can end up being a very early,
+  under-trained epoch — see "The item-id/cold-item tradeoff" below).
+- `best_model_joint.pt` — the epoch maximizing
+  `--joint-weight * val_auc + (1 - joint_weight) * test_cold_item_auc`
+  (default weight 0.5). This is the practical recommendation for
+  deployment: a middle ground that doesn't sacrifice most of the val/warm
+  gains from `item_id`/content just to chase the single best (and often
+  barely-trained) cold-item epoch.
 
-`best_epochs.json` in each run directory records both. `compare_runs.py`
-reports, per variant, both views side by side:
+`best_epochs.json` in each run directory records all three. `compare_runs.py`
+reports, per variant, all views side by side (pass `--joint-weight` to match
+whatever `train.py` was run with):
 
 ```text
-variant                  val_auc   test_warm_auc   test_cold_auc  |  best_cold_auc   (epoch)
-----------------------------------------------------------------------------------------------
-skill_only               ...           ...             ...            ...             ...
-skill_item                ...           ...             ...            ...             ...
-skill_item_content       ...           ...             ...            ...             ...
+variant             val_auc  test_warm_auc  test_cold_auc | best_cold_auc (epoch) | joint_val joint_warm joint_cold (epoch)
+skill_only            ...         ...            ...            ...        ...         ...       ...        ...       ...
+skill_item            ...         ...            ...            ...        ...         ...       ...        ...       ...
+skill_item_content    ...         ...            ...            ...        ...         ...       ...        ...       ...
 ```
 
-The left three columns are all evaluated at the val-selected epoch (as
-before); `best_cold_auc`/`(epoch)` is the best `test_cold_item` AUC reached
-at *any* epoch for that variant, showing its generalization ceiling even if
-that's not the epoch you'd deploy from val alone.
+The left three columns are all evaluated at the val-selected epoch;
+`best_cold_auc`/`(epoch)` is the best `test_cold_item` AUC reached at *any*
+epoch for that variant (its generalization ceiling); the `joint_*` columns
+are the val/warm/cold AUCs at the `best_model_joint.pt` epoch.
 
 Interpretation guide (matches the plan discussed earlier):
 
@@ -187,3 +193,33 @@ Interpretation guide (matches the plan discussed earlier):
 
 Do not pick a "winner" from `val`/`test_warm` alone — `test_cold_item` is the
 metric that actually answers the original generalization question.
+
+### The item-id/cold-item tradeoff, and how it's mitigated
+
+The first full run showed a fourth pattern the simple guide above doesn't
+cover: C beat B on `test_cold_item` (question content does carry real
+generalization signal) but still fell short of A, and both B's and C's
+`test_cold_item` AUC **decayed steadily, almost every epoch**, while `val`/
+`test_warm` kept climbing — i.e. the model was progressively overfitting
+`item_id`, and the shared `__UNK__` embedding that every cold item resolves
+to (see below) got progressively less useful the longer training ran.
+
+Two knobs in `train.py` now directly target this (both no-ops for
+`skill_only`, which has no `item_embed`):
+
+- `--item-id-dropout` (default `0.1`) — during training only, each
+  occurrence of a real, trainable `item_id` is independently replaced with
+  `__UNK__` with this probability. This is cold-start augmentation: it gives
+  the `__UNK__` row real, frequent gradient signal from ordinary items
+  instead of only ever seeing genuine `test_cold_item` occurrences, and it
+  keeps the model from fully relying on memorizing `item_id`.
+- `--item-embed-weight-decay` (default `1e-3`, vs. the general
+  `--weight-decay` default `1e-5`) — `item_embed` gets its own, much
+  stronger weight decay via a separate AdamW param group, so it can't grow
+  large item-specific weights as freely as the rest of the model.
+
+Re-run the A/B/C comparison after this change and compare `by_joint` (and
+the `test_cold_item` trend across epochs in `training_history.json`) to the
+pre-regularization numbers to confirm the decay is actually reduced, not
+just shifted to fewer epochs of training. (See "Evaluation splits" above for
+why cold items resolve to `__UNK__` in the first place.)

@@ -46,6 +46,28 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=1e-5)
+    p.add_argument("--item-embed-weight-decay", type=float, default=1e-3,
+                    help="Separate (stronger) weight decay applied only to item_embed, "
+                         "so the item_id lookup table can't grow large, item-specific "
+                         "weights as freely as the rest of the model. Ignored by "
+                         "skill_only (no item_embed). No-op for backwards compatibility "
+                         "if set equal to --weight-decay.")
+    p.add_argument("--item-id-dropout", type=float, default=0.1,
+                    help="Probability of replacing a known (non-PAD, non-UNK) item_id "
+                         "with __UNK__ during training only, each occurrence independently. "
+                         "This is cold-start augmentation: it (a) gives the __UNK__ embedding "
+                         "row real, frequent gradient signal from otherwise-ordinary items "
+                         "instead of only ever seeing genuine test_cold_item occurrences, and "
+                         "(b) prevents the model from fully relying on memorizing item_id, "
+                         "both of which curb the test_cold_item AUC decay seen over training "
+                         "when item embeddings are trained without this regularization. "
+                         "Ignored by skill_only. Set to 0 to disable / reproduce old behavior.")
+    p.add_argument("--joint-weight", type=float, default=0.5,
+                    help="Weight w in joint_score = w * val_auc + (1 - w) * test_cold_item_auc, "
+                         "used to select the extra best_model_joint.pt checkpoint -- a middle "
+                         "ground between best_model.pt (pure val AUC, best warm-item deployment) "
+                         "and best_model_cold.pt (pure cold AUC, which can be a very early, "
+                         "under-trained epoch). See README 'Reading the results'.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
@@ -67,7 +89,8 @@ def compute_metrics(y_true, y_prob):
     }
 
 
-def run_epoch(model, loader, device, content_vectors, optimizer=None, eval_splits=None):
+def run_epoch(model, loader, device, content_vectors, optimizer=None, eval_splits=None,
+              item_id_dropout=0.0):
     training = optimizer is not None
     model.train(training)
     total_loss, total_n = 0.0, 0
@@ -76,6 +99,19 @@ def run_epoch(model, loader, device, content_vectors, optimizer=None, eval_split
 
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
+        if training and item_id_dropout > 0 and getattr(model, "use_item", False):
+            # Cold-start augmentation (see --item-id-dropout help in parse_args):
+            # randomly resolve some known item_ids to __UNK__ (index 1) before
+            # they're used as both the "previous interaction" input and the
+            # "query" feature. PAD (0) and already-cold items (already UNK=1)
+            # are left untouched -- only real, trainable item_ids (>1) are
+            # eligible, so this never overwrites real cold-item eval positions.
+            item = batch["item"]
+            droppable = item > 1
+            drop_mask = droppable & (torch.rand(item.shape, device=item.device) < item_id_dropout)
+            if drop_mask.any():
+                batch = dict(batch)
+                batch["item"] = item.masked_fill(drop_mask, 1)
         cv = content_vectors.to(device) if content_vectors is not None else None
         with torch.set_grad_enabled(training):
             logits = model(batch, content_vectors=cv)
@@ -148,45 +184,67 @@ def main():
         n_layers=args.n_layers, dropout=args.dropout, max_seq_len=args.max_seq_len,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # item_embed gets its own (typically stronger) weight decay so the
+    # item_id lookup table is discouraged from growing large, item-specific
+    # weights as freely as the rest of the model -- this, together with
+    # --item-id-dropout, is what curbs the test_cold_item AUC decay seen in
+    # skill_item/skill_item_content when item embeddings train unconstrained
+    # (see README). skill_only has no item_embed, so this is a no-op for it.
+    item_embed_params = [p for n, p in model.named_parameters() if n.startswith("item_embed")]
+    other_params = [p for n, p in model.named_parameters() if not n.startswith("item_embed")]
+    param_groups = [{"params": other_params, "weight_decay": args.weight_decay}]
+    if item_embed_params:
+        param_groups.append({"params": item_embed_params, "weight_decay": args.item_embed_weight_decay})
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
 
     history = []
     best_val_auc, best_val_epoch = -1.0, None
     best_cold_auc, best_cold_epoch = -1.0, None
+    best_joint_score, best_joint_epoch = -1.0, None
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
-        train_stats = run_epoch(model, loader, device, content_vectors, optimizer=optimizer)
+        train_stats = run_epoch(model, loader, device, content_vectors, optimizer=optimizer,
+                                 item_id_dropout=args.item_id_dropout)
         eval_stats = run_epoch(model, loader, device, content_vectors, optimizer=None,
                                 eval_splits=["val", "test_warm", "test_cold_item"])
         elapsed = time.time() - t0
         val_auc = eval_stats.get("val", {}).get("auc", -1.0)
         cold_auc = eval_stats.get("test_cold_item", {}).get("auc", -1.0)
+        joint_score = (args.joint_weight * val_auc + (1 - args.joint_weight) * cold_auc
+                       if val_auc >= 0 and cold_auc >= 0 else -1.0)
         record = {"epoch": epoch, "elapsed_sec": round(elapsed, 1), **train_stats, "eval": eval_stats}
         history.append(record)
         print(json.dumps(record, indent=2), flush=True)
 
-        # Two checkpoints are kept because they answer different questions:
-        # best_model.pt (by val AUC) is the standard early-stopping choice,
-        # good for ordinary warm-item deployment. best_model_cold.pt (by
-        # test_cold_item AUC) is the checkpoint that generalizes best to
-        # never-before-seen items/questions, which is the actual question
-        # this A/B/C comparison is meant to answer (see README) -- the two
-        # need not be the same epoch.
+        # Three checkpoints are kept because "best" depends on which question
+        # you're asking: best_model.pt (by val AUC) is the standard
+        # early-stopping choice, good for ordinary warm-item deployment.
+        # best_model_cold.pt (by test_cold_item AUC) generalizes best to
+        # never-before-seen items/questions but can be a very early,
+        # under-trained epoch. best_model_joint.pt (by a weighted combination
+        # of the two, --joint-weight) is the practical middle ground actually
+        # recommended for deployment -- see README "Reading the results".
         if val_auc > best_val_auc:
             best_val_auc, best_val_epoch = val_auc, epoch
             torch.save(model.state_dict(), out_dir / "best_model.pt")
         if cold_auc > best_cold_auc:
             best_cold_auc, best_cold_epoch = cold_auc, epoch
             torch.save(model.state_dict(), out_dir / "best_model_cold.pt")
+        if joint_score > best_joint_score:
+            best_joint_score, best_joint_epoch = joint_score, epoch
+            torch.save(model.state_dict(), out_dir / "best_model_joint.pt")
 
     (out_dir / "training_history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
     (out_dir / "best_epochs.json").write_text(json.dumps({
         "best_val_epoch": best_val_epoch, "best_val_auc": best_val_auc,
         "best_cold_epoch": best_cold_epoch, "best_cold_auc": best_cold_auc,
+        "best_joint_epoch": best_joint_epoch, "best_joint_score": best_joint_score,
+        "joint_weight": args.joint_weight,
     }, indent=2), encoding="utf-8")
     print(f"Best val AUC: {best_val_auc:.4f} (epoch {best_val_epoch}). "
           f"Best test_cold_item AUC: {best_cold_auc:.4f} (epoch {best_cold_epoch}). "
+          f"Best joint score: {best_joint_score:.4f} (epoch {best_joint_epoch}). "
           f"Wrote outputs to {out_dir}")
 
 

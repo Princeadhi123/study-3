@@ -35,6 +35,8 @@ learning path maths/kt_phase1/modeling/runs*/
 learning path maths/kt_phase1/modeling/embeddings/
 # Keep Lumi metrics/configs available for review, but do not commit large model checkpoints
 learning path maths/kt_phase1/modeling/lumi_results/**/best_model*.pt
+# Archived LUMI runs are generated outputs; keep timestamped backups local
+learning path maths/kt_phase1/modeling/lumi_results/runs_previous_*/
 learning path maths/kt_phase1/modeling/*.out
 learning path maths/kt_phase1/modeling/*.err
 learning path maths/kt_phase1/modeling/*.log

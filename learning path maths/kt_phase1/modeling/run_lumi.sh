@@ -18,13 +18,21 @@
 #   /projappl/.../math_kt/   persistent: code, raw data, embeddings, checkpoints
 #   /scratch/.../math_kt/   temporary: copied raw input and prepared sequences
 #
+# Parallel training: the three variants are fully independent (same prepared
+# data, no shared state), so they are launched concurrently, one per GPU, on
+# a single node -- roughly 3x faster wall-clock than training them one after
+# another. This needs --gpus-per-node=3 (LUMI-G nodes have 8 GCDs available,
+# so requesting 3 of them is fine) and enough CPUs/memory for three
+# independent training processes at once (each loads its own full copy of
+# the dataset into RAM). If you change VARIANTS below, keep --gpus-per-node,
+# --cpus-per-task (7 per variant) and --mem (60G per variant) in sync.
 #SBATCH --job-name=math_kt
 #SBATCH --partition=small-g
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=7
-#SBATCH --mem=60G
+#SBATCH --gpus-per-node=3
+#SBATCH --cpus-per-task=21
+#SBATCH --mem=180G
 #SBATCH --time=1-00:00:00
 #SBATCH --output=math_kt_%j.out
 #SBATCH --error=math_kt_%j.err
@@ -73,7 +81,15 @@ if [[ ! -x "${PYTHON}" ]]; then
     echo "Create /projappl/project_462001308/math_kt/mathkt-env or set KT_PYTHON."
     exit 2
 fi
-"${PYTHON}" -c "import torch; print('PyTorch:', torch.__version__); print('GPU available:', torch.cuda.is_available()); assert torch.cuda.is_available(), 'ROCm GPU is not available'"
+N_GPUS_NEEDED=3
+"${PYTHON}" -c "
+import torch
+n = torch.cuda.device_count()
+print('PyTorch:', torch.__version__)
+print('GPUs visible:', n)
+assert torch.cuda.is_available(), 'ROCm GPU is not available'
+assert n >= ${N_GPUS_NEEDED}, f'Need >= ${N_GPUS_NEEDED} GPUs for parallel training, only {n} visible -- check --gpus-per-node.'
+"
 
 # Avoid filling a single Lustre location with a second copy if it is already
 # present from a previous job. Scratch copies can be regenerated at any time.
@@ -114,21 +130,73 @@ COMMON=(
     --batch-size 256
     --max-seq-len "${MAX_SEQ_LEN}"
     --num-workers 2
+    --joint-weight "${KT_JOINT_WEIGHT:-0.5}"
+)
+# Cold-start regularization for the item-aware variants only (skill_only has
+# no item_embed, so these are no-ops for it): randomly resolve some known
+# item_ids to __UNK__ during training (--item-id-dropout) and apply a
+# separate, stronger weight decay to item_embed (--item-embed-weight-decay).
+# Both curb the test_cold_item AUC decay seen when item embeddings are
+# trained without them (see README "Reading the results").
+ITEM_REG=(
+    --item-id-dropout "${KT_ITEM_ID_DROPOUT:-0.1}"
+    --item-embed-weight-decay "${KT_ITEM_EMBED_WEIGHT_DECAY:-1e-3}"
 )
 
-"${PYTHON}" train.py --variant skill_only \
-    "${COMMON[@]}" --out-dir "${RUNS_DIR}/skill_only"
+# ---- train all three variants in parallel, one GPU each ---
+# Each is pinned to a distinct GPU via {HIP,ROCR}_VISIBLE_DEVICES (ROCm's
+# equivalent of CUDA_VISIBLE_DEVICES; PyTorch's "cuda" device still maps to
+# it -- see LUMI_SETUP.md). Indices are 0..N-1 *within this job's own
+# allocation*, not physical node-wide GPU IDs, so this is safe regardless of
+# which physical GCDs SLURM actually assigned. stdout/stderr for each
+# variant is redirected to its own log (they'd otherwise interleave
+# unreadably in the shared math_kt_<jobid>.out), and failures are collected
+# so one variant crashing doesn't get silently swallowed.
+train_variant() {
+    local gpu_id="$1" variant="$2"
+    shift 2
+    local log_dir="${RUNS_DIR}/${variant}"
+    mkdir -p "${log_dir}"
+    echo "Starting ${variant} on GPU ${gpu_id} (log: ${log_dir}/train.log)"
+    HIP_VISIBLE_DEVICES="${gpu_id}" ROCR_VISIBLE_DEVICES="${gpu_id}" \
+        "${PYTHON}" train.py --variant "${variant}" "$@" \
+        > "${log_dir}/train.log" 2>&1
+}
 
-"${PYTHON}" train.py --variant skill_item \
-    "${COMMON[@]}" --out-dir "${RUNS_DIR}/skill_item"
+train_variant 0 skill_only \
+    "${COMMON[@]}" --out-dir "${RUNS_DIR}/skill_only" &
+PID_SKILL_ONLY=$!
 
-"${PYTHON}" train.py --variant skill_item_content \
-    "${COMMON[@]}" \
+train_variant 1 skill_item \
+    "${COMMON[@]}" "${ITEM_REG[@]}" --out-dir "${RUNS_DIR}/skill_item" &
+PID_SKILL_ITEM=$!
+
+train_variant 2 skill_item_content \
+    "${COMMON[@]}" "${ITEM_REG[@]}" \
     --text-embeddings "${EMBED_DIR}/text_embeddings.npz" \
-    --out-dir "${RUNS_DIR}/skill_item_content"
+    --out-dir "${RUNS_DIR}/skill_item_content" &
+PID_SKILL_ITEM_CONTENT=$!
+
+status=0
+for entry in "PID_SKILL_ONLY:skill_only" "PID_SKILL_ITEM:skill_item" "PID_SKILL_ITEM_CONTENT:skill_item_content"; do
+    pid_var="${entry%%:*}"
+    variant="${entry##*:}"
+    pid="${!pid_var}"
+    if wait "${pid}"; then
+        echo "${variant} finished OK."
+    else
+        echo "ERROR: ${variant} training failed (exit code $?). See ${RUNS_DIR}/${variant}/train.log" >&2
+        status=1
+    fi
+done
+if [[ "${status}" -ne 0 ]]; then
+    echo "One or more variants failed -- see errors above. Not running compare_runs.py." >&2
+    exit 1
+fi
 
 "${PYTHON}" compare_runs.py \
     --runs-dir "${RUNS_DIR}" \
+    --joint-weight "${KT_JOINT_WEIGHT:-0.5}" \
     --out "${RUNS_DIR}/comparison.json"
 
 printf '\nCompleted. Results are in %s\n' "${RUNS_DIR}"

@@ -194,6 +194,13 @@ squeue --me
 tail -f math_kt_<jobid>.out
 ```
 
+The three variants train concurrently and log to their own files, so once
+training starts, follow an individual variant's progress with:
+
+```bash
+tail -f /projappl/project_462001308/math_kt/runs/skill_item_content/train.log
+```
+
 ## What the script does, in order
 
 1. Copies `raw/kt_interactions.csv.gz` from `/project` to `/scratch` (only if
@@ -209,8 +216,21 @@ tail -f math_kt_<jobid>.out
    since it's expensive to redo, reused across window/overlap settings since
    embeddings only depend on question text, and only needed for Model C).
 4. Trains all three variants (`skill_only`, `skill_item`, `skill_item_content`)
-   into `/project/.../runs/<variant>/`.
+   **concurrently**, one per GPU, into `/project/.../runs/<variant>/`. Since
+   the three variants share no state, running them at once instead of
+   sequentially cuts wall-clock time roughly 3x. Each variant's training
+   output is redirected to its own `/project/.../runs/<variant>/train.log`
+   (they would otherwise interleave unreadably if all three wrote to the
+   shared `math_kt_<jobid>.out`). If any variant fails, the script reports
+   which one(s) and exits without running step 5.
 5. Runs `compare_runs.py`, writing `/project/.../runs/comparison.json`.
+
+Because of step 4, the job requests `--gpus-per-node=3` (LUMI-G nodes have 8
+GCDs, so this fits comfortably alongside other jobs), `--cpus-per-task=21`,
+and `--mem=180G` (3x the single-variant footprint, since each variant loads
+its own full copy of the prepared dataset into RAM). If you deliberately
+reduce back to training one variant at a time, scale these down accordingly
+(7 CPUs / 60G / 1 GPU per concurrently-running variant).
 
 ## After the job finishes
 
