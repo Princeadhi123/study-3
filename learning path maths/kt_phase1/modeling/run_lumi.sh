@@ -144,9 +144,9 @@ ITEM_REG=(
 )
 
 # ---- train all three variants in parallel, one GPU each ---
-# Each is pinned to a distinct GPU via {HIP,ROCR}_VISIBLE_DEVICES (ROCm's
+# Each is pinned to a distinct GPU via HIP_VISIBLE_DEVICES (ROCm's
 # equivalent of CUDA_VISIBLE_DEVICES; PyTorch's "cuda" device still maps to
-# it -- see LUMI_SETUP.md). Indices are 0..N-1 *within this job's own
+# the process-local device -- see LUMI_SETUP.md). Indices are 0..N-1 *within this job's own
 # allocation*, not physical node-wide GPU IDs, so this is safe regardless of
 # which physical GCDs SLURM actually assigned. stdout/stderr for each
 # variant is redirected to its own log (they'd otherwise interleave
@@ -158,7 +158,7 @@ train_variant() {
     local log_dir="${RUNS_DIR}/${variant}"
     mkdir -p "${log_dir}"
     echo "Starting ${variant} on GPU ${gpu_id} (log: ${log_dir}/train.log)"
-    HIP_VISIBLE_DEVICES="${gpu_id}" ROCR_VISIBLE_DEVICES="${gpu_id}" \
+    HIP_VISIBLE_DEVICES="${gpu_id}" \
         "${PYTHON}" train.py --variant "${variant}" "$@" \
         > "${log_dir}/train.log" 2>&1
 }
