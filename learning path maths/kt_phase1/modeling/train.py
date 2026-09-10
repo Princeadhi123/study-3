@@ -32,7 +32,8 @@ HERE = Path(__file__).parent
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--variant", required=True, choices=["skill_only", "skill_item", "skill_item_content"])
+    p.add_argument("--variant", required=True,
+                   choices=["skill_only", "skill_item", "skill_item_content", "skill_item_content_option"])
     p.add_argument("--sequences", default=str(HERE / "prepared" / "sequences.jsonl.gz"))
     p.add_argument("--vocab", default=str(HERE / "prepared" / "vocab.json"))
     p.add_argument("--text-embeddings", default=str(HERE / "prepared" / "text_embeddings.npz"))
@@ -159,7 +160,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     skill_vocab, item_vocab = load_vocab(args.vocab)
-    use_content = args.variant == "skill_item_content"
+    use_content = args.variant in {"skill_item_content", "skill_item_content_option"}
     text_emb_path = args.text_embeddings if use_content else None
 
     dataset = KTSequenceDataset(args.sequences, max_seq_len=args.max_seq_len,
@@ -180,7 +181,8 @@ def main():
 
     model = build_model(
         args.variant, n_skills=len(skill_vocab), n_items=len(item_vocab),
-        content_dim=content_dim, d_model=args.d_model, n_heads=args.n_heads,
+        content_dim=content_dim,
+        d_model=args.d_model, n_heads=args.n_heads,
         n_layers=args.n_layers, dropout=args.dropout, max_seq_len=args.max_seq_len,
     ).to(device)
 

@@ -1,18 +1,39 @@
-# Math-path KT models: three variants
+# Math-path KT models: four variants
 
-Trains and compares three input configurations of the same causal
-Transformer KT architecture (SAKT/DKT-style) on the cleaned item-level math
-interactions in `kt_phase1/data/kt_interactions.csv.gz`.
+Trains and compares input configurations of the same causal Transformer KT
+architecture (SAKT/DKT-style). All four variants train on the same v2 data
+(`kt_phase1/data_v2/kt_interactions_v2_item_level.csv.gz`, prepared by
+`prepare_sequences_v2.py`) — same item/skill vocab, same train/val/test/
+cold-item split for every variant, so A/B/C/D are directly comparable. See
+`../README_v2.md` for what v2 extracts (parsed multiple-choice options +
+the student's actual selected answer, for every exercise type that has them)
+that v1 (now `../legacy_v1_item_level/`) discarded.
 
-| Variant | Inputs | File |
-|---|---|---|
-| A `skill_only` | `skill_id` + correctness history | shared `model.py` |
-| B `skill_item` | + `item_id` (`ExerciseId + PreOrd`), response time, attempt number | shared `model.py` |
-| C `skill_item_content` | + frozen multilingual sentence embedding of the raw Finnish question `text` | shared `model.py` |
+| Variant | Inputs |
+|---|---|
+| A `skill_only` | `skill_id` + correctness history |
+| B `skill_item` | + `item_id` (`ExerciseId + PreOrd`), response time, attempt number |
+| C `skill_item_content` | + frozen multilingual sentence embedding of the CURRENT question's full content: question text plus, for exercise types that offer discrete options (mcq/single_answer_text), the offered option VALUES — never which one is correct or which one the student picked, see `build_content_text()` in `prepare_sequences_v2.py` |
+| D `skill_item_content_option` | C's inputs + the frozen multilingual embedding of the actual TEXT the student selected/answered on the PREVIOUS step (never the current one, that would leak the label) |
 
-All three share one architecture (`KTTransformer` in `model.py`); only the
+All four share one architecture (`KTTransformer` in `model.py`); only the
 active input features differ, so any performance difference between runs is
 attributable to the added features, not to a different model family.
+
+C and D are meant to be read as a pair for the research question "does
+knowing the full current question (including its options) help, and does
+also remembering *what* the student previously selected help further?" —
+not as two disconnected model families. D deliberately embeds the previous
+selection's TEXT (e.g. `"-24"`), not a bare `nn.Embedding(option_position)`:
+an index embedding would wrongly force "option 1" to mean the same thing on
+every question, when option 1 is `"4"` on one question and `"20"` on
+another. It's looked up in the exact same `content_vectors` table as the
+current question's content, via its own learned projection (`option_proj`
+in `model.py`). D is also the direct building block for a future
+misconception-aware variant (swap that text-embedding lookup for a
+`misconception_embed(prev_misconception_id)` once
+`reports_v2/distractor_catalog.csv` has been annotated — no architecture
+change needed beyond that one lookup).
 
 ## On Finnish text — no translation needed
 

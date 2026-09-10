@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 HERE = Path(__file__).parent
-VARIANTS = ["skill_only", "skill_item", "skill_item_content"]
+VARIANTS = ["skill_only", "skill_item", "skill_item_content", "skill_item_content_option"]
 METRICS = ["auc", "pr_auc", "log_loss", "brier", "accuracy"]
 
 

@@ -1,5 +1,24 @@
 """Precompute frozen multilingual sentence embeddings for every unique question
-text found in sequences.jsonl.gz. Used only by the content-aware KT variant (C).
+CONTENT found in sequences.jsonl.gz. Used by the content-aware KT variants
+(skill_item_content and skill_item_content_option).
+
+For v2 sequences (prepare_sequences_v2.py), two fields per event get
+embedded into this SAME shared space:
+
+- `content_text` -- the question text PLUS, for exercise types that offer
+  discrete options (mcq/single_answer_text families), the offered option
+  VALUES -- never which one is correct or which one the student picked, see
+  that file's build_content_text() -- so this string is safe to use as the
+  CURRENT-step query (no label leakage) for both content variants.
+- `selected_text` -- the actual text of what the student selected/answered
+  on a PREVIOUS step (or the "[NO_OPTIONS]" sentinel), used only by
+  skill_item_content_option. Embedding this rather than a bare option-index
+  category means "option 1" in one question and "option 1" in another
+  aren't forced to share a meaning just because they're the same position --
+  the model sees what was actually picked.
+
+v1 sequences (prepare_sequences.py) only have plain "text" (question only);
+this script falls back to that automatically.
 
 No Finnish->English translation is needed: multilingual sentence-transformer
 models (e.g. paraphrase-multilingual-MiniLM-L12-v2 or LaBSE) are trained so
@@ -44,11 +63,17 @@ def main():
         for line in f:
             record = json.loads(line)
             for event in record["events"]:
-                t = event.get("text") or ""
+                t = event.get("content_text") or event.get("text") or ""
                 if t:
                     texts.add(t)
+                # Previous-step selected-answer text (v2 only, used by
+                # skill_item_content_option) -- embedded into the same space
+                # so it's looked up the same way as content_text.
+                s = event.get("selected_text") or ""
+                if s:
+                    texts.add(s)
     texts = sorted(texts)
-    print(f"Unique question texts to embed: {len(texts):,}", flush=True)
+    print(f"Unique question contents + selected answers to embed: {len(texts):,}", flush=True)
 
     model = SentenceTransformer(args.model)
     vectors = model.encode(

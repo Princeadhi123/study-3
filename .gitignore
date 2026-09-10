@@ -27,16 +27,36 @@ learning path maths/*.xlsx
 learning path maths/kt_phase1/data/
 learning path maths/kt_phase1/reports/
 
+# Learning-path generated datasets and diagnostic reports
+# The source-building scripts and READMEs remain tracked; these large outputs
+# are regenerated locally or uploaded separately to the supercomputer.
+learning path maths/kt_phase1/data_v2/
+learning path maths/kt_phase1/reports_v2/
+
 # Learning-path generated sequence data, embeddings, checkpoints, and run logs
 # (wildcards cover prepare_sequences.py's --out-dir naming, e.g. prepared_w400_o0p25/,
 # and any local smoke-test variants like prepared_smoke*/, runs_smoke*/)
 learning path maths/kt_phase1/modeling/prepared*/
 learning path maths/kt_phase1/modeling/runs*/
 learning path maths/kt_phase1/modeling/embeddings/
-# Keep Lumi metrics/configs available for review, but do not commit large model checkpoints
+# LUMI outputs are generated results; upload/review them separately rather than
+# committing checkpoints, logs, and current run directories.
+learning path maths/kt_phase1/modeling/lumi_results/runs/
 learning path maths/kt_phase1/modeling/lumi_results/**/best_model*.pt
 # Archived LUMI runs are generated outputs; keep timestamped backups local
 learning path maths/kt_phase1/modeling/lumi_results/runs_previous_*/
 learning path maths/kt_phase1/modeling/*.out
 learning path maths/kt_phase1/modeling/*.err
 learning path maths/kt_phase1/modeling/*.log
+
+# Local Python tooling and editor/system files
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -83,6 +83,14 @@ class KTSequenceDataset(Dataset):
         rt_mask = np.zeros(self.max_seq_len, dtype=np.float32)
         attempt = np.ones(self.max_seq_len, dtype=np.float32)
         content_idx = np.zeros(self.max_seq_len, dtype=np.int64)
+        # Previous-step selected-answer TEXT, looked up in the same
+        # content_vectors table as content_idx (see model.py's use_option) --
+        # not a bare categorical option position. "option 1" in one question
+        # and "option 1" in another don't get forced to share a meaning; the
+        # model sees what was actually selected. v1 sequences (no
+        # "selected_text" field) fall back to index 0, same convention as
+        # content_idx.
+        selected_text_idx = np.zeros(self.max_seq_len, dtype=np.int64)
         split = np.full(self.max_seq_len, PAD_SPLIT, dtype=np.int64)
         attn_mask = np.zeros(self.max_seq_len, dtype=np.float32)
 
@@ -96,7 +104,11 @@ class KTSequenceDataset(Dataset):
                 rt[pos] = np.log1p(ev["rt"])
                 rt_mask[pos] = 1.0
             attempt[pos] = float(ev.get("attempt") or 1.0)
-            content_idx[pos] = self._content_index(ev.get("text"))
+            # content_text (question + safe option values, see
+            # prepare_sequences_v2.py's build_content_text) is preferred when
+            # present; v1 sequences only have "text" (question only).
+            content_idx[pos] = self._content_index(ev.get("content_text") or ev.get("text"))
+            selected_text_idx[pos] = self._content_index(ev.get("selected_text"))
             split[pos] = SPLIT_CODE.get(ev["split"], PAD_SPLIT)
             attn_mask[pos] = 1.0
 
@@ -108,6 +120,7 @@ class KTSequenceDataset(Dataset):
             "rt_mask": torch.from_numpy(rt_mask),
             "attempt": torch.from_numpy(attempt),
             "content_idx": torch.from_numpy(content_idx),
+            "selected_text_idx": torch.from_numpy(selected_text_idx),
             "split": torch.from_numpy(split),
             "attn_mask": torch.from_numpy(attn_mask),
         }
