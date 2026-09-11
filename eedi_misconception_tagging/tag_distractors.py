@@ -6,11 +6,20 @@ Pipeline:
      pair, then cosine-similarity-rank the top-K candidate misconceptions.
   2. Tagging: ask an LLM (CSC Aitta OpenAI-compatible endpoint) to pick the
      single best-matching MisconceptionId from that narrowed candidate list.
-  3. Scoring: compare the LLM's pick against the ground-truth MisconceptionId
-     already present in train.csv, and report top-1 accuracy + whether the
-     true label was even inside the retrieved candidate set (retrieval
-     recall@K), so you can tell prompt-wording problems apart from retrieval
-     problems while iterating.
+  3. Verification (optional, --verify-mode): a second LLM pass on tags flagged
+     as low-confidence by the retrieval margin (top1 - top2 cosine similarity,
+     see tagging_common.retrieval_margin) -- NOT just "confirm your own
+     answer again". It is shown the runner-up candidate explicitly and asked
+     to argue for/against each one, which is a materially different task from
+     the original pick and therefore a real second opinion rather than the
+     same model re-stating its own bias. Measure --verify-mode all against
+     this ground-truth set first to see whether it's worth the extra calls
+     before relying on it for tag_math_distractors.py's unlabeled data.
+  4. Scoring: compare the LLM's pick (pre- and post-verification) against the
+     ground-truth MisconceptionId already present in train.csv, and report
+     top-1 accuracy + whether the true label was even inside the retrieved
+     candidate set (retrieval recall@K), so you can tell prompt-wording
+     problems apart from retrieval problems while iterating.
 
 Scaling note: a misconception is a property of a (question, wrong-answer)
 PAIR, not of an individual student attempt. When applying this to a real
@@ -26,9 +35,9 @@ instead of crashing.
 
 Usage:
   python tag_distractors.py --n-samples 50 --min-k 32 --max-k 50 --margin 0.05 --concurrency 8
+  python tag_distractors.py --n-samples 100 --verify-mode uncertain --verify-margin-threshold 0.05
 """
 import argparse
-import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,9 +45,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError
 from sentence_transformers import SentenceTransformer
+
+from tagging_common import call_with_retry, default_model, get_client, retrieval_margin
 
 ROOT = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
@@ -46,8 +55,6 @@ DATA_DIR = PROJECT_ROOT / "eedi_data"
 CACHE_DIR = ROOT / "misconception_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 EMBED_MODEL_NAME = "all-mpnet-base-v2"
-
-load_dotenv(PROJECT_ROOT / ".env")
 
 OPTIONS = ["A", "B", "C", "D"]
 QUERY_SEP = " [SEP] "
@@ -94,8 +101,9 @@ def load_misconception_embeddings(embedder, mapping: pd.DataFrame) -> np.ndarray
 
 
 def retrieve_candidates(query_emb: np.ndarray, misconception_emb: np.ndarray,
-                         min_k: int = 50, max_k: int = 75, margin: float = 0.10) -> list[np.ndarray]:
-    """Return, per query, the row indices into `mapping` for its candidate misconceptions.
+                         min_k: int = 50, max_k: int = 75, margin: float = 0.10):
+    """Return, per query, the row indices into `mapping` for its candidate misconceptions,
+    and a parallel list of per-query retrieval confidence margins.
 
     Dynamic cutoff: always take the top `min_k` candidates, then keep extending up to
     `max_k` only while each additional candidate's cosine similarity stays within
@@ -104,14 +112,20 @@ def retrieve_candidates(query_emb: np.ndarray, misconception_emb: np.ndarray,
     clear best match get a short list, ambiguous queries (many near-tied candidates)
     get up to `max_k`.
 
-    Returns a list of length n_queries (not a 2D array, since each query can have a
-    different number of candidates); this is a drop-in replacement everywhere the
-    result is indexed per-query (`mapping.iloc[candidate_idx[i]]`), since DataFrame
-    indexing doesn't care about a fixed candidate count.
+    The margin (top1 - top2 cosine similarity, via tagging_common.retrieval_margin) is
+    a free-standing confidence signal that costs nothing extra to compute here and is
+    used to decide which tags actually need the second (verification) pass -- see
+    --verify-mode.
+
+    Returns (candidates, margins): `candidates` has length n_queries (not a 2D array,
+    since each query can have a different number of candidates) -- a drop-in
+    replacement everywhere the result is indexed per-query
+    (`mapping.iloc[candidate_idx[i]]`), since DataFrame indexing doesn't care about a
+    fixed candidate count.
     """
     sims = query_emb @ misconception_emb.T  # (n_queries, n_misconceptions), both L2-normalized
     order = np.argsort(-sims, axis=1)
-    candidates = []
+    candidates, margins = [], []
     for i in range(sims.shape[0]):
         idx_sorted = order[i]
         top_sim = sims[i, idx_sorted[0]]
@@ -123,7 +137,8 @@ def retrieve_candidates(query_emb: np.ndarray, misconception_emb: np.ndarray,
             else:
                 break  # sims are sorted descending, so no later candidate can qualify either
         candidates.append(np.array(selected))
-    return candidates
+        margins.append(retrieval_margin(sims[i], idx_sorted))
+    return candidates, margins
 
 
 def build_construct_misconception_index(long_df: pd.DataFrame) -> dict:
@@ -206,6 +221,23 @@ That matches the decimal-length misconception, not a fraction or sign error.
 MisconceptionId: 318
 """
 
+# Verification is deliberately NOT "is this right, yes or no?" -- that just
+# asks the same model to restate its own prior answer. Instead it is shown
+# the runner-up candidate explicitly and asked to argue FOR the runner-up
+# before deciding, which forces it to actually engage with the alternative
+# instead of rubber-stamping pass 1.
+VERIFY_FEWSHOT = """### Worked Example
+Question: Simplify 3/4 + 1/2
+Correct answer: 5/4
+Student's wrong answer: 4/6
+First-pass pick: 101 (Adds numerators and denominators separately when adding fractions)
+Runner-up candidate: 205 (Believes a fraction can be simplified by dividing numerator and
+denominator by different numbers)
+Argument for the runner-up: nothing in 4/6 was simplified/divided down from a larger
+fraction -- it was produced directly from 3+1 and 4+2, so this doesn't fit.
+Verdict: CONFIRM 101
+"""
+
 
 def build_prompt(row: pd.Series, candidates: pd.DataFrame) -> list[dict]:
     options_block = "\n".join(
@@ -253,21 +285,40 @@ def parse_prediction(text: str | None) -> int | None:
     return int(matches[-1]) if matches else None
 
 
-def call_with_retry(client, max_retries=5, **kwargs):
-    """Call chat.completions.create, retrying with exponential backoff on 429s
-    (Aitta is a shared HPC service and will rate-limit bursts of concurrent
-    requests; this lets a large batch job degrade gracefully instead of
-    crashing partway through)."""
-    for attempt in range(max_retries):
-        try:
-            return client.chat.completions.create(**kwargs)
-        except RateLimitError:
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(2 ** attempt)
+def build_verification_prompt(row: pd.Series, predicted_id, predicted_name: str,
+                               runner_up_id, runner_up_name: str) -> list[dict]:
+    system = (
+        "You are a maths education expert double-checking a first-pass misconception "
+        "tag. You will be shown the question, the correct answer, the student's wrong "
+        "answer, the first-pass pick, and the runner-up candidate that was NOT picked. "
+        "First argue for the runner-up candidate as if it were the better fit, then decide "
+        "which one actually explains the wrong answer better. Respond in exactly this "
+        "format:\nArgument for the runner-up: <your argument>\n"
+        "Verdict: CONFIRM <id> or REPLACE <id>\n\n"
+        f"{VERIFY_FEWSHOT}"
+    )
+    user = (
+        f"Question:\n{row.QuestionText}\n\n"
+        f"Correct answer: {row.CorrectAnswerText}\n"
+        f"Student's wrong answer: {row.WrongAnswerText}\n\n"
+        f"First-pass pick: {predicted_id} ({predicted_name})\n"
+        f"Runner-up candidate: {runner_up_id} ({runner_up_name})\n\n"
+        "Argument for the runner-up:"
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def tag_one(client, model, temperature, max_tokens, row, cand_rows, mapping):
+def parse_verdict(text: str | None, fallback_id) -> int | None:
+    if not text:
+        return fallback_id
+    match = re.search(r"Verdict\s*:\s*(CONFIRM|REPLACE)\s+(-?\d+)", text, flags=re.IGNORECASE)
+    if not match:
+        return fallback_id
+    return int(match.group(2))
+
+
+def tag_one(client, model, temperature, max_tokens, row, cand_rows, mapping, margin: float,
+            verify_mode: str, verify_margin_threshold: float, verify_model: str):
     messages = build_prompt(row, cand_rows)
     response = call_with_retry(
         client, model=model, messages=messages, temperature=temperature, max_tokens=max_tokens
@@ -277,6 +328,31 @@ def tag_one(client, model, temperature, max_tokens, row, cand_rows, mapping):
     reasoning = getattr(message, "reasoning", None)
     predicted_id = parse_prediction(raw_text)
 
+    want_verify = verify_mode == "all" or (verify_mode == "uncertain" and margin < verify_margin_threshold)
+    verified_id = predicted_id
+    verify_raw = None
+    did_verify = False
+    if want_verify and predicted_id is not None:
+        # cand_rows is ordered by retrieval similarity (highest first) for the
+        # first min_k rows, with construct-boosted rows appended afterwards
+        # (see boosted_candidates) -- so "the first row that isn't the pick"
+        # is a reasonable proxy for "the runner-up candidate" without a
+        # second embedding lookup.
+        other_cands = cand_rows[cand_rows["MisconceptionId"] != predicted_id]
+        runner_up = other_cands.iloc[0] if len(other_cands) else None
+        if runner_up is not None:
+            predicted_name = mapping.loc[mapping.MisconceptionId == predicted_id, "MisconceptionName"]
+            predicted_name = predicted_name.iloc[0] if len(predicted_name) else "(unknown)"
+            v_messages = build_verification_prompt(
+                row, predicted_id, predicted_name, runner_up.MisconceptionId, runner_up.MisconceptionName
+            )
+            v_response = call_with_retry(
+                client, model=verify_model, messages=v_messages, temperature=temperature, max_tokens=max_tokens
+            )
+            verify_raw = v_response.choices[0].message.content
+            verified_id = parse_verdict(verify_raw, predicted_id)
+            did_verify = True
+
     true_id = row.TrueMisconceptionId
     in_candidates = true_id in cand_rows["MisconceptionId"].values
     return {
@@ -284,11 +360,17 @@ def tag_one(client, model, temperature, max_tokens, row, cand_rows, mapping):
         "WrongOption": row.WrongOption,
         "TrueMisconceptionId": true_id,
         "TrueMisconceptionName": mapping.loc[mapping.MisconceptionId == true_id, "MisconceptionName"].iloc[0],
+        "RetrievalMargin": margin,
         "PredictedMisconceptionId": predicted_id,
         "RawResponse": raw_text,
         "Reasoning": reasoning,
         "FinishReason": response.choices[0].finish_reason,
         "Correct": predicted_id == true_id,
+        "Verified": did_verify,
+        "VerifiedMisconceptionId": verified_id,
+        "VerifyRawResponse": verify_raw,
+        "CorrectAfterVerify": verified_id == true_id,
+        "VerifyChangedAnswer": did_verify and verified_id != predicted_id,
         "TrueLabelInCandidates": in_candidates,
     }
 
@@ -304,7 +386,17 @@ def main():
                          help="Cosine-similarity margin below the top candidate's score within which "
                               "candidates beyond --min-k are still included")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model", default=os.getenv("AITTA_MODEL", "openai/gpt-oss-120b"))
+    parser.add_argument("--model", default=default_model())
+    parser.add_argument("--verify-model", default=None,
+                         help="Model to use for the verification pass, if different from --model "
+                              "(a different model decorrelates its errors from pass 1's; default: same model)")
+    parser.add_argument("--verify-mode", choices=["none", "uncertain", "all"], default="uncertain",
+                         help="none: single-pass only (original behaviour). uncertain: only verify tags "
+                              "whose retrieval margin is below --verify-margin-threshold (cheap triage). "
+                              "all: verify every tag (most expensive, best for measuring the ceiling).")
+    parser.add_argument("--verify-margin-threshold", type=float, default=0.05,
+                         help="Retrieval-margin (top1 - top2 cosine similarity) cutoff below which a tag "
+                              "is considered ambiguous and sent to verification, when --verify-mode=uncertain")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=1500,
                          help="gpt-oss is a reasoning model: it spends tokens on an internal "
@@ -315,15 +407,9 @@ def main():
                               "~10-15; 20 triggered 429 rate-limit errors in testing.")
     parser.add_argument("--out", default=str(ROOT / "misconception_cache" / "tagging_results.csv"))
     args = parser.parse_args()
+    verify_model = args.verify_model or args.model
 
-    base_url = os.getenv("AITTA_BASE_URL")
-    api_key = os.getenv("AITTA_API_KEY")
-    if not base_url or not api_key or "paste-your" in api_key:
-        raise SystemExit(
-            "AITTA_BASE_URL / AITTA_API_KEY are not set. Edit the .env file at the "
-            "project root with your Aitta token from https://aitta.csc.fi"
-        )
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    client = get_client()
 
     print("Loading data...")
     train = pd.read_csv(DATA_DIR / "train.csv")
@@ -349,14 +435,14 @@ def main():
         + sample["QuestionText"] + QUERY_SEP + sample["WrongAnswerText"]
     ).tolist()
     query_emb = embedder.encode(queries, normalize_embeddings=True, show_progress_bar=True)
-    candidate_idx = retrieve_candidates(query_emb, misconception_emb, args.min_k, args.max_k, args.margin)
+    candidate_idx, margins = retrieve_candidates(query_emb, misconception_emb, args.min_k, args.max_k, args.margin)
     avg_k = np.mean([len(c) for c in candidate_idx])
     print(f"Dynamic retrieval: avg {avg_k:.1f} candidates/query (min_k={args.min_k}, max_k={args.max_k}, margin={args.margin})")
 
     print("Building construct->misconception boost index...")
     construct_index = build_construct_misconception_index(long_df)
 
-    print(f"Tagging {len(sample)} pairs with concurrency={args.concurrency}...")
+    print(f"Tagging {len(sample)} pairs with concurrency={args.concurrency} (verify-mode={args.verify_mode})...")
     t0 = time.time()
     results = [None] * len(sample)
     with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
@@ -366,7 +452,7 @@ def main():
                 row,
                 boosted_candidates(mapping, mapping.iloc[candidate_idx[i]], construct_index,
                                     row.ConstructName, row.QuestionId),
-                mapping,
+                mapping, margins[i], args.verify_mode, args.verify_margin_threshold, verify_model,
             ): i
             for i, row in sample.iterrows()
         }
@@ -377,7 +463,11 @@ def main():
             results[i] = result
             done += 1
             status = "OK  " if result["Correct"] else ("MISS" if result["TrueLabelInCandidates"] else "RETRIEVAL-MISS")
-            print(f"[{done}/{len(sample)}] {status}  true={result['TrueMisconceptionId']} pred={result['PredictedMisconceptionId']}")
+            verify_note = ""
+            if result["Verified"]:
+                verify_note = " -> VERIFY:CHANGED" if result["VerifyChangedAnswer"] else " -> VERIFY:kept"
+            print(f"[{done}/{len(sample)}] {status}{verify_note}  true={result['TrueMisconceptionId']} "
+                  f"pred={result['PredictedMisconceptionId']} margin={result['RetrievalMargin']:.3f}")
     elapsed = time.time() - t0
     print(f"Tagged {len(sample)} pairs in {elapsed:.1f}s ({elapsed / len(sample):.1f}s/pair effective)")
 
@@ -386,10 +476,18 @@ def main():
     results_df.to_csv(args.out, index=False, encoding="utf-8-sig")
 
     top1_acc = results_df["Correct"].mean()
+    post_verify_acc = results_df["CorrectAfterVerify"].mean()
     recall_at_k = results_df["TrueLabelInCandidates"].mean()
+    n_verified = int(results_df["Verified"].sum())
+    n_changed = int(results_df["VerifyChangedAnswer"].sum())
     print("\n=== Summary ===")
-    print(f"Samples tested:        {len(results_df)}")
-    print(f"Top-1 accuracy:        {top1_acc:.1%}")
+    print(f"Samples tested:            {len(results_df)}")
+    print(f"Top-1 accuracy (pass 1):   {top1_acc:.1%}")
+    if n_verified:
+        print(f"Verified:                  {n_verified}/{len(results_df)} tags (--verify-mode={args.verify_mode})")
+        print(f"Verification changed:     {n_changed}/{n_verified} verified tags")
+        print(f"Top-1 accuracy (post-verify): {post_verify_acc:.1%}  "
+              f"({(post_verify_acc - top1_acc):+.1%} vs. pass 1)")
     print(f"Retrieval recall (dynamic top-{args.min_k}-{args.max_k}@margin={args.margin} + construct-boost): {recall_at_k:.1%}  "
           f"(upper bound on top-1 acc given this retrieval step)")
     print(f"Wrote detailed results to {args.out}")

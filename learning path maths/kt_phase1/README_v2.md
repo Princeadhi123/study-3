@@ -105,6 +105,19 @@ to get a `misconception_id` per interaction — no need to re-run stages 1-3.
 The catalog is pre-sorted by `times_selected` (most-selected wrong answers
 first) so tagging effort goes to the distractors that matter most.
 
+**The LLM-assisted tagging pass now exists**: see
+`../../eedi_misconception_tagging/MATH_TAGGING.md` and
+`tag_math_distractors.py` there. It needs the question text that
+`distractor_catalog.csv` deliberately omits (to stay small), which is what
+stage 4 below provides:
+
+4. `build_v2_item_context.py` (optional, only needed for misconception
+   tagging) — one more streaming pass over
+   `kt_interactions_v2_item_level.csv.gz`, restricted to the option-bearing
+   families `distractor_catalog.csv` already covers, keeping the most common
+   (question text, correct answer) pair per `item_id`. Writes
+   `reports_v2/item_context.csv`.
+
 ## Modeling: content now includes options, plus a 4th option-history variant
 
 `modeling/prepare_sequences_v2.py` builds the same per-student chronological
@@ -204,8 +217,9 @@ kt_phase1/
   build_v2_raw_clean.py     stage 1
   build_v2_sort.py          stage 2
   build_v2_item_level.py    stage 3
+  build_v2_item_context.py  stage 4 (optional, misconception-tagging support)
   data_v2/                  stage outputs (kt_interactions_v2*.csv.gz + samples)
-  reports_v2/                cleaning/item-level reports + distractor_catalog.csv
+  reports_v2/                cleaning/item-level reports + distractor_catalog.csv + item_context.csv
   modeling/
     prepare_sequences_v2.py  v2 sequence builder (adds content_text + option_idx);
                               used by ALL FOUR variants now, for a fair comparison
