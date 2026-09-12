@@ -344,6 +344,17 @@ def build_verify_prompt(elicit_rec, cluster_rec, alt_label: str) -> list:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def verify_needs_retry(rec) -> bool:
+    """True if a checkpointed verify record has no usable verdict -- i.e. the
+    call actually failed (empty response, or truncated before it reached the
+    Verdict line, same failure mode elicit_needs_retry guards against) rather
+    than a genuine CONFIRM/REPLACE. Without this a resume would skip real
+    failures forever, same reasoning as elicit_needs_retry."""
+    if rec is None:
+        return True
+    return not (rec.get("raw") or "").strip()
+
+
 def stage_verify(args):
     cluster_ckpt = JsonlCheckpoint(args.checkpoint_dir + "/cluster.jsonl")
     elicit_ckpt = JsonlCheckpoint(args.checkpoint_dir + "/elicit.jsonl")
@@ -379,7 +390,7 @@ def stage_verify(args):
         todo = []
         for rec in flagged:
             key = f"{rec['item_id']}\t{rec['option_value']}"
-            if out.has(key):
+            if not verify_needs_retry(out.get(key)):
                 continue
             sizes = type_label_size[rec["exercise_type"]]
             others = sorted((l for l in sizes if l != rec["misconception_label"]), key=lambda l: -sizes[l])
@@ -389,6 +400,9 @@ def stage_verify(args):
             elicit_rec["_text"] = text
             elicit_rec["_correct"] = correct_val
             todo.append((key, rec, build_verify_prompt(elicit_rec, rec, alt_label)))
+        n_retries = sum(1 for key, _, _ in todo if out.has(key))
+        print(f"{len(todo)} assignments to verify ({n_retries} of those are retries of a "
+              f"previously failed/truncated call)")
 
         t0 = time.time()
         # As in stage_elicit: only the network call runs in worker threads,
@@ -396,7 +410,8 @@ def stage_verify(args):
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             future_to_item = {
                 executor.submit(call_with_retry, client, model=verify_model, messages=messages,
-                                 temperature=0.0, max_tokens=args.max_tokens,
+                                 temperature=0.0,
+                                 max_tokens=args.retry_max_tokens if out.has(key) else args.max_tokens,
                                  **reasoning_effort_kwargs(args.reasoning_effort)): (key, rec)
                 for key, rec, messages in todo
             }
