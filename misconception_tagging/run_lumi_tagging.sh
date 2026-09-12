@@ -26,6 +26,12 @@
 #      numpy, openai, python-dotenv, sentence-transformers -- CPU build of
 #      torch is fine, no GPU needed here): pip install -r requirements.txt
 #
+# Tunables (all optional env vars, e.g. KT_LIMIT=10 KT_TYPES=MATH_DRILLER
+# sbatch ... for a cheap sanity run before the full job):
+#   KT_CONCURRENCY (default 8), KT_REASONING_EFFORT (default low),
+#   KT_VERIFY_MODEL (default: same model as elicit), KT_LIMIT, KT_TYPES,
+#   KT_MIN_TIMES_SELECTED (default 2), KT_CLUSTER_THRESHOLD (default 0.82),
+#   KT_SMALL_CLUSTER_THRESHOLD (default 2), KT_VERIFY_MARGIN (default 0.08).
 #SBATCH --job-name=math_misconception_tagging
 #SBATCH --partition=small
 #SBATCH --nodes=1
@@ -89,6 +95,19 @@ print('Aitta reachable, test response:', resp.choices[0].message.content)
 
 mkdir -p "${CHECKPOINT_DIR}" "${OUT_DIR}"
 
+# KT_LIMIT / KT_TYPES let you do a cheap sanity run first (e.g. KT_LIMIT=10
+# KT_TYPES=MATH_DRILLER sbatch ...) before committing to the full multi-hour
+# job -- tagged items are checkpointed either way, so a limited test run's
+# results are reused (not wasted) when you resubmit without the limit.
+LIMIT_ARGS=()
+if [[ -n "${KT_LIMIT:-}" ]]; then
+    LIMIT_ARGS=(--limit "${KT_LIMIT}")
+fi
+TYPES_ARGS=()
+if [[ -n "${KT_TYPES:-}" ]]; then
+    TYPES_ARGS=(--types "${KT_TYPES}")
+fi
+
 # Elicitation processes exercise_type by exercise_type, most-impactful (total
 # times_selected) first, and is fully checkpointed -- safe to resubmit this
 # whole script if the 2-day time limit is hit mid-elicitation; already-tagged
@@ -99,7 +118,8 @@ mkdir -p "${CHECKPOINT_DIR}" "${OUT_DIR}"
     --checkpoint-dir "${CHECKPOINT_DIR}" \
     --min-times-selected "${KT_MIN_TIMES_SELECTED:-2}" \
     --concurrency "${KT_CONCURRENCY:-8}" \
-    --reasoning-effort "${KT_REASONING_EFFORT:-low}"
+    --reasoning-effort "${KT_REASONING_EFFORT:-low}" \
+    "${LIMIT_ARGS[@]}" "${TYPES_ARGS[@]}"
 
 # Clustering is local (sentence-transformer embeddings + greedy clustering),
 # no LLM calls, cheap to redo if you want to try a different --cluster-threshold.
@@ -124,7 +144,7 @@ fi
     --verify-margin "${KT_VERIFY_MARGIN:-0.08}" \
     --concurrency "${KT_CONCURRENCY:-8}" \
     --reasoning-effort "${KT_REASONING_EFFORT:-low}" \
-    "${VERIFY_MODEL_ARGS[@]}"
+    "${LIMIT_ARGS[@]}" "${VERIFY_MODEL_ARGS[@]}"
 
 "${PYTHON}" tag_math_distractors.py --stage export \
     --distractor-catalog "${DISTRACTOR_CATALOG}" \
