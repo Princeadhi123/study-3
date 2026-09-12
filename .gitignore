@@ -14,6 +14,14 @@ kt_dataset/*.csv
 __pycache__/
 *.pyc
 
+# Misconception-tagging generated checkpoints, exports, and run logs
+# These are derived from the source catalog and regenerated/resumed on LUMI.
+misconception_tagging/checkpoints/
+misconception_tagging/out/
+misconception_tagging/*.out
+misconception_tagging/*.err
+misconception_tagging/*.log
+
 # Misconception-tagging embedding cache (derived, regenerable)
 misconception_cache/
 
