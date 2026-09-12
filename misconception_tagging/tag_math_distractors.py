@@ -180,6 +180,21 @@ def parse_elicit_response(text: str) -> tuple:
     return label, reasoning
 
 
+def elicit_needs_retry(rec) -> bool:
+    """True if a checkpointed elicit record has no usable label AND isn't an
+    explicit "Misconception: UNKNOWN" -- i.e. the call actually failed
+    (empty response, or truncated before it reached the Misconception line,
+    both seen in practice with reasoning models burning their whole token
+    budget on hidden chain-of-thought) rather than the model genuinely
+    having nothing to go on. Without this distinction both cases look
+    identical (label: null) and a resume would skip real failures forever."""
+    if rec is None:
+        return True
+    if rec.get("label"):
+        return False
+    return not re.search(r"Misconception\s*:\s*UNKNOWN", rec.get("raw") or "", flags=re.IGNORECASE)
+
+
 def stage_elicit(args):
     client = get_client()
     model = args.model
@@ -193,8 +208,11 @@ def stage_elicit(args):
             sub = df[df["exercise_type"] == etype].sort_values("times_selected", ascending=False)
             if args.limit:
                 sub = sub.head(args.limit)
-            todo = [r for _, r in sub.iterrows() if not ckpt.has(f"{r['item_id']}\t{r['option_value']}")]
+            todo = [r for _, r in sub.iterrows()
+                    if elicit_needs_retry(ckpt.get(f"{r['item_id']}\t{r['option_value']}"))]
+            n_retries = sum(1 for r in todo if ckpt.has(f"{r['item_id']}\t{r['option_value']}"))
             print(f"[{etype}] {len(sub)} distractors, {len(todo)} not yet elicited "
+                  f"({n_retries} of those are retries of a previously failed/truncated call) "
                   f"(impact = {sub['times_selected'].sum():,} total selections)")
             t0 = time.time()
             # Only the network call runs in worker threads; every checkpoint
@@ -202,12 +220,19 @@ def stage_elicit(args):
             # JsonlCheckpoint's single-writer append-and-fsync stays safe
             # without needing its own lock.
             with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-                future_to_row = {
-                    executor.submit(call_with_retry, client, model=model, messages=build_elicit_prompt(row),
-                                     temperature=0.0, max_tokens=args.max_tokens,
-                                     **reasoning_effort_kwargs(args.reasoning_effort)): row
-                    for row in todo
-                }
+                future_to_row = {}
+                for row in todo:
+                    key = f"{row['item_id']}\t{row['option_value']}"
+                    # A prior failure at this key means the call ran out of
+                    # max_tokens (often the reasoning model's hidden
+                    # chain-of-thought ate the whole budget) before ever
+                    # reaching the answer -- give retries more room instead
+                    # of just repeating the same failure.
+                    tokens = args.retry_max_tokens if ckpt.has(key) else args.max_tokens
+                    future = executor.submit(call_with_retry, client, model=model,
+                                              messages=build_elicit_prompt(row), temperature=0.0,
+                                              max_tokens=tokens, **reasoning_effort_kwargs(args.reasoning_effort))
+                    future_to_row[future] = row
                 done = 0
                 for future in as_completed(future_to_row):
                     row = future_to_row[future]
@@ -477,6 +502,11 @@ def main():
                               "pass's, e.g. one of the other models Aitta hosts -- see "
                               "https://aitta.csc.fi/models; default: same model as --model)")
     parser.add_argument("--max-tokens", type=int, default=1200)
+    parser.add_argument("--retry-max-tokens", type=int, default=2400,
+                         help="max_tokens used when retrying an elicit call that previously failed "
+                              "(empty response or truncated before the Misconception line) -- higher "
+                              "than --max-tokens since the usual cause is the reasoning budget "
+                              "eating the whole completion before any visible answer.")
     parser.add_argument("--reasoning-effort", default="low", choices=["low", "medium", "high", ""],
                          help="Caps a reasoning model's (gpt-oss) internal chain-of-thought length "
                               "before the answer -- measured ~2-4x lower latency and completion "
