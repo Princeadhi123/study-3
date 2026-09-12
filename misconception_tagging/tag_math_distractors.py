@@ -52,6 +52,7 @@ import csv
 import re
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +66,7 @@ from tagging_common import (
     get_client,
     greedy_cluster,
     nearest_two_centroids,
+    reasoning_effort_kwargs,
 )
 
 ROOT = Path(__file__).parent
@@ -195,22 +197,35 @@ def stage_elicit(args):
             print(f"[{etype}] {len(sub)} distractors, {len(todo)} not yet elicited "
                   f"(impact = {sub['times_selected'].sum():,} total selections)")
             t0 = time.time()
-            for i, row in enumerate(todo):
-                key = f"{row['item_id']}\t{row['option_value']}"
-                messages = build_elicit_prompt(row)
-                response = call_with_retry(client, model=model, messages=messages,
-                                            temperature=0.0, max_tokens=args.max_tokens)
-                raw_text = response.choices[0].message.content
-                label, reasoning = parse_elicit_response(raw_text)
-                ckpt.write(key, {
-                    "item_id": row["item_id"], "option_value": row["option_value"],
-                    "exercise_type": etype, "times_selected": int(row["times_selected"]),
-                    "context_missing": bool(row["context_missing"]),
-                    "label": label, "reasoning": reasoning, "raw": raw_text,
-                })
-                if (i + 1) % 25 == 0 or (i + 1) == len(todo):
-                    elapsed = time.time() - t0
-                    print(f"  [{etype}] {i + 1}/{len(todo)} elicited ({elapsed:.0f}s elapsed)")
+            # Only the network call runs in worker threads; every checkpoint
+            # write happens back on the main thread as futures complete, so
+            # JsonlCheckpoint's single-writer append-and-fsync stays safe
+            # without needing its own lock.
+            with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+                future_to_row = {
+                    executor.submit(call_with_retry, client, model=model, messages=build_elicit_prompt(row),
+                                     temperature=0.0, max_tokens=args.max_tokens,
+                                     **reasoning_effort_kwargs(args.reasoning_effort)): row
+                    for row in todo
+                }
+                done = 0
+                for future in as_completed(future_to_row):
+                    row = future_to_row[future]
+                    response = future.result()
+                    raw_text = response.choices[0].message.content
+                    label, reasoning = parse_elicit_response(raw_text)
+                    key = f"{row['item_id']}\t{row['option_value']}"
+                    ckpt.write(key, {
+                        "item_id": row["item_id"], "option_value": row["option_value"],
+                        "exercise_type": etype, "times_selected": int(row["times_selected"]),
+                        "context_missing": bool(row["context_missing"]),
+                        "label": label, "reasoning": reasoning, "raw": raw_text,
+                    })
+                    done += 1
+                    if done % 25 == 0 or done == len(todo):
+                        elapsed = time.time() - t0
+                        print(f"  [{etype}] {done}/{len(todo)} elicited ({elapsed:.0f}s elapsed, "
+                              f"concurrency={args.concurrency})")
     print(f"Elicitation checkpoint: {args.checkpoint_dir}/elicit.jsonl")
 
 
@@ -314,6 +329,9 @@ def stage_verify(args):
           f"(small cluster <= {args.small_cluster_threshold}, or margin < {args.verify_margin}, or missing context)")
 
     client = get_client()
+    verify_model = args.verify_model or args.model
+    if verify_model != args.model:
+        print(f"Verify pass using {verify_model} (elicit pass used {args.model})")
     # Nearest alternative label per flagged item, approximated by the label
     # of the largest OTHER cluster within the same exercise_type (a cheap
     # proxy -- avoids re-embedding/re-searching centroids here).
@@ -322,7 +340,8 @@ def stage_verify(args):
         type_labels[r["exercise_type"]].add(r["misconception_label"])
 
     with JsonlCheckpoint(args.checkpoint_dir + "/verify.jsonl") as out:
-        for i, rec in enumerate(flagged):
+        todo = []
+        for rec in flagged:
             key = f"{rec['item_id']}\t{rec['option_value']}"
             if out.has(key):
                 continue
@@ -332,17 +351,32 @@ def stage_verify(args):
             text, correct_val = ctx_lookup.get(rec["item_id"], ("", ""))
             elicit_rec["_text"] = text
             elicit_rec["_correct"] = correct_val
-            messages = build_verify_prompt(elicit_rec, rec, alt_label)
-            response = call_with_retry(client, model=args.model, messages=messages,
-                                        temperature=0.0, max_tokens=args.max_tokens)
-            raw_text = response.choices[0].message.content or ""
-            verdict_match = re.search(r"Verdict\s*:\s*(CONFIRM|REPLACE\s*:\s*.*)", raw_text,
-                                       flags=re.IGNORECASE | re.DOTALL)
-            verdict = verdict_match.group(1).strip() if verdict_match else raw_text.strip()
-            out.write(key, {"item_id": rec["item_id"], "option_value": rec["option_value"],
-                             "verdict": verdict, "raw": raw_text})
-            if (i + 1) % 25 == 0 or (i + 1) == len(flagged):
-                print(f"  verified {i + 1}/{len(flagged)}")
+            todo.append((key, rec, build_verify_prompt(elicit_rec, rec, alt_label)))
+
+        t0 = time.time()
+        # As in stage_elicit: only the network call runs in worker threads,
+        # checkpoint writes stay on the main thread as futures complete.
+        with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+            future_to_item = {
+                executor.submit(call_with_retry, client, model=verify_model, messages=messages,
+                                 temperature=0.0, max_tokens=args.max_tokens,
+                                 **reasoning_effort_kwargs(args.reasoning_effort)): (key, rec)
+                for key, rec, messages in todo
+            }
+            done = 0
+            for future in as_completed(future_to_item):
+                key, rec = future_to_item[future]
+                response = future.result()
+                raw_text = response.choices[0].message.content or ""
+                verdict_match = re.search(r"Verdict\s*:\s*(CONFIRM|REPLACE\s*:\s*.*)", raw_text,
+                                           flags=re.IGNORECASE | re.DOTALL)
+                verdict = verdict_match.group(1).strip() if verdict_match else raw_text.strip()
+                out.write(key, {"item_id": rec["item_id"], "option_value": rec["option_value"],
+                                 "verdict": verdict, "raw": raw_text})
+                done += 1
+                if done % 25 == 0 or done == len(todo):
+                    elapsed = time.time() - t0
+                    print(f"  verified {done}/{len(todo)} ({elapsed:.0f}s elapsed, concurrency={args.concurrency})")
     print(f"Verification results: {args.checkpoint_dir}/verify.jsonl")
 
 
@@ -433,7 +467,25 @@ def main():
     parser.add_argument("--limit", type=int, default=0,
                          help="Cap items processed per type (elicit) or overall (verify) -- for smoke testing")
     parser.add_argument("--model", default=default_model())
+    parser.add_argument("--verify-model", default=None,
+                         help="Model to use for the verify stage's LLM critique, if different from "
+                              "--model (a different model decorrelates its errors from the elicit "
+                              "pass's, e.g. one of the other models Aitta hosts -- see "
+                              "https://aitta.csc.fi/models; default: same model as --model)")
     parser.add_argument("--max-tokens", type=int, default=1200)
+    parser.add_argument("--reasoning-effort", default="low", choices=["low", "medium", "high", ""],
+                         help="Caps a reasoning model's (gpt-oss) internal chain-of-thought length "
+                              "before the answer -- measured ~2-4x lower latency and completion "
+                              "tokens vs. unset, no observed quality/format drop on spot checks. "
+                              "Silently ignored by non-reasoning models (e.g. Llama-3.3), so safe to "
+                              "leave on even when --verify-model isn't a reasoning model. Pass '' to "
+                              "disable (use the model's default reasoning budget).")
+    parser.add_argument("--concurrency", type=int, default=8,
+                         help="Parallel in-flight requests to Aitta for elicit/verify. Sequential "
+                              "(concurrency=1) is far too slow for the full catalog -- e.g. ~19.5K "
+                              "elicit calls at the ~7-9s/call measured on gpt-oss-120b is ~40+ hours "
+                              "sequential. tag_distractors.py measured concurrency up to ~10-15 as "
+                              "safe against Aitta's rate limiting; 20 triggered 429s in testing.")
     parser.add_argument("--cluster-threshold", type=float, default=0.82,
                          help="Cosine similarity threshold for two elicited labels to join the same cluster")
     parser.add_argument("--small-cluster-threshold", type=int, default=2,

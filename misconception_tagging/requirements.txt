@@ -1,0 +1,11 @@
+# Dependencies for tag_distractors.py / tag_math_distractors.py / tagging_common.py.
+# Versions pinned to what this pipeline was developed and smoke-tested against.
+# On LUMI, install into mathkt-env with a CPU build of torch (no GPU needed for
+# this pipeline -- clustering uses sentence-transformers on CPU only); let pip
+# resolve torch/transformers as sentence-transformers' own dependencies rather
+# than pinning them here.
+pandas==2.2.3
+numpy==2.2.1
+openai==3.3.0
+python-dotenv==1.0.1
+sentence-transformers==5.1.2

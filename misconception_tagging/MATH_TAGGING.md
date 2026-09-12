@@ -40,13 +40,20 @@ the known-ground-truth Eedi set gave:
 
 That's a real, measured confirmation of a specific risk: **the same model
 verifying its own tag, even with a differently-framed second prompt, did not
-catch a single case here.** Before trusting `tag_math_distractors.py`'s
-`verify` stage on real (unlabeled) data, it's worth re-running
-`tag_distractors.py --verify-model <a different model id>` (if Aitta serves
-more than one) to see whether a genuinely different model disagrees more
-often -- a same-model rerun evidently isn't enough on its own. Until that's
-confirmed, treat `needs_human_review.csv` as **the** review queue, not the
-`verify` stage's CONFIRM/REPLACE verdicts as ground truth.
+catch a single case here.** Both `tag_distractors.py` and
+`tag_math_distractors.py` now take a `--verify-model` flag so the verify
+stage can run on a *different* Aitta-hosted model than the elicit/tag stage
+used (see https://aitta.csc.fi for the current catalog -- e.g. elicit with
+`openai/gpt-oss-120b`, verify with `meta-llama/Llama-3.3-70B-Instruct` or
+`mistralai/Ministral-3-14B-Reasoning-2512`). Smoke-test a candidate pairing
+on a small `--limit` before a full run: model availability on the staging
+instance changes, and a differently-sized/trained model may follow the
+"Reasoning: ... Verdict: ..." output format less reliably, which is worth
+checking on a handful of rows before trusting it at scale. Until you've
+actually measured a different-model pairing catching cases same-model
+verification missed, keep treating `needs_human_review.csv` as **the**
+review queue, not the `verify` stage's CONFIRM/REPLACE verdicts as ground
+truth.
 
 ## Running the math-data pipeline
 
@@ -62,7 +69,7 @@ python build_v2_item_context.py   # stage 4 (new) -- produces reports_v2/item_co
                                    # doesn't store question text (see its docstring)
 ```
 
-Then, from `eedi_misconception_tagging/`:
+Then, from `misconception_tagging/`:
 
 ```bash
 # elicit -> cluster -> verify -> export, in one go:
@@ -72,7 +79,8 @@ python tag_math_distractors.py --stage all
 python tag_math_distractors.py --stage elicit --types MATH_DRILLER   # one type at a time
 python tag_math_distractors.py --stage elicit                        # remaining types, impact order
 python tag_math_distractors.py --stage cluster
-python tag_math_distractors.py --stage verify
+python tag_math_distractors.py --stage verify \
+    --verify-model meta-llama/Llama-3.3-70B-Instruct   # optional: decorrelate from elicit's model
 python tag_math_distractors.py --stage export
 ```
 
@@ -80,6 +88,40 @@ Every stage writes to `--checkpoint-dir` (default
 `misconception_cache/math_tagging/`) as newline-delimited JSON, one line per
 completed item, flushed immediately -- safe to Ctrl-C and resume, or
 resubmit as a SLURM job after a time-limit kill (see `run_lumi_tagging.sh`).
+
+### Runtime and concurrency
+
+Two independent levers, both on by default:
+
+- **`--concurrency`** (default 8, also settable on LUMI with
+  `KT_CONCURRENCY`): `elicit` and `verify` send requests in parallel -- only
+  the network call runs on worker threads, every checkpoint write happens
+  back on the main thread, so resumability is unaffected. Smoke-tested
+  concurrency=6 got a ~3x speedup over sequential (network/GPU-queue bound,
+  so it won't scale linearly with thread count -- `tag_distractors.py`'s
+  notes measured concurrency up to ~10-15 as safe against Aitta's rate
+  limiting, with 20 triggering 429s). Start at the default 8 and watch for
+  429 retries in the log before pushing higher.
+- **`--reasoning-effort low`** (default, also `KT_REASONING_EFFORT`):
+  `openai/gpt-oss-120b` is a reasoning model that burns most of its latency
+  on an internal chain-of-thought before the actual answer. Capping that
+  measured ~2-4x lower latency and completion tokens on a realistic elicit
+  prompt (5.5s/223 tokens -> 2.4s/87 tokens), with no observed drop in
+  output format compliance or label quality on spot checks. It's silently
+  ignored by non-reasoning models (confirmed against
+  `meta-llama/Llama-3.3-70B-Instruct` -- no error, just no effect), so it's
+  safe to leave on for `verify` even if `--verify-model` isn't a reasoning
+  model. Pass `--reasoning-effort ""` to disable and use the model's
+  default reasoning budget.
+
+At `--min-times-selected 2` (the default), the real catalog has ~19,500
+elicit calls. Fully sequential (`--concurrency 1`, `--reasoning-effort ""`)
+that's ~7-9s/call, ~40+ hours -- likely to blow past `run_lumi_tagging.sh`'s
+2-day SLURM `--time` limit. With both levers on (the defaults), each call
+dropped to roughly 2-3s in smoke testing, i.e. combined the two easily bring
+elicit down to single-digit hours rather than 40+ -- but that's from small
+smoke-test samples, not a full run, so treat it as directional and watch
+the first few thousand real calls' pace before assuming it holds at scale.
 
 ### Outputs (`--out-dir`, default `misconception_cache/math_tagging_out/`)
 

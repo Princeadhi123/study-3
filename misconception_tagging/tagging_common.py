@@ -41,6 +41,19 @@ def default_model() -> str:
     return os.getenv("AITTA_MODEL", "openai/gpt-oss-120b")
 
 
+def reasoning_effort_kwargs(effort: str) -> dict:
+    """extra_body kwargs to cap a reasoning model's (e.g. gpt-oss) internal
+    chain-of-thought length before it emits the actual answer -- measured on
+    Aitta's openai/gpt-oss-120b: "low" cut latency ~2-4x (5.5s -> 2.4s on a
+    realistic elicit prompt) and completion tokens by a similar factor vs.
+    the (unset) default, with no observed drop in output format compliance
+    or answer quality on spot checks. Silently ignored by non-reasoning
+    models (confirmed against meta-llama/Llama-3.3-70B-Instruct: no error,
+    just has no effect), so safe to always pass regardless of which model
+    ends up handling the call."""
+    return {"extra_body": {"reasoning_effort": effort}} if effort else {}
+
+
 def call_with_retry(client, max_retries: int = 5, **kwargs):
     """Call chat.completions.create, retrying with exponential backoff on 429s
     (Aitta is a shared HPC service and will rate-limit bursts of concurrent

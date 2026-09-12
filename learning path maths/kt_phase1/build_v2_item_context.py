@@ -1,5 +1,5 @@
 """Stage 4 (v2, optional): build a per-item_id text/context lookup for the
-LLM misconception-tagging pipeline in ../eedi_misconception_tagging/.
+LLM misconception-tagging pipeline in ../misconception_tagging/.
 
 Why this is needed: reports_v2/distractor_catalog.csv (built by
 build_v2_item_level.py) intentionally stores only item_id/option_value/counts
@@ -17,7 +17,7 @@ Writes reports_v2/item_context.csv:
   item_id, exercise_type, skill_name, exercise_name, text, correct_option_value
 
 Run after build_v2_item_level.py (stage 3), before the tagging scripts in
-../eedi_misconception_tagging/tag_math_distractors.py.
+../misconception_tagging/tag_math_distractors.py.
 """
 import csv
 import gzip

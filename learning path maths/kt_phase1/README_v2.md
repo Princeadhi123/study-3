@@ -106,7 +106,7 @@ The catalog is pre-sorted by `times_selected` (most-selected wrong answers
 first) so tagging effort goes to the distractors that matter most.
 
 **The LLM-assisted tagging pass now exists**: see
-`../../eedi_misconception_tagging/MATH_TAGGING.md` and
+`../../misconception_tagging/MATH_TAGGING.md` and
 `tag_math_distractors.py` there. It needs the question text that
 `distractor_catalog.csv` deliberately omits (to stay small), which is what
 stage 4 below provides:

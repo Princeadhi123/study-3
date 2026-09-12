@@ -10,8 +10,8 @@
 # it requests the CPU partition, not small-g.
 #
 # Before submitting:
-#   1. Put this eedi_misconception_tagging directory in:
-#        /projappl/project_462001308/math_kt/code/eedi_misconception_tagging
+#   1. Put this misconception_tagging directory in:
+#        /projappl/project_462001308/math_kt/code/misconception_tagging
 #      (it imports tagging_common.py by relative path, so keep the two
 #      scripts together)
 #   2. Make sure reports_v2/distractor_catalog.csv AND reports_v2/item_context.csv
@@ -22,8 +22,9 @@
 #   3. .env at the repo root has AITTA_BASE_URL / AITTA_API_KEY / AITTA_MODEL
 #      set (see https://aitta.csc.fi) -- this must be reachable from wherever
 #      this job actually runs; see the connectivity check below.
-#   4. A Python environment with pandas, numpy, openai, python-dotenv,
-#      sentence-transformers (CPU build of torch is fine, no GPU needed here).
+#   4. A Python environment with the packages in requirements.txt (pandas,
+#      numpy, openai, python-dotenv, sentence-transformers -- CPU build of
+#      torch is fine, no GPU needed here): pip install -r requirements.txt
 #
 #SBATCH --job-name=math_misconception_tagging
 #SBATCH --partition=small
@@ -96,7 +97,9 @@ mkdir -p "${CHECKPOINT_DIR}" "${OUT_DIR}"
     --distractor-catalog "${DISTRACTOR_CATALOG}" \
     --item-context "${ITEM_CONTEXT}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
-    --min-times-selected "${KT_MIN_TIMES_SELECTED:-2}"
+    --min-times-selected "${KT_MIN_TIMES_SELECTED:-2}" \
+    --concurrency "${KT_CONCURRENCY:-8}" \
+    --reasoning-effort "${KT_REASONING_EFFORT:-low}"
 
 # Clustering is local (sentence-transformer embeddings + greedy clustering),
 # no LLM calls, cheap to redo if you want to try a different --cluster-threshold.
@@ -106,10 +109,22 @@ mkdir -p "${CHECKPOINT_DIR}" "${OUT_DIR}"
 
 # Verification: LLM critique pass on low-confidence assignments only
 # (small clusters / low centroid margin / missing question context).
+# Set KT_VERIFY_MODEL to one of the other models Aitta hosts (see
+# https://aitta.csc.fi/models) to decorrelate the critique from whatever
+# model made the original elicit-stage error, instead of asking the same
+# model to mark its own homework. Defaults to the same model as elicit.
+VERIFY_MODEL_ARGS=()
+if [[ -n "${KT_VERIFY_MODEL:-}" ]]; then
+    VERIFY_MODEL_ARGS=(--verify-model "${KT_VERIFY_MODEL}")
+fi
 "${PYTHON}" tag_math_distractors.py --stage verify \
+    --item-context "${ITEM_CONTEXT}" \
     --checkpoint-dir "${CHECKPOINT_DIR}" \
     --small-cluster-threshold "${KT_SMALL_CLUSTER_THRESHOLD:-2}" \
-    --verify-margin "${KT_VERIFY_MARGIN:-0.08}"
+    --verify-margin "${KT_VERIFY_MARGIN:-0.08}" \
+    --concurrency "${KT_CONCURRENCY:-8}" \
+    --reasoning-effort "${KT_REASONING_EFFORT:-low}" \
+    "${VERIFY_MODEL_ARGS[@]}"
 
 "${PYTHON}" tag_math_distractors.py --stage export \
     --distractor-catalog "${DISTRACTOR_CATALOG}" \
