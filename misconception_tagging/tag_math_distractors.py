@@ -284,7 +284,15 @@ def stage_cluster(args):
         best = max(members, key=lambda m: float(m[1] @ centroid))
         cluster_label[cid] = best[0]["label"]
 
-    with JsonlCheckpoint(args.checkpoint_dir + "/cluster.jsonl") as out:
+    # Unlike elicit/verify, clustering is a full recompute every time (no
+    # per-item LLM call to avoid redoing), so start cluster.jsonl fresh
+    # instead of appending -- otherwise every re-run (e.g. while tuning
+    # --cluster-threshold) leaves the previous run's now-stale rows in the
+    # file, duplicating every key that appears in both runs.
+    cluster_path = Path(args.checkpoint_dir + "/cluster.jsonl")
+    if cluster_path.exists():
+        cluster_path.unlink()
+    with JsonlCheckpoint(cluster_path) as out:
         for rec, cid, emb in zip(records, assignments, embeddings):
             best_idx, best_sim, second_sim = nearest_two_centroids(emb, centroids)
             margin = best_sim - second_sim if second_sim >= 0 else 1.0
