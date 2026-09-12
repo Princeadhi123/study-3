@@ -334,10 +334,13 @@ def stage_verify(args):
         print(f"Verify pass using {verify_model} (elicit pass used {args.model})")
     # Nearest alternative label per flagged item, approximated by the label
     # of the largest OTHER cluster within the same exercise_type (a cheap
-    # proxy -- avoids re-embedding/re-searching centroids here).
-    type_labels = defaultdict(set)
+    # proxy -- avoids re-embedding/re-searching centroids here). Keep the
+    # biggest cluster_size seen per label so "largest" can actually be
+    # ranked (a plain set here would pick an arbitrary, hash-order label).
+    type_label_size = defaultdict(dict)
     for r in all_recs:
-        type_labels[r["exercise_type"]].add(r["misconception_label"])
+        sizes = type_label_size[r["exercise_type"]]
+        sizes[r["misconception_label"]] = max(sizes.get(r["misconception_label"], 0), r["cluster_size"])
 
     with JsonlCheckpoint(args.checkpoint_dir + "/verify.jsonl") as out:
         todo = []
@@ -345,7 +348,8 @@ def stage_verify(args):
             key = f"{rec['item_id']}\t{rec['option_value']}"
             if out.has(key):
                 continue
-            others = [l for l in type_labels[rec["exercise_type"]] if l != rec["misconception_label"]]
+            sizes = type_label_size[rec["exercise_type"]]
+            others = sorted((l for l in sizes if l != rec["misconception_label"]), key=lambda l: -sizes[l])
             alt_label = others[0] if others else "(no alternative candidates for this exercise type)"
             elicit_rec = dict(elicit_ckpt.get(key) or {})
             text, correct_val = ctx_lookup.get(rec["item_id"], ("", ""))
