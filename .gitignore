@@ -16,11 +16,13 @@ __pycache__/
 
 # Misconception-tagging generated checkpoints, exports, and run logs
 # These are derived from the source catalog and regenerated/resumed on LUMI.
-misconception_tagging/checkpoints/
-misconception_tagging/out/
-misconception_tagging/*.out
-misconception_tagging/*.err
-misconception_tagging/*.log
+# Wildcard covers per-pipeline folders (misconception_tagging_distractors/,
+# and future siblings like misconception_tagging_freetext/).
+misconception_tagging*/checkpoints/
+misconception_tagging*/out/
+misconception_tagging*/*.out
+misconception_tagging*/*.err
+misconception_tagging*/*.log
 
 # Misconception-tagging embedding cache (derived, regenerable)
 misconception_cache/

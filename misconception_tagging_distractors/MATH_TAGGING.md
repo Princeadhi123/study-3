@@ -139,6 +139,38 @@ the first few thousand real calls' pace before assuming it holds at scale.
   impact rows first, since that's where a wrong tag would do the most damage
   once it's feeding a KT model.
 
+### Coverage: which exercise types this tags (and why only those)
+
+The distractor-catalog approach only works where the student's wrong answer
+is a *selection from a fixed option list* -- that's what makes a wrong option
+a countable, repeatable "distractor" worth an LLM call. In the math-path data
+that means the four option-based `exercise_type`s:
+
+| exercise_type | wrong-answer rows in catalog | tagged (times_selected >= 2) |
+|---|---|---|
+| `MATH_DRILLER` | 140,984 | 16,163 |
+| `VILLE_QUIZ` | 12,349 | 3,417 |
+| `CROSSWORD_PUZZLE` | 0 | 0 |
+| `VOICE_DRILLER` | 104, all selected once | 0 |
+
+So all 19,580 eligible distractors are tagged (0 blank labels/ids in
+`distractor_catalog_final_v2.csv`). The remaining ~133.9k wrong-answer
+catalog rows are options never/rarely selected (119k with `times_selected`
+= 0, 14.6k = 1) -- one-off typos/guesses, not repeatable misconceptions.
+
+Every other exercise type in the KT data (`MATH_CALCULATION_ORDER`,
+`FILL_IN_EXERCISE`, `MATH_SYMBOLIC_EXER`, `RUNNER`, ...) has `has_options = 0`
+-- free-text/typed answers, so there is no distractor to tag. Measured on
+the merged `kt_interactions_v2_item_level_misconceptions.csv.gz` (13.9M
+rows): covered types are 43.1% of interactions; 300,436 of ~718k wrong
+interactions in covered types (~42%) match a tagged distractor = 11.8% of
+all wrong interactions. (The ~17k gap vs. a naive count comes from
+`selected_option_value` values in the interactions that don't appear in
+the catalog -- e.g. malformed multi-select strings and typed answers that
+never were predefined options.) Tagging the free-text types would need a
+different pipeline (elicit from `answer_raw` directly, deduplicated) -- a
+separate folder, not this one.
+
 ### Processing order
 
 `--stage elicit` processes `exercise_type`s in order of total impact (sum of
