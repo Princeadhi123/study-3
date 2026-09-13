@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 from dotenv import load_dotenv
-from openai import OpenAI, RateLimitError
+from openai import APIError, OpenAI
 
 ROOT = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
@@ -34,7 +34,7 @@ def get_client() -> OpenAI:
             "AITTA_BASE_URL / AITTA_API_KEY are not set. Edit the .env file at the "
             "project root with your Aitta token from https://aitta.csc.fi"
         )
-    return OpenAI(base_url=base_url, api_key=api_key)
+    return OpenAI(base_url=base_url, api_key=api_key, timeout=180.0, max_retries=3)
 
 
 def default_model() -> str:
@@ -62,7 +62,11 @@ def call_with_retry(client, max_retries: int = 5, **kwargs):
     for attempt in range(max_retries):
         try:
             return client.chat.completions.create(**kwargs)
-        except RateLimitError:
+        except APIError:
+            # RateLimitError is the common case (Aitta is a shared service and
+            # will rate-limit bursts), but timeouts/connection drops/5xx land
+            # here too -- same backoff applies. The client's own max_retries
+            # already retried transient failures before we see them.
             if attempt == max_retries - 1:
                 raise
             time.sleep(2 ** attempt)
