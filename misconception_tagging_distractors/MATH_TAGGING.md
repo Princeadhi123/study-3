@@ -127,9 +127,12 @@ the first few thousand real calls' pace before assuming it holds at scale.
 
 - **`distractor_catalog_tagged.csv`** -- the original catalog with
   `misconception_id` / `misconception_label` filled in, plus
-  `confidence_margin`, `cluster_size`, `needs_human_review`. Join this back
-  onto `kt_interactions_v2_item_level.csv.gz` by
-  `(item_id, selected_option_value)` -- no need to re-run any earlier stage.
+  `confidence_margin`, `cluster_size`, `needs_human_review`. This is the
+  *pre-review* export; after `apply_review.py` + Gemini/manual review the
+  authoritative file is `out/distractor_catalog_final_v2.csv` (see
+  "Final artifacts" below), which `merge_into_kt.py` joins onto
+  `kt_interactions_v2_item_level.csv.gz` by
+  `(item_id, selected_option_value)`.
 - **`cluster_summary.csv`** -- one row per discovered misconception,
   sorted by total impact (`times_selected` summed across members). Start
   your sanity check here.
@@ -162,14 +165,32 @@ Every other exercise type in the KT data (`MATH_CALCULATION_ORDER`,
 `FILL_IN_EXERCISE`, `MATH_SYMBOLIC_EXER`, `RUNNER`, ...) has `has_options = 0`
 -- free-text/typed answers, so there is no distractor to tag. Measured on
 the merged `kt_interactions_v2_item_level_misconceptions.csv.gz` (13.9M
-rows): covered types are 43.1% of interactions; 300,436 of ~718k wrong
-interactions in covered types (~42%) match a tagged distractor = 11.8% of
-all wrong interactions. (The ~17k gap vs. a naive count comes from
-`selected_option_value` values in the interactions that don't appear in
-the catalog -- e.g. malformed multi-select strings and typed answers that
-never were predefined options.) Tagging the free-text types would need a
-different pipeline (elicit from `answer_raw` directly, deduplicated) -- a
-separate folder, not this one.
+rows): covered types are 43.1% of interactions; 317,261 of 717,708 wrong
+interactions in covered types (44.2%) match a tagged distractor = 12.4% of
+all 2,558,313 wrong interactions. The remaining covered-type wrongs are
+typed free-text answers with no catalog distractor (~264k), one-off
+selections below the threshold (~17k), or rows with no option recorded.
+Tagging the free-text types would need a different pipeline (elicit from
+`answer_raw` directly, deduplicated) -- a separate folder, not this one.
+
+### Final artifacts
+
+- **`out/distractor_catalog_final_v2.csv`** -- authoritative catalog:
+  all 19,580 eligible distractors with `final_misconception_label`,
+  `label_source` (`auto_unflagged` 7,135 / `verify_confirm` 6,674 /
+  `verify_replace` 5,107 / `gemini_new_tag` 641 / `gemini_verify_retag`
+  15 / `manual_override` 8), plus the original `misconception_id` /
+  `misconception_label` and review metadata.
+- **`merge_into_kt.py`** -- left-joins the catalog onto the item-level
+  interactions by `(item_id, selected_option_value)`. Reads/writes
+  verbatim strings (`dtype=str, keep_default_na=False`): pandas' default
+  type coercion silently rewrote `correctness` `'1'` -> `'1.0'` (which
+  crashes `prepare_sequences_v2.py`'s `int()` parse) and `'N/A'` ->
+  `''`, and made the join miss ~17k matches -- don't "simplify" this.
+- **Merged output**: `kt_phase1/data_v2/kt_interactions_v2_item_level_misconceptions.csv.gz`
+  (full 13.9M rows + 3 misconception columns), plus
+  `..._sample.csv` (first 10k rows) and `..._tagged_sample.csv`
+  (first 500 tagged rows) for inspection.
 
 ### Processing order
 
