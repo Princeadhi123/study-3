@@ -44,9 +44,14 @@ def main():
         right_on=["item_id", "option_value"],
     ).drop(columns=["option_value"])
 
-    n_tagged = merged["misconception_id"].notna().sum()
+    # NOT notna() -- kt/tagged were read with keep_default_na=False, so an
+    # untagged-but-matched row (e.g. a correct answer, or a wrong answer
+    # below --min-times-selected) has misconception_id == "" (a real empty
+    # string), which notna() would wrongly count as "tagged". != "" is the
+    # correct check for "actually got a real misconception tag".
+    n_tagged = (merged["misconception_id"] != "").sum()
     print(f"{len(merged):,} interaction rows; {n_tagged:,} matched a misconception tag "
-          f"({n_tagged / len(merged):.1%})")
+          f"({n_tagged / len(merged):.2%})")
 
     merged.to_csv(args.out, index=False, encoding="utf-8-sig")
     print(f"Wrote {args.out}")
