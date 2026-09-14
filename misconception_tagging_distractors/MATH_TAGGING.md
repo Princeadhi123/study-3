@@ -173,6 +173,61 @@ selections below the threshold (~17k), or rows with no option recorded.
 Tagging the free-text types would need a different pipeline (elicit from
 `answer_raw` directly, deduplicated) -- a separate folder, not this one.
 
+### Why the catalog is keyed by `item_id`, not `item_instance_id`
+
+`build_v2_item_level.py` assigns two identifiers per row: `item_id`
+(`ExerciseId + PreOrd` -- one independent "item slot") and
+`item_instance_id` (`item_id + SHA1(question text)` -- one specific
+randomized rendering of that slot, e.g. a fraction-arithmetic template with
+a different pair of numbers substituted in each time). The distractor
+catalog (`distractor_stats` in `build_v2_item_level.py`) aggregates
+`times_offered`/`times_selected` by `(item_id, option_value)`, deliberately
+*not* `(item_instance_id, option_value)`. This wasn't just the path of
+least resistance -- pooling at `item_instance_id` was checked and is
+impractical, on the actual data:
+
+| Metric (measured on `kt_interactions_v2_item_level.csv.gz`, 13.9M rows) | Value |
+|---|---|
+| Distinct `item_id` | 26,070 |
+| Distinct `item_instance_id` | 1,449,163 (~55.6x more) |
+| Instances per item | mean 55.6, median 6, max 5,049 |
+| Interactions per instance | mean 9.6, **median 1** |
+| Instances seen fewer than 5 times ever | 1,226,226 / 1,449,163 (84.6%) |
+
+Tagging at `item_instance_id` granularity would mean:
+1. **No signal to tag.** With a median of one interaction per instance,
+   almost every option's `times_selected` would be 0 or 1 -- below even
+   `--min-times-selected 1`. You'd be eliciting misconceptions from
+   unreplicated single data points, exactly the "long-tail
+   typo/guess, not a repeatable misconception" case `--min-times-selected`
+   already exists to filter out.
+2. **~55x (up to ~5,000x for the worst items) more LLM elicit calls for no
+   new knowledge.** The misconception a wrong option represents (e.g. "adds
+   numerators and denominators separately") is a property of the *template*,
+   not the specific randomized numbers -- re-eliciting it separately for
+   every instance of the same item would mostly be redundant spend, not new
+   signal.
+
+Aggregating at `item_id` is what makes `times_selected` accumulate into
+something large enough to reason about at all -- it pools the same
+underlying mistake pattern across every instance of a template.
+
+**The cost of this choice**: pooling correctness across instances means
+`is_correct_option = is_correct_option OR option["correct"]` can mark an
+option value as "correct" globally even if it's wrong in most of the
+instances that actually offered it -- e.g. item `23127__p11`'s option `"7"`
+is `correct: True` in only a handful of its ~20+ instances (different
+randomized numbers give different correct answers) but `correct: False` in
+most others (109 offers, 41 selections total); the OR marks it
+`is_correct_option=1` catalog-wide, so `load_distractors()`'s
+`is_correct_option == 0` filter silently drops it from tagging even on the
+interactions where it was genuinely wrong. This is a real, known limitation
+of item-level aggregation, not a bug in the item-vs-instance tradeoff
+itself -- a fix would track per-value correctness as a rate (e.g. "correct
+in X% of instances that offered it") rather than a boolean OR, while still
+aggregating at `item_id` (switching to `item_instance_id` to fix this would
+reintroduce the sparsity problem above).
+
 ### Final artifacts
 
 - **`out/distractor_catalog_final_v2.csv`** -- authoritative catalog:

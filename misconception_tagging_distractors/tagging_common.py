@@ -14,6 +14,7 @@ needs to run standalone on LUMI.
 """
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -24,6 +25,44 @@ from openai import APIError, OpenAI
 ROOT = Path(__file__).parent
 PROJECT_ROOT = ROOT.parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _normalize_value(value) -> str:
+    # Strip ALL whitespace (not just collapse) so e.g. option_value "30 %"
+    # still matches a label that writes it as "30%" mid-sentence -- labels
+    # are free-text prose, so exact spacing around a quoted number/answer
+    # can't be relied on to match the catalog's stored formatting.
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def label_leaks_instance_value(label: str, *values: str) -> list:
+    """Returns the subset of `values` (typically a row's own option_value /
+    correct_option_value) that appear verbatim -- case-insensitive,
+    whitespace-normalized -- inside `label`.
+
+    Every misconception label is supposed to be a short GENERAL phrase that
+    would apply to any student making the same kind of error, not specific
+    to one question's numbers (see the elicit prompt in
+    tag_math_distractors.py). A label that quotes back this exact row's own
+    answer text has almost certainly overfit to one instance instead of
+    describing the error class -- e.g. a Gemini/human correction phrased as
+    "assumes 2/5 equals 20% ... concludes 30% is larger" bakes this row's
+    literal numbers into the label, which will never cluster with any other
+    fraction-vs-percent item that uses different numbers.
+
+    Only flags values of length >= 2 (normalized) to avoid noise from
+    incidental single-digit/short-token overlaps (e.g. many legitimate
+    generic labels -- "confuses 1% with 10%" -- legitimately contain small
+    numbers that describe the general error pattern, not this instance's
+    specific values).
+    """
+    norm_label = _normalize_value(label)
+    leaks = []
+    for value in values:
+        norm_value = _normalize_value(value)
+        if len(norm_value) >= 2 and norm_value in norm_label:
+            leaks.append(value)
+    return leaks
 
 
 def get_client() -> OpenAI:
