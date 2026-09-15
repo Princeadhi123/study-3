@@ -57,7 +57,8 @@ learning path maths/kt_phase1/modeling/embeddings/
 learning path maths/kt_phase1/modeling/lumi_results/runs/
 learning path maths/kt_phase1/modeling/lumi_results/**/best_model*.pt
 # Archived LUMI runs are generated outputs; keep timestamped backups local
-learning path maths/kt_phase1/modeling/lumi_results/runs_previous_*/
+# (covers runs_previous_*, runs_prefix_*, runs_postfix_* etc.)
+learning path maths/kt_phase1/modeling/lumi_results/runs_*/
 learning path maths/kt_phase1/modeling/*.out
 learning path maths/kt_phase1/modeling/*.err
 learning path maths/kt_phase1/modeling/*.log
