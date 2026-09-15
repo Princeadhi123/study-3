@@ -226,8 +226,17 @@ def main():
     # DataLoader batch; every student's own sequence already contains its own
     # train/val/test_warm/test_cold_item positions via `split`, so there is no
     # separate "held-out students" split here -- evaluation is per-position.
+    # persistent_workers=True keeps the same worker processes alive for the
+    # whole run instead of tearing them down and respawning new ones (with
+    # fresh semaphores/shm segments) every single `for batch in loader`
+    # iteration -- run_epoch() is called twice per epoch (train + eval), so
+    # without this a long run churns through hundreds of worker spawns and
+    # can eventually exhaust the node's POSIX semaphore/shm slots, surfacing
+    # as `FileNotFoundError` in multiprocessing's SemLock.__init__ deep into
+    # training. Only valid when num_workers > 0.
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
-                         num_workers=args.num_workers, collate_fn=None)
+                         num_workers=args.num_workers, collate_fn=None,
+                         persistent_workers=args.num_workers > 0)
 
     content_vectors = dataset.text_vectors if use_content else None
     content_dim = dataset.content_dim if use_content else 0
