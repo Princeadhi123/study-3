@@ -158,12 +158,25 @@ def main():
                     options = []
                 selected_value = row["selected_option_value"]
                 for option in options:
-                    key = (item_id, option["value"])
+                    # Keyed by (item_id, option_value, correct-in-THIS-instance),
+                    # not just (item_id, option_value): item_id pools many
+                    # randomized item_instance_id renderings of the same
+                    # template, and the same option text can legitimately be
+                    # the correct answer in some renderings and wrong in
+                    # others (e.g. numeric-randomized items). Splitting on
+                    # per-instance correctness instead of OR-ing it together
+                    # keeps each row's is_correct_option accurate and its
+                    # times_selected an honest count of only the wrong (or
+                    # only the correct) picks -- see MATH_TAGGING.md's
+                    # "Why the catalog is keyed by item_id" section for the
+                    # measured scale of what this fixes (item 23127__p11's
+                    # option "7" is the motivating example).
+                    key = (item_id, option["value"], option["correct"])
                     d = distractor_stats[key]
                     d["item_id"] = item_id
                     d["exercise_type"] = row["exercise_type"]
                     d["option_value"] = option["value"]
-                    d["is_correct_option"] = d["is_correct_option"] or option["correct"]
+                    d["is_correct_option"] = option["correct"]
                     d["times_offered"] += 1
                     if option["value"] == selected_value:
                         d["times_selected"] += 1
@@ -202,7 +215,7 @@ def main():
     )
 
     distractor_rows = []
-    for (item_id, option_value), d in distractor_stats.items():
+    for _key, d in distractor_stats.items():
         distractor_rows.append({
             "item_id": d["item_id"],
             "exercise_type": d["exercise_type"],

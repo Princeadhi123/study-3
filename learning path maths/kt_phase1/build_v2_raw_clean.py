@@ -166,6 +166,34 @@ def parse_options(possible_answers_raw):
     return options
 
 
+def decode_answer_text(value):
+    """AnswerJson is exported as if it were the *contents* of a JSON string
+    (backslashes doubled, etc.) but without the surrounding quotes -- e.g. a
+    real single backslash in the student's answer (common in LaTeX-formatted
+    math options, "\\Large \\frac{1}{3}") appears in the raw field as two
+    backslashes. PossibleAnswersJson's per-option answerValue strings don't
+    have this problem because parse_options() already runs them through
+    json.loads, which strips exactly one level of this escaping.
+
+    Wrapping the raw text in quotes and running it through json.loads applies
+    that same one level of unescaping, so a value copied verbatim by the
+    student (matching an offered option) compares equal to that option's
+    parsed value instead of silently never matching (confirmed against the
+    real source export: this recovers the exact match for
+    ExerciseId=653461's fraction options). Falls back to the raw value
+    unchanged if it isn't valid once wrapped (e.g. contains a literal
+    unescaped double quote or control character) -- matching then simply
+    fails for that row, same as before this fix, rather than raising.
+    """
+    if not value:
+        return value
+    try:
+        decoded = json.loads(f'"{value}"')
+    except (json.JSONDecodeError, ValueError):
+        return value
+    return decoded if isinstance(decoded, str) else value
+
+
 def extract_option_fields(exercise_type, possible_answers_raw, answer_raw):
     """Returns dict with has_options/option_count/options_json/correct_*/selected_*.
     Only MCQ_TYPES and SINGLE_ANSWER_TEXT_TYPES ever populate options; every
@@ -183,8 +211,13 @@ def extract_option_fields(exercise_type, possible_answers_raw, answer_raw):
     if not options:
         return empty
 
+    # NOTE: matched/stored against decode_answer_text(answer_raw), NOT the
+    # verbatim answer_raw -- see decode_answer_text's docstring. The
+    # top-level `answer_raw` column (preserved by the caller for every row
+    # regardless of family) is untouched and stays verbatim.
+    decoded_answer = decode_answer_text(answer_raw)
     correct_idx = next((i for i, o in enumerate(options) if o["correct"]), None)
-    selected_idx = next((i for i, o in enumerate(options) if o["value"] == answer_raw), None)
+    selected_idx = next((i for i, o in enumerate(options) if o["value"] == decoded_answer), None)
     return {
         "has_options": True,
         "option_count": len(options),
@@ -192,7 +225,7 @@ def extract_option_fields(exercise_type, possible_answers_raw, answer_raw):
         "correct_option_index": correct_idx if correct_idx is not None else "",
         "correct_option_value": options[correct_idx]["value"] if correct_idx is not None else "",
         "selected_option_index": selected_idx if selected_idx is not None else -1,
-        "selected_option_value": answer_raw,
+        "selected_option_value": decoded_answer,
     }
 
 
