@@ -69,6 +69,13 @@ def parse_args():
                          "ground between best_model.pt (pure val AUC, best warm-item deployment) "
                          "and best_model_cold.pt (pure cold AUC, which can be a very early, "
                          "under-trained epoch). See README 'Reading the results'.")
+    p.add_argument("--patience", type=int, default=0,
+                    help="Stop early if joint_score (see --joint-weight) hasn't set a new best "
+                         "for this many consecutive epochs. 0 (default) disables early stopping "
+                         "and always runs the full --epochs, matching old behavior. Useful when "
+                         "raising --epochs for a run: variants that converge quickly (e.g. "
+                         "skill_item) stop on their own instead of wasting GPU time, while "
+                         "variants still improving (content-aware ones) keep training.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
@@ -203,6 +210,7 @@ def main():
     best_val_auc, best_val_epoch = -1.0, None
     best_cold_auc, best_cold_epoch = -1.0, None
     best_joint_score, best_joint_epoch = -1.0, None
+    epochs_since_best_joint = 0
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_stats = run_epoch(model, loader, device, content_vectors, optimizer=optimizer,
@@ -235,6 +243,14 @@ def main():
         if joint_score > best_joint_score:
             best_joint_score, best_joint_epoch = joint_score, epoch
             torch.save(model.state_dict(), out_dir / "best_model_joint.pt")
+            epochs_since_best_joint = 0
+        else:
+            epochs_since_best_joint += 1
+            if args.patience > 0 and epochs_since_best_joint >= args.patience:
+                print(f"Early stopping: no joint_score improvement for {epochs_since_best_joint} "
+                      f"epochs (--patience {args.patience}). Stopping after epoch {epoch}.",
+                      flush=True)
+                break
 
     (out_dir / "training_history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     (out_dir / "config.json").write_text(json.dumps(vars(args), indent=2, default=str), encoding="utf-8")
