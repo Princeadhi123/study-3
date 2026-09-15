@@ -86,7 +86,12 @@ def main():
 
     n_by_bucket = {"unparseable": 0, "no_relationship": 0, "unit_mismatch": 0}
     for row in batch.itertuples():
-        mask = (df["item_id"] == row.item_id) & (df["option_value"] == row.option_value)
+        # is_correct_option == "0" restricts the match to the wrong-answer
+        # row: the catalog can have a same-text correct-answer row too (see
+        # merge_into_kt.py's docstring) -- a fallback tag must never land on
+        # that one.
+        mask = ((df["item_id"] == row.item_id) & (df["option_value"] == row.option_value)
+                & (df["is_correct_option"] == "0"))
         if not mask.any():
             continue
         bucket = classify(row.students_wrong_answer)

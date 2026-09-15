@@ -70,7 +70,14 @@ def main():
         n_applied = 0
         leak_warnings = []
         for (item_id, option_value), label in override_map.items():
-            mask = (df["item_id"] == item_id) & (df["option_value"] == option_value)
+            # is_correct_option == 0 restricts the match to the wrong-answer
+            # row: build_v2_item_level.py now splits the catalog by
+            # per-instance correctness, so the same (item_id, option_value)
+            # can also have a separate correct-answer row (see
+            # merge_into_kt.py's docstring) -- an override must never land on
+            # that one.
+            mask = ((df["item_id"] == item_id) & (df["option_value"] == option_value)
+                    & (df["is_correct_option"] == 0))
             if mask.any():
                 leaks = label_leaks_instance_value(label, option_value, correct_value_by_item.get(item_id, ""))
                 if leaks:

@@ -212,21 +212,81 @@ Aggregating at `item_id` is what makes `times_selected` accumulate into
 something large enough to reason about at all -- it pools the same
 underlying mistake pattern across every instance of a template.
 
-**The cost of this choice**: pooling correctness across instances means
-`is_correct_option = is_correct_option OR option["correct"]` can mark an
-option value as "correct" globally even if it's wrong in most of the
+**The cost of this choice (FIXED, see "Two pipeline bugs fixed" below)**:
+pooling correctness across instances used to mean
+`is_correct_option = is_correct_option OR option["correct"]` could mark an
+option value as "correct" globally even if it was wrong in most of the
 instances that actually offered it -- e.g. item `23127__p11`'s option `"7"`
-is `correct: True` in only a handful of its ~20+ instances (different
+was `correct: True` in only a handful of its ~20+ instances (different
 randomized numbers give different correct answers) but `correct: False` in
-most others (109 offers, 41 selections total); the OR marks it
-`is_correct_option=1` catalog-wide, so `load_distractors()`'s
-`is_correct_option == 0` filter silently drops it from tagging even on the
-interactions where it was genuinely wrong. This is a real, known limitation
-of item-level aggregation, not a bug in the item-vs-instance tradeoff
-itself -- a fix would track per-value correctness as a rate (e.g. "correct
-in X% of instances that offered it") rather than a boolean OR, while still
-aggregating at `item_id` (switching to `item_instance_id` to fix this would
-reintroduce the sparsity problem above).
+most others; the OR marked it `is_correct_option=1` catalog-wide, so
+`load_distractors()`'s `is_correct_option == 0` filter silently dropped it
+from tagging even on the interactions where it was genuinely wrong. Fixed by
+splitting the aggregation key to `(item_id, option_value, correct-in-this-
+instance)` instead of OR-ing correctness together -- still pooled at
+`item_id` (no sparsity regression), but a same-text option that's correct in
+some instances and wrong in others now produces two separate catalog rows
+instead of one contaminated row.
+
+### Two pipeline bugs fixed (regenerated `reports_v2/distractor_catalog.csv`)
+
+Two issues were found and fixed in the v2 pipeline; both required
+re-running `build_v2_raw_clean.py` -> `build_v2_sort.py` ->
+`build_v2_item_level.py` -> `build_v2_item_context.py` end-to-end (done --
+`reports_v2/distractor_catalog.csv` and `reports_v2/item_context.csv` are
+current as of this fix):
+
+1. **LaTeX/backslash-escaping bug** (`build_v2_raw_clean.py`): the raw
+   `AnswerJson` field is exported with one extra level of JSON-string
+   escaping relative to `PossibleAnswersJson`'s per-option `answerValue`
+   strings (confirmed directly against the raw source export: a real
+   backslash in a LaTeX-formatted option, e.g. `\Large \frac{1}{3}`, comes
+   through `AnswerJson` doubled). `extract_option_fields()` compared the
+   two directly, so a LaTeX-formatted answer could **never** match its own
+   offered option -- `times_selected` silently stayed 0 for every such row.
+   Measured impact before the fix: 84,671 real wrong interactions across
+   414 items had zero misconception signal. Fixed with
+   `decode_answer_text()`, which applies the same one level of unescaping
+   (wrap in quotes, `json.loads`) before matching/storing
+   `selected_option_value` -- verified against `653461__p3`: the LaTeX
+   fraction options went from `times_selected=0` for all 3 wrong options to
+   567 / 292 / 281 (real counts). The top-level `answer_raw` column is
+   untouched (still verbatim, per its docstring) -- only the derived
+   `selected_option_index`/`selected_option_value` fields changed.
+2. **Correctness OR-conflation** (`build_v2_item_level.py`), see above --
+   measured impact before the fix: 110,575 real wrong interactions across
+   2,653 items (~10% of all items) were hidden behind a same-text option
+   that was correct in some other randomized instance. Fixed by keying
+   `distractor_stats` on `(item_id, option_value, option["correct"])`.
+   Verified against `23127__p11`'s option `"7"`: now two rows,
+   `is_correct_option=0` (73 offered, 6 selected -- genuinely wrong,
+   now taggable) and `is_correct_option=1` (36 offered, 35 selected).
+
+**Downstream fallout from bug 2 that also needed fixing**: since the same
+`(item_id, option_value)` pair can now legitimately appear twice (once
+correct, once wrong), every script that previously assumed that pair was
+unique had to be updated:
+- `merge_into_kt.py` now joins on `(item_id, selected_option_value,
+  correctness)` instead of just `(item_id, selected_option_value)`, so a
+  correct interaction can never pick up a wrong-answer's misconception
+  label (or vice versa) just because the option text matches.
+- `apply_review.py` / `apply_gemini_retag_v2.py` /
+  `apply_run2_fallback_tags.py` all now additionally require
+  `is_correct_option == 0` in their `(item_id, option_value)` row-update
+  masks, so a manual/Gemini correction can never land on the wrong (correct-
+  answer) twin row.
+
+**Net effect on the catalog**: wrong-option rows went from 153,437 to
+198,094 (+44,657). The existing 34,188 reviewed/tagged rows from
+`out/distractor_catalog_final_v5.csv` were carried forward onto the
+regenerated catalog by `(item_id, option_value, is_correct_option)` match
+(all 34,188 matched -- none lost) into `out/distractor_catalog_v6_baseline.csv`;
+**163,906 wrong-option rows still need a fresh elicit pass** (a mix of
+genuinely new rows exposed by the two fixes, and previously-existing rows
+still below `--min-times-selected`). That elicit/cluster/verify run hasn't
+been executed yet -- it's a separate, long-running LLM-call step (see
+"Runtime and concurrency" above) to be kicked off deliberately, not
+something to run implicitly as part of a pipeline rebuild.
 
 ### Final artifacts
 
