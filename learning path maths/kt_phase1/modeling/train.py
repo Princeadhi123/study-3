@@ -46,14 +46,27 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--epochs", type=int, default=10)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--min-lr", type=float, default=1e-5,
+                    help="Floor learning rate reached at the end of cosine annealing (see "
+                         "--warmup-epochs). Matches --lr for a no-scheduler-decay run only if "
+                         "set equal to --lr.")
+    p.add_argument("--warmup-epochs", type=int, default=5,
+                    help="Number of initial epochs spent linearly warming the learning rate up "
+                         "from 0.1 * --lr to --lr, before cosine-annealing it down to --min-lr "
+                         "over the remaining epochs (see build_lr_scheduler). Set to 0 to disable "
+                         "warmup and cosine-anneal from epoch 1. This targets the val/test_cold_item "
+                         "AUC plateau seen with a constant LR even while train_loss keeps falling "
+                         "(see README) -- annealing the LR down late in training lets the model "
+                         "keep making small, stable improvements instead of oscillating around the "
+                         "plateau at a fixed step size.")
     p.add_argument("--weight-decay", type=float, default=1e-5)
-    p.add_argument("--item-embed-weight-decay", type=float, default=1e-3,
+    p.add_argument("--item-embed-weight-decay", type=float, default=5e-3,
                     help="Separate (stronger) weight decay applied only to item_embed, "
                          "so the item_id lookup table can't grow large, item-specific "
                          "weights as freely as the rest of the model. Ignored by "
                          "skill_only (no item_embed). No-op for backwards compatibility "
                          "if set equal to --weight-decay.")
-    p.add_argument("--item-id-dropout", type=float, default=0.1,
+    p.add_argument("--item-id-dropout", type=float, default=0.25,
                     help="Probability of replacing a known (non-PAD, non-UNK) item_id "
                          "with __UNK__ during training only, each occurrence independently. "
                          "This is cold-start augmentation: it (a) gives the __UNK__ embedding "
@@ -61,25 +74,58 @@ def parse_args():
                          "instead of only ever seeing genuine test_cold_item occurrences, and "
                          "(b) prevents the model from fully relying on memorizing item_id, "
                          "both of which curb the test_cold_item AUC decay seen over training "
-                         "when item embeddings are trained without this regularization. "
+                         "when item embeddings are trained without this regularization. Raised "
+                         "from 0.1 to 0.25 (together with a stronger --item-embed-weight-decay) "
+                         "to push item-aware variants to lean more on content embeddings, which "
+                         "generalize to genuinely novel items/questions and item_id can't. "
                          "Ignored by skill_only. Set to 0 to disable / reproduce old behavior.")
+    p.add_argument("--use-time-embeddings", action=argparse.BooleanOptionalAction, default=True,
+                    help="Add a learned embedding of the log-binned time-since-previous-"
+                         "interaction (see prepare_sequences_v2.py's time_bin_of) into each "
+                         "step's interaction representation. Falls back to a no-op if the "
+                         "loaded sequences.jsonl.gz predates the time_bin field (dataset.py "
+                         "defaults time_bin_ids to 0 for every position in that case). Pass "
+                         "--no-use-time-embeddings to disable.")
     p.add_argument("--joint-weight", type=float, default=0.5,
                     help="Weight w in joint_score = w * val_auc + (1 - w) * test_cold_item_auc, "
                          "used to select the extra best_model_joint.pt checkpoint -- a middle "
                          "ground between best_model.pt (pure val AUC, best warm-item deployment) "
                          "and best_model_cold.pt (pure cold AUC, which can be a very early, "
                          "under-trained epoch). See README 'Reading the results'.")
-    p.add_argument("--patience", type=int, default=0,
+    p.add_argument("--patience", type=int, default=25,
                     help="Stop early if joint_score (see --joint-weight) hasn't set a new best "
-                         "for this many consecutive epochs. 0 (default) disables early stopping "
-                         "and always runs the full --epochs, matching old behavior. Useful when "
-                         "raising --epochs for a run: variants that converge quickly (e.g. "
-                         "skill_item) stop on their own instead of wasting GPU time, while "
-                         "variants still improving (content-aware ones) keep training.")
+                         "for this many consecutive epochs. Set to 0 to disable early stopping "
+                         "and always run the full --epochs. Raised from 15 to 25 to give the "
+                         "cosine LR decay (see --warmup-epochs) room to keep squeezing out late, "
+                         "low-LR improvements instead of stopping just as annealing starts to "
+                         "help. Useful when raising --epochs for a run: variants that converge "
+                         "quickly (e.g. skill_item) stop on their own instead of wasting GPU "
+                         "time, while variants still improving (content-aware ones) keep training.")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
+
+
+def build_lr_scheduler(optimizer: torch.optim.Optimizer, epochs: int, warmup_epochs: int,
+                        min_lr: float, base_lr: float) -> torch.optim.lr_scheduler.LRScheduler:
+    """Linear warmup (0.1 * base_lr -> base_lr) for `warmup_epochs`, then
+    cosine annealing down to `min_lr` over the remaining epochs. Call
+    `.step()` once per epoch (not per batch) -- see README/train loop.
+    Addresses the val/test_cold_item AUC plateau seen with a constant LR
+    even while train_loss keeps falling every epoch (see
+    training_history.json for every variant): a properly annealed LR lets
+    the model keep making small, stable gains late in training instead of
+    oscillating around the plateau at a fixed step size."""
+    warmup_epochs = max(0, min(warmup_epochs, epochs - 1))
+    if warmup_epochs == 0:
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs), eta_min=min_lr)
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, epochs - warmup_epochs), eta_min=min_lr)
+    return torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
 
 def compute_metrics(y_true, y_prob):
@@ -191,6 +237,7 @@ def main():
         content_dim=content_dim,
         d_model=args.d_model, n_heads=args.n_heads,
         n_layers=args.n_layers, dropout=args.dropout, max_seq_len=args.max_seq_len,
+        use_time_embeddings=args.use_time_embeddings,
     ).to(device)
 
     # item_embed gets its own (typically stronger) weight decay so the
@@ -205,6 +252,8 @@ def main():
     if item_embed_params:
         param_groups.append({"params": item_embed_params, "weight_decay": args.item_embed_weight_decay})
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
+    scheduler = build_lr_scheduler(optimizer, epochs=args.epochs, warmup_epochs=args.warmup_epochs,
+                                    min_lr=args.min_lr, base_lr=args.lr)
 
     history = []
     best_val_auc, best_val_epoch = -1.0, None
@@ -213,16 +262,21 @@ def main():
     epochs_since_best_joint = 0
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
+        # Recorded before the scheduler step below, so it reflects the LR
+        # actually used to train THIS epoch, not the upcoming one.
+        current_lr = optimizer.param_groups[0]["lr"]
         train_stats = run_epoch(model, loader, device, content_vectors, optimizer=optimizer,
                                  item_id_dropout=args.item_id_dropout)
         eval_stats = run_epoch(model, loader, device, content_vectors, optimizer=None,
                                 eval_splits=["val", "test_warm", "test_cold_item"])
+        scheduler.step()
         elapsed = time.time() - t0
         val_auc = eval_stats.get("val", {}).get("auc", -1.0)
         cold_auc = eval_stats.get("test_cold_item", {}).get("auc", -1.0)
         joint_score = (args.joint_weight * val_auc + (1 - args.joint_weight) * cold_auc
                        if val_auc >= 0 and cold_auc >= 0 else -1.0)
-        record = {"epoch": epoch, "elapsed_sec": round(elapsed, 1), **train_stats, "eval": eval_stats}
+        record = {"epoch": epoch, "elapsed_sec": round(elapsed, 1), "lr": current_lr,
+                  **train_stats, "eval": eval_stats}
         history.append(record)
         print(json.dumps(record, indent=2), flush=True)
 

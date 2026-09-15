@@ -40,15 +40,24 @@ kt_phase1/reports_v2/distractor_catalog.csv is tagged with misconception_ids,
 the same slot can carry a `misconception_embed(prev_misconception_id)`
 lookup instead of (or concatenated with) this text embedding.
 """
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
+# Must match prepare_sequences_v2.py's NUM_TIME_BINS -- the number of
+# log-spaced inter-interaction-gap buckets a raw delta_t is discretized
+# into (bin 0 = "<60s", ..., bin 31 = ">180 days"). Kept as a separate
+# constant here (rather than imported) so model.py has no dependency on
+# the data-prep script.
+NUM_TIME_BINS = 32
+
 
 class KTTransformer(nn.Module):
-    def __init__(self, n_skills, n_items, use_item=True, use_content=False,
-                 use_option=False,
-                 content_dim=0, d_model=128, n_heads=4, n_layers=2,
-                 dim_feedforward=256, dropout=0.2, max_seq_len=400):
+    def __init__(self, n_skills: int, n_items: int, use_item: bool = True, use_content: bool = False,
+                 use_option: bool = False, use_time_embeddings: bool = True,
+                 content_dim: int = 0, d_model: int = 128, n_heads: int = 4, n_layers: int = 2,
+                 dim_feedforward: int = 256, dropout: float = 0.2, max_seq_len: int = 400) -> None:
         super().__init__()
         self.use_item = use_item
         self.use_content = use_content and content_dim > 0
@@ -56,6 +65,7 @@ class KTTransformer(nn.Module):
         # previous selection's text is embedded exactly like a question's
         # content, see module docstring), so it needs the same content_dim.
         self.use_option = use_option and content_dim > 0
+        self.use_time = use_time_embeddings
 
         self.skill_embed = nn.Embedding(n_skills, d_model, padding_idx=0)
         self.correct_embed = nn.Embedding(3, d_model)  # 0=incorrect, 1=correct, 2=start-token placeholder
@@ -69,6 +79,13 @@ class KTTransformer(nn.Module):
             # different role than "this is the current question", so they
             # don't have to share weights.
             self.option_proj = nn.Linear(content_dim, d_model)
+        if self.use_time:
+            # Log-binned time-since-previous-interaction, embedded as part
+            # of the PREVIOUS step's interaction representation only (see
+            # forward()) -- same "shift right by one" treatment as
+            # skill/item/content/correctness, since it describes the gap
+            # leading INTO that previous step, not the current query.
+            self.time_embed = nn.Embedding(NUM_TIME_BINS, d_model)
 
         self.rt_proj = nn.Linear(2, d_model)  # [log1p(response_time) or 0, has_response_time flag]
         self.attempt_proj = nn.Linear(1, d_model)
@@ -92,13 +109,14 @@ class KTTransformer(nn.Module):
             nn.Linear(dim_feedforward, 1),
         )
 
-    def _content_vec(self, content_idx, content_vectors, proj):
+    def _content_vec(self, content_idx: torch.Tensor, content_vectors: Optional[torch.Tensor],
+                      proj: nn.Linear) -> Optional[torch.Tensor]:
         if content_vectors is None:
             return None
         vecs = content_vectors[content_idx]  # (B, T, content_dim), frozen lookup
         return proj(vecs)
 
-    def forward(self, batch, content_vectors=None):
+    def forward(self, batch: dict[str, torch.Tensor], content_vectors: Optional[torch.Tensor] = None) -> torch.Tensor:
         skill, item = batch["skill"], batch["item"]
         correct, rt, rt_mask, attempt = batch["correct"], batch["rt"], batch["rt_mask"], batch["attempt"]
         content_idx, attn_mask = batch["content_idx"], batch["attn_mask"]
@@ -139,6 +157,17 @@ class KTTransformer(nn.Module):
             prev_selected_idx[:, 1:] = selected_text_idx[:, :-1]
             prev_option = self._content_vec(prev_selected_idx, content_vectors, self.option_proj)
             interaction = interaction + prev_option
+        if self.use_time and "time_bin_ids" in batch:
+            # batch["time_bin_ids"][:, i] is the gap leading INTO step i (see
+            # dataset.py); shifted right by one so it describes the gap
+            # leading into the PREVIOUS step, matching every other feature
+            # here. Position 0 has no real predecessor -- left at bin 0,
+            # harmless since interaction[:, 0, :] is overwritten by
+            # start_token right below regardless.
+            time_bin_ids = batch["time_bin_ids"]
+            prev_time_bin = torch.zeros_like(time_bin_ids)
+            prev_time_bin[:, 1:] = time_bin_ids[:, :-1]
+            interaction = interaction + self.time_embed(prev_time_bin)
 
         interaction[:, 0, :] = self.start_token.expand(B, -1, -1).squeeze(1)
         interaction = self.interaction_proj(interaction)
@@ -163,7 +192,7 @@ class KTTransformer(nn.Module):
         return logits
 
 
-def build_model(variant, n_skills, n_items, content_dim=0, **kwargs):
+def build_model(variant: str, n_skills: int, n_items: int, content_dim: int = 0, **kwargs) -> KTTransformer:
     if variant == "skill_only":
         return KTTransformer(n_skills, n_items, use_item=False, use_content=False, **kwargs)
     if variant == "skill_item":

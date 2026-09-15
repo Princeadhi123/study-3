@@ -166,6 +166,38 @@ gives long-history windows more real context per prediction at the cost of
 more (non-loss-contributing) compute per epoch. `--max-seq-len` passed to
 `prepare_sequences.py` and `train.py` must match — they are the same window.
 
+### Session boundaries, time-since-last-attempt, and hyper-active students
+
+`prepare_sequences_v2.py` (not v1) adds three more things on top of the
+windowing above, aimed at very long-tenured/hyper-active students (up to
+~10k interactions) and multi-month return gaps (e.g. active in 2025, back in
+2026):
+
+- **`--max-session-gap-days`** (default 30) — a sliding window is never
+  built across a gap this large between two consecutive interactions for
+  the same student (see `split_into_sessions`); each session is windowed
+  independently. This only changes what a window's "recent history" can
+  contain — it does not change train/val/test_warm assignment, which stays
+  purely a function of chronological position in the student's full history.
+- **`delta_t` / `time_bin`** — every event also carries the raw seconds
+  since that student's previous interaction (`delta_t`, 0.0 for the very
+  first) and that value log-binned into `NUM_TIME_BINS=32` buckets
+  (`time_bin`, see `time_bin_of`): bin 0 is "<60s" (continuous practice),
+  bins 1-10 minutes-to-hours, 11-20 days-to-weeks, 21-31 months up to
+  ">180 days". Unlike session-splitting, this deliberately still spans
+  session gaps — a huge gap is real signal for the model (via
+  `KTTransformer.time_embed`, see `model.py`), not something to hide.
+  Pass `--no-use-time-embeddings` to `train.py` to disable consuming it.
+- **`--max-windows-per-student`** (default 8) — after session-splitting, a
+  student whose sessions still produce more than this many windows has them
+  thinned via evenly-spaced selection (`cap_windows_stratified`), not
+  "keep the earliest N", so early/middle/late curriculum stages are all
+  still represented (and the very first and last windows are always kept).
+  This prevents a handful of hyper-active students from dominating the
+  training loss, at the cost of dropping some of their train-only
+  interactions entirely — see `students_with_windows_capped` /
+  `windows_dropped_by_cap` in `split_report.json`. Set to 0 to disable.
+
 ## Reading the results
 
 `train.py` saves **three** checkpoints per variant, because "best" depends
@@ -228,14 +260,17 @@ to (see below) got progressively less useful the longer training ran.
 Two knobs in `train.py` now directly target this (both no-ops for
 `skill_only`, which has no `item_embed`):
 
-- `--item-id-dropout` (default `0.1`) — during training only, each
-  occurrence of a real, trainable `item_id` is independently replaced with
-  `__UNK__` with this probability. This is cold-start augmentation: it gives
-  the `__UNK__` row real, frequent gradient signal from ordinary items
-  instead of only ever seeing genuine `test_cold_item` occurrences, and it
-  keeps the model from fully relying on memorizing `item_id`.
-- `--item-embed-weight-decay` (default `1e-3`, vs. the general
-  `--weight-decay` default `1e-5`) — `item_embed` gets its own, much
+- `--item-id-dropout` (default `0.25`, raised from `0.1`) — during training
+  only, each occurrence of a real, trainable `item_id` is independently
+  replaced with `__UNK__` with this probability. This is cold-start
+  augmentation: it gives the `__UNK__` row real, frequent gradient signal
+  from ordinary items instead of only ever seeing genuine `test_cold_item`
+  occurrences, and it keeps the model from fully relying on memorizing
+  `item_id`. Raised further to push item-aware variants to lean more on
+  content embeddings, which generalize to genuinely novel items and
+  `item_id` can't.
+- `--item-embed-weight-decay` (default `5e-3`, raised from `1e-3`, vs. the
+  general `--weight-decay` default `1e-5`) — `item_embed` gets its own, much
   stronger weight decay via a separate AdamW param group, so it can't grow
   large item-specific weights as freely as the rest of the model.
 
@@ -244,3 +279,24 @@ the `test_cold_item` trend across epochs in `training_history.json`) to the
 pre-regularization numbers to confirm the decay is actually reduced, not
 just shifted to fewer epochs of training. (See "Evaluation splits" above for
 why cold items resolve to `__UNK__` in the first place.)
+
+### Learning-rate schedule (fixing the loss-still-falling/AUC-plateaued mismatch)
+
+Full runs consistently showed `train_loss` falling steadily every epoch
+while `val`/`test_cold_item` AUC plateaued and got noisy after ~epoch
+25-35, under a constant `--lr 1e-3` with no schedule at all — a classic
+sign the fixed step size, not model capacity, was the bottleneck late in
+training. `train.py` now builds a schedule via `build_lr_scheduler`:
+
+- `--warmup-epochs` (default `5`) epochs of linear warmup from `0.1 * --lr`
+  up to `--lr`, then
+- `torch.optim.lr_scheduler.CosineAnnealingLR` decaying down to `--min-lr`
+  (default `1e-5`) over the remaining epochs.
+
+`--patience` (the early-stopping patience on `joint_score`, see "Reading
+the results" above) was raised from `15` to `25` to give the annealed,
+low-LR tail of training room to keep registering small joint-score
+improvements instead of stopping just as the decay starts to help. The
+learning rate actually used each epoch is logged into
+`training_history.json` (`"lr"` field) so you can confirm the schedule
+took effect and correlate it with the AUC curve.

@@ -11,6 +11,7 @@ together (with per-position split labels used to mask the loss/metrics).
 import gzip
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -28,7 +29,8 @@ PAD_SPLIT = -1
 
 
 class KTSequenceDataset(Dataset):
-    def __init__(self, sequences_path, max_seq_len=400, text_embeddings_path=None):
+    def __init__(self, sequences_path: str, max_seq_len: int = 400,
+                 text_embeddings_path: Optional[str] = None) -> None:
         self.max_seq_len = max_seq_len
         self.records = []
         with gzip.open(sequences_path, "rt", encoding="utf-8") as f:
@@ -83,6 +85,13 @@ class KTSequenceDataset(Dataset):
         rt_mask = np.zeros(self.max_seq_len, dtype=np.float32)
         attempt = np.ones(self.max_seq_len, dtype=np.float32)
         content_idx = np.zeros(self.max_seq_len, dtype=np.int64)
+        # Log-binned inter-interaction gap (see prepare_sequences_v2.py's
+        # time_bin_of / NUM_TIME_BINS=32), 0 for pad positions and for
+        # sequences built before this field existed (older sequences.jsonl.gz
+        # files without "time_bin" per event fall back to 0 for every
+        # position via ev.get("time_bin", 0) below -- same backwards-
+        # compatible convention as content_idx/selected_text_idx).
+        time_bin_ids = np.zeros(self.max_seq_len, dtype=np.int64)
         # Previous-step selected-answer TEXT, looked up in the same
         # content_vectors table as content_idx (see model.py's use_option) --
         # not a bare categorical option position. "option 1" in one question
@@ -109,6 +118,7 @@ class KTSequenceDataset(Dataset):
             # present; v1 sequences only have "text" (question only).
             content_idx[pos] = self._content_index(ev.get("content_text") or ev.get("text"))
             selected_text_idx[pos] = self._content_index(ev.get("selected_text"))
+            time_bin_ids[pos] = int(ev.get("time_bin", 0) or 0)
             split[pos] = SPLIT_CODE.get(ev["split"], PAD_SPLIT)
             attn_mask[pos] = 1.0
 
@@ -121,6 +131,7 @@ class KTSequenceDataset(Dataset):
             "attempt": torch.from_numpy(attempt),
             "content_idx": torch.from_numpy(content_idx),
             "selected_text_idx": torch.from_numpy(selected_text_idx),
+            "time_bin_ids": torch.from_numpy(time_bin_ids),
             "split": torch.from_numpy(split),
             "attn_mask": torch.from_numpy(attn_mask),
         }

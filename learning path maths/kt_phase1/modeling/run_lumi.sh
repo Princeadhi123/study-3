@@ -74,10 +74,12 @@ RAW_V2_PROJECT="${PROJECT_ROOT}/raw/kt_interactions_v2_item_level.csv.gz"
 RAW_V2_SCRATCH="${SCRATCH_ROOT}/raw/kt_interactions_v2_item_level.csv.gz"
 MAX_SEQ_LEN="${KT_MAX_SEQ_LEN:-400}"
 CONTEXT_OVERLAP_FRAC="${KT_CONTEXT_OVERLAP_FRAC:-0.25}"
+MAX_SESSION_GAP_DAYS="${KT_MAX_SESSION_GAP_DAYS:-30}"
+MAX_WINDOWS_PER_STUDENT="${KT_MAX_WINDOWS_PER_STUDENT:-8}"
 # Include preprocessing settings in the directory name so a rerun cannot
 # accidentally reuse a sequences.jsonl.gz produced by a different
-# window/overlap configuration.
-PREP_V2_DIR="${KT_PREP_V2_DIR:-${SCRATCH_ROOT}/prepared_v2_w${MAX_SEQ_LEN}_o${CONTEXT_OVERLAP_FRAC//./p}}"
+# window/overlap/session-gap/window-cap configuration.
+PREP_V2_DIR="${KT_PREP_V2_DIR:-${SCRATCH_ROOT}/prepared_v2_w${MAX_SEQ_LEN}_o${CONTEXT_OVERLAP_FRAC//./p}_g${MAX_SESSION_GAP_DAYS}_c${MAX_WINDOWS_PER_STUDENT}}"
 EMBED_DIR="${PROJECT_ROOT}/embeddings"
 RUNS_DIR="${PROJECT_ROOT}/runs"
 
@@ -128,6 +130,8 @@ if [[ ! -f "${PREP_V2_DIR}/sequences.jsonl.gz" ]]; then
         --min-interactions 10 \
         --max-seq-len "${MAX_SEQ_LEN}" \
         --context-overlap-frac "${CONTEXT_OVERLAP_FRAC}" \
+        --max-session-gap-days "${MAX_SESSION_GAP_DAYS}" \
+        --max-windows-per-student "${MAX_WINDOWS_PER_STUDENT}" \
         --cold-item-fraction 0.05
 fi
 
@@ -148,7 +152,9 @@ COMMON=(
     --vocab "${PREP_V2_DIR}/vocab.json"
     --device cuda
     --epochs "${KT_EPOCHS:-150}"
-    --patience "${KT_PATIENCE:-15}"
+    --patience "${KT_PATIENCE:-25}"
+    --warmup-epochs "${KT_WARMUP_EPOCHS:-5}"
+    --min-lr "${KT_MIN_LR:-1e-5}"
     --batch-size 256
     --max-seq-len "${MAX_SEQ_LEN}"
     --num-workers 2
@@ -159,10 +165,12 @@ COMMON=(
 # item_ids to __UNK__ during training (--item-id-dropout) and apply a
 # separate, stronger weight decay to item_embed (--item-embed-weight-decay).
 # Both curb the test_cold_item AUC decay seen when item embeddings are
-# trained without them (see README "Reading the results").
+# trained without them (see README "Reading the results"). Raised to 0.25 /
+# 5e-3 (from 0.1 / 1e-3) to push item-aware variants to lean more on content
+# embeddings, which generalize to genuinely novel items and item_id can't.
 ITEM_REG=(
-    --item-id-dropout "${KT_ITEM_ID_DROPOUT:-0.1}"
-    --item-embed-weight-decay "${KT_ITEM_EMBED_WEIGHT_DECAY:-1e-3}"
+    --item-id-dropout "${KT_ITEM_ID_DROPOUT:-0.25}"
+    --item-embed-weight-decay "${KT_ITEM_EMBED_WEIGHT_DECAY:-5e-3}"
 )
 
 # ---- train all four variants in parallel, one GPU each ---

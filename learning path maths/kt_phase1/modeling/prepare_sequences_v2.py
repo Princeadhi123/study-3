@@ -40,19 +40,22 @@ row with the full raw question/options/answer for future use (e.g. once a
 type-specific way to derive correctness for those types exists).
 """
 import argparse
+import bisect
 import csv
 import gzip
 import json
 import random
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).parent.parent
 DATA_V2 = ROOT / "data_v2"
 OUT = Path(__file__).parent / "prepared_v2"
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--source", default=str(DATA_V2 / "kt_interactions_v2_item_level.csv.gz"))
     p.add_argument("--out-dir", default=str(OUT))
@@ -64,14 +67,66 @@ def parse_args():
     p.add_argument("--test-fraction", type=float, default=0.15)
     p.add_argument("--limit-rows", type=int, default=None)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--max-session-gap-days", type=float, default=30.0,
+                    help="If the gap between two chronologically consecutive interactions "
+                         "for the same student exceeds this many days, treat it as a session "
+                         "boundary: sliding windows (see chunk_student_events) are never built "
+                         "across it, so a student active in e.g. 2025 and returning in 2026 "
+                         "doesn't get a window whose 'recent history' is actually many months "
+                         "stale. Does not affect train/val/test_warm assignment (still purely "
+                         "chronological-fraction based) or delta_t/time_bin computation (which "
+                         "deliberately still spans the gap, so the model can see just how large "
+                         "it was via the top time bin).")
+    p.add_argument("--max-windows-per-student", type=int, default=8,
+                    help="Cap on how many sliding windows (post session-splitting) a single "
+                         "student can contribute. Hyper-active students (up to ~10k "
+                         "interactions) can otherwise generate 30+ overlapping windows and "
+                         "dominate the training loss. When a student exceeds this, windows are "
+                         "thinned via evenly-spaced (not just earliest-N) selection so early, "
+                         "middle, and late curriculum stages are all still represented -- see "
+                         "cap_windows_stratified(). Set to 0 to disable capping.")
     return p.parse_args()
 
 
-def safe_float(value):
+def safe_float(value: Optional[str]) -> Optional[float]:
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_timestamp_epoch(ts: Optional[str]) -> Optional[float]:
+    """Parse an ISO-8601 timestamp (e.g. '2025-10-27T12:13:28Z') to epoch
+    seconds, used for session-gap detection and delta_t/time_bin
+    computation. Returns None (rather than raising) for missing/malformed
+    values so a single bad timestamp can't crash the whole run -- callers
+    treat None as "unknown gap", never splitting/binning across it."""
+    if not ts:
+        return None
+    try:
+        iso = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+        return datetime.fromisoformat(iso).timestamp()
+    except ValueError:
+        return None
+
+
+NUM_TIME_BINS = 32
+# 31 upper-edge thresholds (seconds) log-spaced from 60s to 180 days, giving
+# 32 bins total: bin 0 is "< 60s" (continuous practice), bins 1-10 land in
+# minutes-to-hours, bins 11-20 in days-to-weeks, bins 21-31 in months up to
+# ">180 days" (the open-ended last bin) -- matches the KT literature's usual
+# log-binned inter-attempt time feature (e.g. DKT+forgetting/SAKT variants).
+_TIME_BIN_EDGES = [60.0 * ((180.0 * 86400.0 / 60.0) ** (i / 30.0)) for i in range(31)]
+
+
+def time_bin_of(delta_seconds: Optional[float]) -> int:
+    """Discretize a raw inter-interaction gap (seconds) into one of
+    NUM_TIME_BINS log-spaced bins. None/negative deltas (missing timestamp,
+    or the very first event of a sequence) map to bin 0."""
+    if delta_seconds is None or delta_seconds < 0:
+        return 0
+    idx = bisect.bisect_right(_TIME_BIN_EDGES, delta_seconds)
+    return min(idx, NUM_TIME_BINS - 1)
 
 
 NO_OPTIONS_TOKEN = "[NO_OPTIONS]"
@@ -135,9 +190,11 @@ def build_content_text(text, options_json_raw):
     return text + " [OPTIONS] " + " | ".join(values)
 
 
-def chunk_student_events(record_events, window_size, context_frac):
+def chunk_student_events(record_events: list[dict], window_size: int, context_frac: float) -> list[list[dict]]:
     """Identical windowing scheme to prepare_sequences.py -- see that file
-    for the full rationale."""
+    for the full rationale. Called once per SESSION (see
+    split_into_sessions), not once per student, so a window is never built
+    across a multi-month gap in a student's history."""
     n = len(record_events)
     if n <= window_size:
         return [record_events]
@@ -166,6 +223,50 @@ def chunk_student_events(record_events, window_size, context_frac):
     return chunks
 
 
+def split_into_sessions(record_events: list[dict], epochs: list[Optional[float]],
+                         max_gap_seconds: float) -> list[list[dict]]:
+    """Split one student's chronologically-ordered events into sessions,
+    breaking wherever the gap to the previous event exceeds
+    `max_gap_seconds` (see --max-session-gap-days). `epochs[i]` must be the
+    parsed epoch-seconds timestamp of `record_events[i]` (None if
+    unparseable -- unknown gaps never trigger a split). This only affects
+    how chunk_student_events later builds sliding windows (each session is
+    windowed independently, so no window spans e.g. a 2025-to-2026 gap);
+    it does NOT affect train/val/test_warm assignment, which stays purely
+    a function of chronological position within the student's full history."""
+    if not record_events:
+        return []
+    sessions: list[list[dict]] = []
+    current: list[dict] = [record_events[0]]
+    for i in range(1, len(record_events)):
+        prev_t, cur_t = epochs[i - 1], epochs[i]
+        if prev_t is not None and cur_t is not None and (cur_t - prev_t) > max_gap_seconds:
+            sessions.append(current)
+            current = []
+        current.append(record_events[i])
+    sessions.append(current)
+    return sessions
+
+
+def cap_windows_stratified(chunks: list[list[dict]], max_windows: int) -> list[list[dict]]:
+    """Thin an over-long list of chronologically-ordered sliding windows
+    (post session-splitting) down to at most `max_windows`, so a single
+    hyper-active student (up to ~10k interactions, 30+ windows) can't
+    dominate the training loss. Selection is evenly spaced across the
+    window list rather than "keep the first N", so early/middle/late
+    curriculum stages are all still represented -- this also always keeps
+    the first window (earliest history) and the last window (most recent
+    history, where test_warm/test_cold_item positions concentrate)."""
+    n = len(chunks)
+    if max_windows <= 0 or n <= max_windows:
+        return chunks
+    if max_windows == 1:
+        keep_idx = {n // 2}
+    else:
+        keep_idx = {round(i * (n - 1) / (max_windows - 1)) for i in range(max_windows)}
+    return [chunks[i] for i in sorted(keep_idx)]
+
+
 def main():
     args = parse_args()
     random.seed(args.seed)
@@ -189,6 +290,7 @@ def main():
             item_ids.add(row["item_id"])
             students[row["student_id"]].append({
                 "t": row["timestamp"],
+                "t_epoch": parse_timestamp_epoch(row["timestamp"]),
                 "skill": row["skill_id"],
                 "item": row["item_id"],
                 "text": row["text"],
@@ -225,6 +327,7 @@ def main():
 
     kept, dropped_short = 0, 0
     students_chunked, chunks_written = 0, 0
+    students_session_split, students_capped, windows_dropped = 0, 0, 0
     split_counts = defaultdict(int)
     seq_path = out_dir / "sequences.jsonl.gz"
     with gzip.open(seq_path, "wt", encoding="utf-8") as out_f:
@@ -243,6 +346,8 @@ def main():
                 n_test = n - n_train - n_val
 
             record_events = []
+            epochs = []
+            prev_epoch = None
             for i, ev in enumerate(events):
                 if i < n_train:
                     split = "train"
@@ -252,6 +357,13 @@ def main():
                     split = "test_warm"
                 if ev["item"] in cold_items:
                     split = "test_cold_item" if split != "train" else "skip_cold_in_train"
+                # delta_t/time_bin deliberately span session gaps (unlike the
+                # windowing below): a huge gap is meaningful signal (it lands
+                # in the top time bin), not something to hide from the model.
+                cur_epoch = ev.get("t_epoch")
+                delta_t = 0.0 if prev_epoch is None or cur_epoch is None else max(0.0, cur_epoch - prev_epoch)
+                prev_epoch = cur_epoch if cur_epoch is not None else prev_epoch
+                epochs.append(cur_epoch)
                 record_events.append({
                     "skill": skill_vocab.get(ev["skill"], 1),
                     "item": item_vocab.get(ev["item"], 1),
@@ -266,12 +378,23 @@ def main():
                     "option_count": ev["option_count"],
                     "exercise_family": ev["exercise_family"],
                     "t": ev["t"],
+                    "delta_t": delta_t,
+                    "time_bin": time_bin_of(delta_t),
                     "split": split,
                 })
 
-            chunks = chunk_student_events(record_events, args.max_seq_len, args.context_overlap_frac)
-            if len(chunks) > 1:
+            sessions = split_into_sessions(record_events, epochs, args.max_session_gap_days * 86400.0)
+            if len(sessions) > 1:
+                students_session_split += 1
+            raw_chunks = []
+            for session in sessions:
+                raw_chunks.extend(chunk_student_events(session, args.max_seq_len, args.context_overlap_frac))
+            if len(raw_chunks) > 1:
                 students_chunked += 1
+            if args.max_windows_per_student > 0 and len(raw_chunks) > args.max_windows_per_student:
+                students_capped += 1
+                windows_dropped += len(raw_chunks) - args.max_windows_per_student
+            chunks = cap_windows_stratified(raw_chunks, args.max_windows_per_student)
             chunks_written += len(chunks)
             for w, chunk in enumerate(chunks):
                 for ev in chunk:
@@ -293,7 +416,13 @@ def main():
         "min_interactions": args.min_interactions,
         "max_seq_len_window": args.max_seq_len,
         "context_overlap_frac": args.context_overlap_frac,
+        "max_session_gap_days": args.max_session_gap_days,
+        "max_windows_per_student": args.max_windows_per_student,
+        "num_time_bins": NUM_TIME_BINS,
         "students_needing_multiple_windows": students_chunked,
+        "students_with_session_split": students_session_split,
+        "students_with_windows_capped": students_capped,
+        "windows_dropped_by_cap": windows_dropped,
         "sequence_records_written": chunks_written,
         "n_skills": len(skill_vocab) - 2,
         "n_items_trainable": len(item_vocab) - 2,
@@ -313,6 +442,18 @@ def main():
             "Rows with correctness_available=0 are dropped before sequence-building (no label to "
             "train/eval against) -- see build_v2_raw_clean.py notes for which exercise types "
             "these are.",
+            "Each event also carries delta_t (seconds since the student's previous interaction, "
+            "0.0 for the very first) and time_bin (that delta_t log-binned into NUM_TIME_BINS=32 "
+            "buckets, see time_bin_of) for the time-embedding-aware model. Sliding windows "
+            "(chunk_student_events) are now built per SESSION, not per student -- a session breaks "
+            "wherever the gap to the previous interaction exceeds --max-session-gap-days (default "
+            "30), so no window's 'recent history' silently spans e.g. a 2025-to-2026 return gap. "
+            "delta_t/time_bin themselves still span session gaps deliberately (a huge gap is real "
+            "signal, not something to hide). Students whose sessions produce more windows than "
+            "--max-windows-per-student (default 8) have their windows thinned via evenly-spaced "
+            "selection (cap_windows_stratified) so hyper-active students (up to ~10k interactions) "
+            "can't dominate the training loss; this does drop some train-only interactions "
+            "entirely for such students (see students_with_windows_capped/windows_dropped_by_cap).",
         ],
     }
     (out_dir / "split_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
