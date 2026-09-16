@@ -300,3 +300,53 @@ improvements instead of stopping just as the decay starts to help. The
 learning rate actually used each epoch is logged into
 `training_history.json` (`"lr"` field) so you can confirm the schedule
 took effect and correlate it with the AUC curve.
+
+## Hyperparameter tuning (`tune_lumi.sh` / `compare_tuning.py`)
+
+Everything above (`--item-id-dropout 0.25`, `--item-embed-weight-decay 5e-3`,
+the LR schedule, `--patience 25`) was one reasoned change at a time in
+response to a diagnosed problem, never a search over a grid. Comparing two
+full A/B/C/D runs (before/after those changes) showed those two knobs are
+what actually moves `test_cold_item` AUC (+0.005 to +0.007 AUC across
+variants, val/test_warm roughly flat) — so they're also the right knobs to
+sweep instead of guessing further by hand.
+
+`tune_lumi.sh` sweeps a 3x3 grid of `item_id_dropout` x
+`item_embed_weight_decay` across **B, C, and D together** (27 SLURM array
+tasks) — not just the current best variant (D) — because a winning
+combination should be a real, transferable property of the regularization
+mechanism, not something that happens to help only one variant; sweeping
+all three item-aware variants is the check for that. `skill_only` (A) is
+deliberately skipped: it has no `item_embed`, so both knobs are documented
+no-ops for it in `train.py --help` — sweeping it would just retrain the
+same config 9 times.
+
+```bash
+# 1. Data prep + embeddings must already exist (run_lumi.sh does this once).
+# 2. Submit the sweep (27 tasks: {skill_item, skill_item_content,
+#    skill_item_content_option} x 3x3 grid, one GPU each, up to 8 running
+#    at once by default -- see --array=0-26%8 in the script):
+sbatch --account=project_462001308 tune_lumi.sh
+# or sweep only a subset, e.g. a narrower follow-up round on D alone:
+KT_TUNE_VARIANTS="skill_item_content_option" sbatch --account=project_462001308 tune_lumi.sh
+# (adjust --array to 0-$((N*9-1))%8 for N variants if you override KT_TUNE_VARIANTS)
+# to change how many run in parallel, override the array throttle at submit time, e.g.:
+sbatch --account=project_462001308 --array=0-26%4 tune_lumi.sh
+
+# 3. After all array tasks finish, rsync runs_tune/ back (same as runs/ in
+#    LUMI_SETUP.md), then rank configs and pick a winner, once per variant:
+python compare_tuning.py --runs-dir runs_tune/skill_item
+python compare_tuning.py --runs-dir runs_tune/skill_item_content
+python compare_tuning.py --runs-dir runs_tune/skill_item_content_option
+```
+
+This ranks every trained config by `test_cold_item` AUC at its `by_joint`
+epoch (matches the deployment recommendation above; pass `--rank-by by_val`
+or `--rank-by by_cold` to rank by a different view instead) and writes
+`tuning_comparison.json`. If the same (or a similar) `item_id_dropout` /
+`item_embed_weight_decay` combination wins for all three variants, that's
+good evidence it's a genuine fix, not noise — fold it into `run_lumi.sh`'s
+`ITEM_REG` defaults and re-run the full A/B/C/D comparison to confirm.
+If the winners disagree a lot across variants, that itself is useful
+signal (the right amount of item-id regularization may depend on how much
+other signal — content embeddings — the model has to fall back on).
