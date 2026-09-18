@@ -1,4 +1,4 @@
-"""Stage 5 -- the skill knowledge graph: separated evidence layers, one derived conclusion.
+"""L4b -- the skill knowledge graph: separated evidence layers, one derived conclusion.
 
 Nodes: the **560 skills that have an embedding row** in the model's
 `skill_vocab` (see `build_skill_catalog.py` for why this is 560 and not the

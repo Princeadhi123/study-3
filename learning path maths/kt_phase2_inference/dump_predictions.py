@@ -1,4 +1,4 @@
-"""Stage 2 -- one forward pass over the frozen model; dump every held-out prediction.
+"""L2 -- one forward pass over the frozen model; dump every held-out prediction.
 
 Conformal calibration, coverage verification, and the knowledge graph's
 `predictive_dependency` layer all need the same thing: the frozen model's

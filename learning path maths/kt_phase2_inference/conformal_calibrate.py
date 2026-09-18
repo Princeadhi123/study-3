@@ -1,4 +1,4 @@
-"""Stage 3 -- offline conformal calibration of the frozen variant-D model.
+"""L3a -- offline conformal calibration of the frozen variant-D model.
 
 Produces `artifacts/conformal_calibration.json` (the constants the live gate
 reads) and `artifacts/conformal_coverage_report.json` (the empirical evidence

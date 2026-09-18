@@ -1,4 +1,4 @@
-"""Stage 5c -- querying the graph: "the gate flagged skill B; what do we drop back to?"
+"""L4c -- querying the graph: "the gate flagged skill B; what do we drop back to?"
 
 This is the glue between Layer 3 (the conformal gate) and the Socratic LLM.
 When `CheckpointTriggerResult.status is CONFIDENT_STRUGGLE` on a target

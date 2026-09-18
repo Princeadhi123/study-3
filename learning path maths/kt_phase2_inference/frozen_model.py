@@ -1,4 +1,4 @@
-"""Stage 1 -- load the FROZEN Phase-1 variant-D model for forward passes only.
+"""L1 loader -- load the FROZEN Phase-1 variant-D model for forward passes only.
 
 The architecture is imported from `kt_phase1/modeling/model.py` rather than
 re-declared here, so what runs at inference is byte-identical to what was

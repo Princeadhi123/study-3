@@ -1,4 +1,4 @@
-"""Stage 0 -- the complete skill catalog the knowledge graph is built on.
+"""L0 -- the complete skill catalog the knowledge graph is built on.
 
 Why this exists at all: the model's skill space is **560 skills**
 (`prepared_v2/split_report.json -> n_skills: 560`), but the only file in the

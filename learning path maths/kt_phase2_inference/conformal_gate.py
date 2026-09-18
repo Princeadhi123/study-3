@@ -1,6 +1,6 @@
-"""Stage 4 -- the live gate: turn frozen-model probabilities into an intervention decision.
+"""L3b -- the live gate: turn frozen-model probabilities into an intervention decision.
 
-This is Layer 3. It is a pure decision function over numbers the frozen
+This is the live half of Layer 3 (conformal_calibrate.py is the offline half). It is a pure decision function over numbers the frozen
 model already produced, plus the constants in
 `artifacts/conformal_calibration.json`.
 

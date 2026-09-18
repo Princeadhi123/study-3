@@ -1,4 +1,4 @@
-"""Stage 5b -- counterfactual probing of the frozen model for skill dependencies.
+"""L4a -- counterfactual probing of the frozen model for skill dependencies.
 
 This is the layer that makes the knowledge graph *model-grounded* instead of
 a restatement of the school timetable. It asks, for every candidate ordered
