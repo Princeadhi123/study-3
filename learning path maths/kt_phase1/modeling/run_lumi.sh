@@ -165,12 +165,35 @@ COMMON=(
 # item_ids to __UNK__ during training (--item-id-dropout) and apply a
 # separate, stronger weight decay to item_embed (--item-embed-weight-decay).
 # Both curb the test_cold_item AUC decay seen when item embeddings are
-# trained without them (see README "Reading the results"). Raised to 0.25 /
-# 5e-3 (from 0.1 / 1e-3) to push item-aware variants to lean more on content
-# embeddings, which generalize to genuinely novel items and item_id can't.
-ITEM_REG=(
-    --item-id-dropout "${KT_ITEM_ID_DROPOUT:-0.25}"
-    --item-embed-weight-decay "${KT_ITEM_EMBED_WEIGHT_DECAY:-5e-3}"
+# trained without them (see README "Reading the results").
+#
+# Per-variant values below are the outcome of the 4-round tuning sweep in
+# tune_lumi.sh / tune_lumi_phase{2,3,4}.sh (see README "Hyperparameter
+# tuning" and tune_lumi_phase4.sh's decision rule for the full trace):
+#   - skill_item saturates at its original (128/2) capacity; only
+#     item_id_dropout/item_embed_weight_decay needed retuning.
+#   - skill_item_content / skill_item_content_option both benefit from more
+#     depth (d_model=192, n_layers=3 vs. the 128/2 default) -- confirmed
+#     across seeds -- but a further regularization retune at that new
+#     capacity (round 3's "Phase G2") did NOT hold up under reseeding
+#     (round 4/"Phase H"): its apparent gain was within the ~0.001-0.002
+#     seed-noise band, so both variants keep round-2's regularization
+#     values, just at the new d192_l3 capacity.
+ITEM_REG_SKILL_ITEM=(
+    --item-id-dropout "${KT_SKILL_ITEM_ITEM_ID_DROPOUT:-0.60}"
+    --item-embed-weight-decay "${KT_SKILL_ITEM_ITEM_EMBED_WEIGHT_DECAY:-0.005}"
+)
+ITEM_REG_CONTENT=(
+    --item-id-dropout "${KT_CONTENT_ITEM_ID_DROPOUT:-0.40}"
+    --item-embed-weight-decay "${KT_CONTENT_ITEM_EMBED_WEIGHT_DECAY:-0.02}"
+    --d-model "${KT_CONTENT_D_MODEL:-192}"
+    --n-layers "${KT_CONTENT_N_LAYERS:-3}"
+)
+ITEM_REG_CONTENT_OPTION=(
+    --item-id-dropout "${KT_CONTENT_OPTION_ITEM_ID_DROPOUT:-0.40}"
+    --item-embed-weight-decay "${KT_CONTENT_OPTION_ITEM_EMBED_WEIGHT_DECAY:-0.005}"
+    --d-model "${KT_CONTENT_OPTION_D_MODEL:-192}"
+    --n-layers "${KT_CONTENT_OPTION_N_LAYERS:-3}"
 )
 
 # ---- train all four variants in parallel, one GPU each ---
@@ -198,17 +221,17 @@ train_variant 0 skill_only \
 PID_SKILL_ONLY=$!
 
 train_variant 1 skill_item \
-    "${COMMON[@]}" "${ITEM_REG[@]}" --out-dir "${RUNS_DIR}/skill_item" &
+    "${COMMON[@]}" "${ITEM_REG_SKILL_ITEM[@]}" --out-dir "${RUNS_DIR}/skill_item" &
 PID_SKILL_ITEM=$!
 
 train_variant 2 skill_item_content \
-    "${COMMON[@]}" "${ITEM_REG[@]}" \
+    "${COMMON[@]}" "${ITEM_REG_CONTENT[@]}" \
     --text-embeddings "${EMBED_DIR}/text_embeddings_v2.npz" \
     --out-dir "${RUNS_DIR}/skill_item_content" &
 PID_SKILL_ITEM_CONTENT=$!
 
 train_variant 3 skill_item_content_option \
-    "${COMMON[@]}" "${ITEM_REG[@]}" \
+    "${COMMON[@]}" "${ITEM_REG_CONTENT_OPTION[@]}" \
     --text-embeddings "${EMBED_DIR}/text_embeddings_v2.npz" \
     --out-dir "${RUNS_DIR}/skill_item_content_option" &
 PID_SKILL_ITEM_CONTENT_OPTION=$!

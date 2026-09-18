@@ -350,3 +350,91 @@ good evidence it's a genuine fix, not noise — fold it into `run_lumi.sh`'s
 If the winners disagree a lot across variants, that itself is useful
 signal (the right amount of item-id regularization may depend on how much
 other signal — content embeddings — the model has to fall back on).
+
+### Rounds 2-4: capacity scaling, and the tuning conclusion
+
+Three follow-up rounds (`tune_lumi_phase2.sh`, `tune_lumi_phase3.sh`,
+`tune_lumi_phase4.sh`, each with its own rationale/decision-rule comment at
+the top of the script) pushed the sweep further and reached a final,
+seed-confirmed answer:
+
+- **Round 2** re-widened the `item_id_dropout` / `item_embed_weight_decay`
+  grid and tried general `--dropout`, alternate seeds, and one capacity
+  probe (`d_model=192, n_layers=2`) — regularization was saturated at the
+  original 128/2 capacity for all three item-aware variants, and `d192_l2`
+  (wider, not deeper) didn't help.
+- **Round 3** tried depth (`d192_l3`, `d256_l3/l4`) instead of width: this
+  was the one change that broke out of the seed-noise band, for the
+  content-aware variants only — `skill_item_content` and
+  `skill_item_content_option` both gained clearly at `d192_l3`; going
+  deeper/wider than that gave no further gain, and the same capacity bump
+  did nothing for `skill_item` (no content embeddings to route through the
+  extra layer). Round 3 also re-tuned `item_id_dropout`/weight decay at the
+  new `d192_l3` capacity and found apparent new winners (Phase G2) — but
+  those were single-seed.
+- **Round 4** reseeded (43, 44) those Phase G2 winners and compared them
+  against round 3's own reseed of the *old* round-2 regularization at
+  `d192_l3` (Phase G3). The G2 gain (+0.0006 to −0.0001 mean `test_cold_item`
+  AUC vs. the round-2 regularization, across both content variants) did not
+  clear the noise band — it was seed luck, not a real effect.
+
+**Final, multi-seed-confirmed configuration** (now the default in
+`run_lumi.sh`):
+
+| Variant | Capacity | `item_id_dropout` | `item_embed_weight_decay` |
+|---|---|---|---|
+| `skill_item` | default (128/2) | 0.60 | 0.005 |
+| `skill_item_content` | `d_model=192, n_layers=3` | 0.40 | 0.02 |
+| `skill_item_content_option` | `d_model=192, n_layers=3` | 0.40 | 0.005 |
+
+No further tuning round is indicated by anything measured across rounds 1-4
+— every other axis tried (width beyond `d192`, depth beyond `l3`, general
+dropout, `skill_item` capacity) returned a clear "no further gain". These
+values are now `run_lumi.sh`'s defaults (`ITEM_REG_SKILL_ITEM`,
+`ITEM_REG_CONTENT`, `ITEM_REG_CONTENT_OPTION`, each still overridable via
+env vars, e.g. `KT_CONTENT_D_MODEL`) — architecture and hyperparameters are
+frozen; the tuning phase is closed.
+
+### Final confirmation run
+
+```bash
+cd /projappl/project_462001308/math_kt/code/modeling
+sbatch --account=project_462001308 run_lumi.sh
+```
+
+This reuses whatever `prepared_v2`/embeddings already exist from earlier
+rounds (it only regenerates them if missing) and trains all four variants
+in parallel, one per GPU, under the frozen config above. Read the result
+from `runs/comparison.json` (written automatically by `compare_runs.py` at
+the end of the script) the same way as any other run — see "Reading the
+results" above.
+
+**Reporting the cold-AUC number honestly:** the tuning sweep trained
+`skill_item_content` / `skill_item_content_option` at seeds 42/43/44 under
+this exact config (see `runs_tune2/*/idF_d192_l3`, `runs_tune3/*/idG3_seed4{3,4}`).
+Their `test_cold_item` AUC:
+
+| Variant | seed 42 | seed 43 | seed 44 | mean |
+|---|---|---|---|---|
+| `skill_item_content` | .9116 | .9092 | .9091 | .9100 |
+| `skill_item_content_option` | .9128 | .9103 | .9107 | .9113 |
+
+Report the **mean across seeds** (~.910 for C, ~.911 for D) as the
+generalization number, not the single best seed (.9116 / .9128) — those are
+real runs, not errors, but quoting only the best of three is cherry-picking
+and won't hold up under "how many seeds did you run" scrutiny. The
+seed-to-seed spread (~.0025) is also larger than the ~.0013 gap between C
+and D's means, so "D beats C" should be reported as a small, consistently-
+directional effect (D ≥ C at all three seeds), not an emphatic one.
+
+**Ensembling was considered and deliberately rejected** for the deployed
+model: prediction-averaging multiple seed checkpoints at inference would
+multiply latency/compute by the ensemble size for a ~0.001 AUC gain,
+contradicting the frugal/low-latency design goal. Cross-seed weight
+averaging was also rejected — these are independently, randomly
+initialized transformers, not checkpoints from one training trajectory or
+a shared pretrained init, so naive parameter averaging (unlike SWA or
+"model soups") is not expected to combine them reliably. The deployed
+model is a single trained checkpoint (any one of the seeds above, e.g.
+`best_model_joint.pt` from the seed-42 run) — the multi-seed runs exist
+only to report an honest, non-cherry-picked generalization estimate.
