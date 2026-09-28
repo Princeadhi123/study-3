@@ -21,7 +21,7 @@ module load rocm/6.2.4
 PROJECT_ID="${KT_PROJECT_ID:-project_462001308}"
 PROJECT_ROOT="/projappl/${PROJECT_ID}/math_kt"
 SCRATCH_ROOT="/scratch/${PROJECT_ID}/math_kt"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "${SLURM_SUBMIT_DIR:?Submit from the kt_phase2_inference directory}" && pwd)"
 ARTIFACTS="${SCRIPT_DIR}/artifacts"
 PYTHON="${KT_PYTHON:-${PROJECT_ROOT}/mathkt-env/bin/python}"
 export KT_PHASE2_PREPARED="${SCRATCH_ROOT}/prepared_v2_w400_o0p25_g30_c8"
