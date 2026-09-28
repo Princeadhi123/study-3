@@ -7,8 +7,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=1-00:00:00
-#SBATCH --output=kt_phase2_%j.out
-#SBATCH --error=kt_phase2_%j.err
+#SBATCH --array=0-1
+#SBATCH --output=kt_phase2_%A_%a.out
+#SBATCH --error=kt_phase2_%A_%a.err
 
 set -euo pipefail
 
@@ -60,11 +61,20 @@ if ! printf '%s  %s\n' \
 fi
 
 mkdir -p "$ARTIFACTS"
-if [[ -e "$ARTIFACTS/predictions_d.npz" || -e "$ARTIFACTS/predictive_dependency.csv" ]]; then
-    echo "Output already exists in $ARTIFACTS; refusing to overwrite it" >&2
-    exit 2
-fi
+case "${SLURM_ARRAY_TASK_ID:?Submit with sbatch as a job array}" in
+    0) outputs=("$ARTIFACTS/predictions_d.npz") ;;
+    1) outputs=("$ARTIFACTS/predictive_dependency.csv" "$ARTIFACTS/predictive_dependency.meta.json") ;;
+    *) echo "Unexpected array task: $SLURM_ARRAY_TASK_ID" >&2; exit 2 ;;
+esac
+for output in "${outputs[@]}"; do
+    if [[ -e "$output" ]]; then
+        echo "Output already exists: $output; refusing to overwrite it" >&2
+        exit 2
+    fi
+done
 
 "$PYTHON" -c 'import torch; print("PyTorch:", torch.__version__, "GPU:", torch.cuda.is_available(), flush=True); assert torch.cuda.is_available()'
-"$PYTHON" "$SCRIPT_DIR/dump_predictions.py" --device cuda
-"$PYTHON" "$SCRIPT_DIR/probe_predictive_dependency.py" --device cuda --max-windows 4000
+case "$SLURM_ARRAY_TASK_ID" in
+    0) "$PYTHON" "$SCRIPT_DIR/dump_predictions.py" --device cuda ;;
+    1) "$PYTHON" "$SCRIPT_DIR/probe_predictive_dependency.py" --device cuda --max-windows 4000 ;;
+esac
