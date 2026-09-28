@@ -77,6 +77,9 @@ learning path maths/kt_phase2_inference/**/_smoke*
 learning path maths/kt_phase2_inference/**/_synth*
 learning path maths/kt_phase2_inference/**/_selftest*
 learning path maths/kt_phase2_inference/artifacts_scratch/
+learning path maths/kt_phase2_inference/study 3.code-workspace
+learning path maths/kt_phase2_inference/*.out
+learning path maths/kt_phase2_inference/*.err
 
 # Local Python tooling and editor/system files
 .venv/

@@ -12,6 +12,7 @@ default: it trades ~0.003 test_cold_item AUC for warm-item gains, and the
 cold-item regime (a question the model has never trained on) is the regime a
 live tutoring loop actually operates in.
 """
+import os
 from pathlib import Path
 
 PHASE2_ROOT = Path(__file__).resolve().parent
@@ -20,7 +21,7 @@ PHASE1 = REPO_ROOT / "kt_phase1"
 
 # --- frozen Phase-1 inputs (read-only) ---------------------------------
 INTERACTIONS = PHASE1 / "data_v2" / "kt_interactions_v2_item_level.csv.gz"
-PREPARED = PHASE1 / "modeling" / "prepared_v2"
+PREPARED = Path(os.environ.get("KT_PHASE2_PREPARED", PHASE1 / "modeling" / "prepared_v2"))
 SEQUENCES = PREPARED / "sequences.jsonl.gz"
 VOCAB = PREPARED / "vocab.json"
 SPLIT_REPORT = PREPARED / "split_report.json"
@@ -36,6 +37,8 @@ def _find_text_embeddings() -> Path:
     room rather than to one canonical spot. Both plausible landing sites are
     checked instead of forcing the file to be moved.
     """
+    if override := os.environ.get("KT_PHASE2_TEXT_EMBEDDINGS"):
+        return Path(override)
     candidates = [
         PREPARED / "text_embeddings_v2.npz",
         ARTIFACTS / "text_embeddings_v2.npz",
@@ -50,7 +53,7 @@ def _find_text_embeddings() -> Path:
 # load rather than silently falling back to content_dim=0.
 TEXT_EMBEDDINGS = _find_text_embeddings()
 
-RUN_DIR = PHASE1 / "modeling" / "runs" / "skill_item_content_option"
+RUN_DIR = Path(os.environ.get("KT_PHASE2_RUN_DIR", PHASE1 / "modeling" / "runs" / "skill_item_content_option"))
 CHECKPOINT = RUN_DIR / "best_model_joint.pt"
 RUN_CONFIG = RUN_DIR / "config.json"
 
