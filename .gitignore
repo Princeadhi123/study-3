@@ -81,6 +81,9 @@ learning path maths/kt_phase2_inference/study 3.code-workspace
 learning path maths/kt_phase2_inference/*.out
 learning path maths/kt_phase2_inference/*.err
 
+# Phase 3 prototype sessions may contain submitted answers and private scoring
+learning path maths/kt_phase3_feedback/artifacts/
+
 # Local Python tooling and editor/system files
 .venv/
 venv/

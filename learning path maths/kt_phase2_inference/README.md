@@ -14,8 +14,9 @@ the feed never **redirects** anyone to study a skill and never **enforces**
 a study action or path.
 
 Everything in this directory is the statistical machinery that could power
-such a feed (frozen KT model, conformal gate, knowledge graph). **The feed
-itself is not implemented here.** Automatic redirection, enforced study
+such a feed (frozen KT model, conformal gate, knowledge graph). **The live
+feed is not implemented** — `test_feed.py` is a pure observed-answer
+prototype of it. Automatic redirection, enforced study
 actions, and autonomous teaching/tutoring dialogue are possible future
 directions and are explicitly out of current scope (see "Out of scope").
 
@@ -42,6 +43,71 @@ Reference generalisation numbers, quoted as the **mean across seeds 42/43/44**
 D ≥ C at all three seeds, but the seed-to-seed spread (~.0025) exceeds the
 C→D gap (~.0013). "D beats C" is a small, consistently-directional effect,
 not an emphatic one.
+
+---
+
+## Prototype status and next steps
+
+**Ready now**
+
+- `artifacts/test_question_bank_text_only_approved_v2.json` is the current
+  40-question bank: four skills, ten questions per skill, five per skill in
+  each half, locally approved for the offline prototype, and compatible with
+  the frozen variant-D text embeddings for every question and every
+  selectable option. It contains private answer keys and must never be sent
+  to a student.
+- `mcq_test.py` provides the callable serving/scoring boundary:
+  `student_questions()` returns key-free halves and `score_checkpoint()`
+  privately scores ordered 20- or 40-response prefixes.
+- `test_feed.py` renders the cautious observed-answer midpoint/end feed.
+- `simulate_test_feed.py --bank ... --kt-device cpu` can run an illustrative
+  variant-D trace over the approved v2 bank.
+
+**Needed for an end-to-end prototype**
+
+1. **Session storage and API boundary.** Create a test session, serve half 1
+   then half 2, persist ordered `question_id`, `skill_id`, `selected_index`,
+   timestamps, and the private `correct` result. Students receive only the
+   public fields from `mcq_test.student_questions()`.
+2. **KT event adapter.** Convert each submitted response into variant-D event
+   fields: current `skill_id`, `item_id`, `content_text`, correctness, prior
+   `selected_text`, response time/`rt_mask`, attempt number, and `time_bin`.
+   Never place the current selection in the current query; it belongs only to
+   the next step's history.
+3. **Missing-data policy.** If response time is unavailable, keep
+   `rt_mask=0` rather than inventing a value. Decide explicitly whether each
+   test is cold-start or continues from prior student history.
+4. **KT compatibility gate.** Before KT inference, require all skill IDs in
+   the vocabulary, every `content_text` and option `selected_text` in the
+   embedding table, and unknown `item_id`s routed only to `__UNK__`.
+5. **Feedback assembly.** Keep observed counts primary and attach KT output
+   as a separate `model_estimate` with an uncalibrated-status label. Do not
+   blend it into correctness or present it as mastery.
+6. **Role-separated UI.** Show students only their own public questions and
+   cautious observed/model-status text; show item/event detail only to an
+   authorized teacher or researcher view.
+7. **Evaluation.** First replay synthetic all-correct/all-wrong/mixed
+   trajectories, then a small human pilot. Compare observed-only feedback
+   with observed + KT estimate, and inspect per-skill predictions rather
+   than relying on global AUC.
+
+**Claims not yet supported**
+
+- No calibrated mastery claim from five questions per half or ten per skill.
+- The reported variant-D cold-item result is mean AUC about `.911`, not proof
+  of calibrated feedback on this test.
+- No recommendation, redirection, or enforced study path is validated.
+- No causal learning effect can be claimed without a separate study.
+
+**Immediate implementation order**
+
+1. Add a small session/response service around `mcq_test.py`.
+2. Add a KT adapter that consumes the saved response rows and emits
+   per-step `P(next correct)` plus coverage diagnostics.
+3. Render observed feedback at 20 and observed + clearly labeled model
+   estimate at 40.
+4. Only after that works, expand the approved text-only MCQ bank or add more
+   skills/questions per skill.
 
 ---
 
@@ -100,6 +166,177 @@ pipeline, and is deliberately kept out of the gating decision. See
 | `compare_graph_stability.py` | **eval** — builds a graph per probe output and reports edge Jaccard, edge retention, and top-recommendation agreement |
 | `run_lumi_phase2.sh` | SLURM array: task 0 = L2 predictions, task 1 = L4a probe |
 | `run_lumi_dependency_stability.sh` | SLURM array: three independent 20,000-window probes at different seeds, for graph stability |
+| `test_feed.py` | **feed prototype** — pure observed-answer midpoint/end-of-test feedback dict; no model, no calibration |
+| `question_bank.py` | **offline demo bank** — select distinct scored MCQ templates from the item-level source; answer key stays private |
+| `mcq_inventory.py` | **private inventory** — extract all distinct scoring-eligible MCQ renderings from every skill; collapse student events and flag contradictory keys |
+| `review_mcq_inventory.py` | **review triage** — audit all inventory rows for exported-text risk indicators; never approves any question |
+| `simulate_test_feed.py` | **offline demo** — scripted 20/40 answer trajectory and optional illustrative frozen-KT trace |
+| `mcq_test.py` | **callable MCQ path** — key-free `student_questions` + private `score_checkpoint` over an approved bank; no LLM, no model claims |
+| `select_text_mcq.py` | **text-only candidate survey** — lists conservative standalone MCQ candidates by skill without approving them |
+| `build_text_only_bank.py` | **checked 40-bank builder** — rebuilds the private selection and verifies answer values, prompt uniqueness, and review flags |
+| `approve_text_only_bank.py` | **controlled approval** — writes a separate approved bank only if the source exactly matches the checked selection |
+
+`build_test_feed(answers, skill_names)` is a pure function over the
+completed-answer prefix of the fixed 40-question test (4 skills × 5
+distinct questions per half, new questions on the same skills in the
+second half). Pass it 20 rows for midpoint or 40 for end; it returns a
+JSON-serializable dict with `student` and `teacher` views, an `evidence`
+record, and an empty `suggestions` list. Verify with
+`python -m unittest -v test_test_feed.py` from this directory — stdlib
+only. This is an **observed-answer prototype, not the live feed** — no
+validated model-based midpoint or end-of-test feed exists yet, and the
+conformal gate is not applied to these five-answer skill blocks.
+
+What is still missing for the real feed:
+
+- **Identified test data.** `predictions_d.npz` and
+  `checkpoint_replay.jsonl` are student *windows*, not identified
+  40-question tests — there is no test/session ID to reconstruct one
+  from. Deployment needs an authorized source of ordered per-test
+  `question_id` / `skill_id` / `correct` events plus the skill names.
+- **Production-level content approval.** The v2 text-only bank is locally
+  approved for the offline prototype and is KT-compatible, but that approval
+  is not external curriculum certification for real students.
+- **Test-app integration** that delivers the student and teacher views
+  role-safely, at the midpoint and end moments.
+- **Held-out real tests** to evaluate — and, if model output is ever
+  wired in, to calibrate — the five-answer midpoint and ten-answer
+  full-test conditions separately. The windowed checkpoint numbers
+  below do not apply to either feed condition.
+
+Optional graph-based suggestions stay gated on the stability review and
+expert sign-off in "What remains" items 3–4.
+
+### Offline 40-question demonstration
+
+From this directory, with the item-level source and skill catalog available:
+
+```bash
+python question_bank.py --out artifacts/test_question_bank.json
+python simulate_test_feed.py --bank artifacts/test_question_bank.json --out artifacts/test_feed_demo.json
+python -m unittest -v test_mcq_test.py test_question_bank.py test_simulate_test_feed.py test_test_feed.py
+```
+
+The bank builder streams the item-level source, admits only labeled MCQs
+with one unambiguous answer key, and takes one rendering per exercise
+template. It chooses four skills by eligible-template count for this **demo
+only**, or accepts four educator-selected IDs via `--skills S1 S2 S3 S4`.
+For each skill it uses ten distinct templates, alternating the sorted
+renderings between halves and interleaving the skills. Generated files go
+under ignored `artifacts/`; both commands refuse to overwrite an existing
+output. The bank contains an **answer key**: never serve that JSON to a
+student. The feed demo contains only scripted answer counts, not real
+student results or an evaluation of learning.
+
+The first local run found 20/19/19/19 eligible templates for its four
+auto-selected skills and produced the 20/40 feed. **These questions have
+not been reviewed for classroom use.** One auto-selected skill is named
+`KLIKKAA TÄSTÄ` ("click here"), and a question under `Todennäköisyys`
+(probability) asks about the multiplication table. Some prompts may also
+require images absent from the text export. Counts and distinct IDs alone
+do not establish a usable test; have an educator choose the skills and
+review the rendered items/answer keys.
+
+`simulate_test_feed.py --responses choices.json` accepts a complete mapping
+of `question_id` to selected option index instead of scripted choices.
+`--kt-device cuda` (or `cpu`) additionally loads the frozen variant-D
+model and produces an **illustrative cold-start trace** of P(correct) before
+each scripted answer; it rejects unknown content/selected-answer embeddings
+instead of silently using row 0. This optional heavyweight path has a
+mocked-input unit test and a completed scripted run against the approved v2
+bank (`artifacts/test_feed_text_only_approved_v2_kt_demo.json`). It assumes
+no prior student history, no response-time measurements, and synthetic
+answers: these probabilities must not be treated as validated
+midpoint/end-of-test feedback or evidence that feedback works.
+
+#### Complete private MCQ inventory (pre-review)
+
+Run `python mcq_inventory.py` from this directory to scan the item-level source
+and write ignored `artifacts/mcq_inventory_private.jsonl.gz` plus
+`artifacts/mcq_inventory_report.json`. Each JSONL row is a distinct rendering
+with its option key and skill label; it contains no student events or raw
+answers. The report counts source MCQ events, eligible events, and exclusions.
+All skills are included, with `in_model_catalog` marking model-compatible
+skill IDs. Run `python mcq_inventory.py --verify` to check the written records
+and aggregate counts without rescanning the source. The inventory keeps more
+than one rendering per exercise template;
+`question_bank.py` still deliberately selects only one per template for a
+40-question demo. Ambiguous keys for the same rendered question are excluded.
+The inventory and answer keys are **private and unreviewed**: do not serve
+this file or feed it into KT. Review question context, images, answers and
+skill labels first. Existing artifact outputs are never overwritten.
+
+`python review_mcq_inventory.py` audits all inventory entries and writes private
+`artifacts/mcq_review_flags_private.jsonl.gz` and aggregate
+`artifacts/mcq_review_report.json`; `python review_mcq_inventory.py --verify`
+checks the report, per-question flags and the manually inspected 40-question
+notes in `artifacts/mcq_40_review.json`. Flags (short/underspecified prompts,
+possible missing visuals or applets, markup rendering, two-choice guessing,
+non-skill labels and conflicting visible-content keys) are **review leads,
+not correctness judgments**. The export omits original media and rendering;
+zero questions are certified or approved by these checks.
+
+#### Text-only 40-question replacement (private)
+
+The original `artifacts/test_question_bank.json` is retained as an unreviewed
+example with missing diagrams and unsuitable skill labels. The current checked
+source is `artifacts/test_question_bank_text_only_v2.json`: 40 distinct
+*visible prompts*, 10 each on basic arithmetic, price, fractions and
+percentage calculation. Five from each skill appear in each half. All 40
+selected answers were independently checked against the provided options and
+recorded in `artifacts/text_only_40_review_v2.json`; the explicit ID/answer
+selection is kept private in `artifacts/text_only_mcq_selection_private.json`.
+Some source exercise templates repeat but their rendered prompts differ, and
+the bank validator requires all 40 normalized prompts to be distinct. The
+candidate survey is `select_text_mcq.py`; `python build_text_only_bank.py
+--verify --out artifacts/test_question_bank_text_only_v2.json --report
+artifacts/text_only_40_review_v2.json` checks the bank, source records, flags,
+and manually checked answer values.
+
+`python approve_text_only_bank.py --source
+artifacts/test_question_bank_text_only_v2.json --out
+artifacts/test_question_bank_text_only_approved_v2.json` creates the locally
+approved copy without mutating the checked source. That approval records local
+project-owner acceptance — not external curriculum certification — and the
+bank remains private. Use this approved v2 bank for KT-compatible prototype
+work: every question content string and every selectable option resolves in
+the frozen embedding table. The v1 bank and approved copy are retained only
+as audit artifacts and should not be used for live KT input.
+
+#### Callable MCQ test path (backend API surface)
+
+`mcq_test.py` is the deterministic, callable counterpart to the scripted
+demo — the functions a trusted backend would invoke once a bank has been
+reviewed offline:
+
+- `student_questions(bank, half)` returns the 20 ordered questions of half
+  1 or 2 as key-free dicts (`question_id`, `skill_id`, `text`, `options`
+  only; options are copies). `half` must be the integer 1 or 2.
+- `score_checkpoint(bank, responses)` accepts exactly the ordered prefix
+  of 20 (midpoint) or 40 (end) responses, each exactly
+  `{'question_id': ..., 'selected_index': ...}` matching the bank's
+  question order, grades privately against `answer_index`, and returns
+  only the `build_test_feed` output — no key, no selected text.
+
+The bank must contain 40 **distinct visible prompts** (normalized text):
+a repeated source exercise template is allowed only when its rendered
+questions genuinely differ — identical text with different options does
+not count as a new question. Both functions refuse any bank whose
+`protocol` is not `offline_mcq_demo_only` or whose `review_status` is not
+exactly `"approved"` — `question_bank.py` writes `unreviewed`, so the
+assembled bank must be approved offline before this path will serve it. A
+newly selected 40-question bank still needs that approval even when every
+item renders correctly. Approval is a manual, offline review step: check
+every rendered item and answer key, then create an approved copy (for this
+text-only bank, `approve_text_only_bank.py` performs that controlled copy).
+
+There is **no LLM, no numeric/free-text grading, and no model-based
+claim** in this path; scoring is answer-key matching plus the
+observed-answer feed. `score_checkpoint` returns both `student` and
+`teacher` views to the trusted caller — **the integrating application
+must role-separate them** and must never expose the bank JSON. No web-app
+integration exists yet, and this is not production-ready: it presumes an
+authenticated backend that owns sessions, ordering, and review state.
 
 ---
 
@@ -353,6 +590,7 @@ pointing at what it rests on.
 | L4c — graph query | **done** — verified end-to-end |
 | eval — checkpoint replay | **done** — `evaluate_checkpoints.py`, 79,896 checkpoints; see "Checkpoint-level decisions" |
 | eval — graph stability | **done** — three 20,000-window graphs have 282/280/301 prerequisite edges; `artifacts/stability/graph_stability_report.json` records only 19 of 49 baseline-covered targets with the same top suggestion across all four graphs (where all four have a suggestion) |
+| offline 20/40 demo | **done; unreviewed** — private 40-question MCQ bank and scripted student/teacher feeds; optional frozen-KT trace is coded but not run against the full checkpoint |
 | L5 — Socratic LLM | **future / out of scope** |
 
 ---
@@ -360,10 +598,11 @@ pointing at what it rests on.
 ## What remains, in order
 
 1. **Define and build the informational feed** — the product milestone
-   this machinery serves, not yet implemented: a feedback view shown at
-   the midpoint and end of a test, for students and teachers, presenting
-   observed performance and model uncertainty (gate status, checkpoint
-   interval, measured coverage) with cautious wording. It may
+   this machinery serves. `test_feed.py` holds a pure observed-answer
+   prototype of it; the live feed is still to build: a feedback view
+   shown at the midpoint and end of a test, for students and teachers,
+   presenting observed performance and model uncertainty (gate status,
+   checkpoint interval, measured coverage) with cautious wording. It may
    automatically select non-binding "possible skill to review"
    recommendations where the evidence supports them — gated on items 3–4
    below — but redirects nobody and enforces no next step.
