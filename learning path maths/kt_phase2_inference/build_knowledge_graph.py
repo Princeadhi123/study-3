@@ -272,10 +272,14 @@ def main():
             })
 
         asym = dep - dep.T
+        reverse_measured = np.zeros_like(dep, dtype=bool)
+        for a, b in _dep_meta:
+            reverse_measured[b, a] = True
         prereq_mask = (
             (support >= args.min_support)
             & (precedence >= args.min_precedence)
             & (dep >= args.min_dependency)
+            & reverse_measured
             & (asym >= args.min_asymmetry)
         )
         a_idx, b_idx = np.nonzero(prereq_mask)
@@ -335,7 +339,8 @@ def main():
                                       "on the target when the source skill's outcome is "
                                       "changed; dependence inside the model",
             "prerequisite": "DERIVED: temporal precedence AND model dependence AND "
-                            "directional asymmetry. The only layer the live gate queries. "
+                            "directional asymmetry with both directions measured. "
+                            "The only layer the live gate queries. "
                             "Not a randomised causal claim -- a reviewable hypothesis.",
         },
     }

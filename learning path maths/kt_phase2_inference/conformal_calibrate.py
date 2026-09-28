@@ -164,8 +164,24 @@ def load_predictions(path: Path, allow_partial: bool) -> dict:
         )
     out = {k: data[k] for k in ("record_idx", "position", "student_idx", "skill_idx",
                                 "item_idx", "split", "y", "p")}
-    out["students"] = data["students"]
-    out["meta"] = meta
+    raw_students = data["students"]
+    students, student_to_idx = [], {}
+    remap = np.empty(len(raw_students), dtype=np.int32)
+    for i, raw_id in enumerate(raw_students):
+        base, marker, window = raw_id.rpartition("#w")
+        student_id = base if marker and window.isdecimal() else raw_id
+        if student_id not in student_to_idx:
+            student_to_idx[student_id] = len(students)
+            students.append(student_id)
+        remap[i] = student_to_idx[student_id]
+    if out["student_idx"].size and (out["student_idx"].min() < 0 or
+                                     out["student_idx"].max() >= len(remap)):
+        raise ValueError("Prediction dump contains a student_idx outside the students array")
+    out["student_idx"] = remap[out["student_idx"]]
+    out["students"] = np.array(students, dtype=object)
+    if len(students) != len(raw_students):
+        print(f"Grouped {len(raw_students):,} window IDs into {len(students):,} students")
+    out["meta"] = {**meta, "n_students": len(students)}
     return out
 
 

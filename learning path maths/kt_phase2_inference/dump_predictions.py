@@ -103,7 +103,11 @@ def main():
         dataset.records = dataset.records[:args.limit_records]
         print(f"PARTIAL RUN: scoring only {len(dataset.records)} windows.", flush=True)
 
-    students = [r["student_id"] for r in dataset.records]
+    students = []
+    for record in dataset.records:
+        student_id = record["student_id"]
+        base, marker, window = student_id.rpartition("#w")
+        students.append(base if marker and window.isdecimal() else student_id)
     student_to_idx = {}
     student_codes = np.empty(len(students), dtype=np.int32)
     uniq_students = []
