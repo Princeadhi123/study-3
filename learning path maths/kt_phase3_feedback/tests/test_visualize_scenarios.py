@@ -7,7 +7,7 @@ from scenario_report import compile_report
 from scenario_runner import run_scenario
 from session_store import SessionStore
 from tests.helpers import make_bank
-from visualize_scenarios import _matrix_data, render, render_matrix
+from visualize_scenarios import render
 
 try:
     import matplotlib  # noqa: F401
@@ -117,58 +117,6 @@ class VisualizeScenariosTests(unittest.TestCase):
                       "UNCERTAIN BEHAVIOR [0.100, 0.900]", joined)
         self.assertIn("end (k=10 exploratory, fixed-bank coverage "
                       "unverified): INFORMATIVE [0.200, 0.800]", joined)
-
-
-class VisualizeMatrixTests(unittest.TestCase):
-    def matrix(self):
-        results = []
-        kinds = ("within_half_order", "repeated_items_prior_correct",
-                 "repeated_items_prior_incorrect", "unknown_item_ids_same_text")
-        for profile in ("learning", "fatigue"):
-            for seed in (11, 23):
-                results.append({
-                    "scenario": {"profile": profile, "seed": seed},
-                    "base_bank_sha256": "bank",
-                    "baseline": {"bank_sha256": "bank", "responses": [{}] * 40,
-                                 "conformal": {"checkpoints": {
-                                     "midpoint": dict.fromkeys(range(4)),
-                                     "end": dict.fromkeys(range(4))}}},
-                    "variants": [{"kind": kind, "comparison_to_baseline": {
-                        "mean_absolute_kt_change": 0.1 + index / 10,
-                        "item_status_changes": index + 1,
-                        "checkpoint_status_changes": index}}
-                        for index, kind in enumerate(kinds)],
-                })
-        return {"schema": "phase3_research_matrix_batch_v1",
-                "scope": "researcher_only", "base_bank_sha256": "bank",
-                "run_count": len(results), "results": results}
-
-    def test_research_matrix_values_and_rejections(self):
-        batch = self.matrix()
-        data = _matrix_data(batch)
-        self.assertEqual((0.1, 1 / 40, 0),
-                         data["learning"][11]["within_half_order"])
-        self.assertEqual((0.4, 4 / 40, 3 / 8),
-                         data["fatigue"][23]["unknown_item_ids_same_text"])
-        with self.assertRaises(ValueError):
-            _matrix_data({**batch, "scope": "student"})
-        with self.assertRaises(ValueError):
-            _matrix_data({**batch, "run_count": 1})
-        with self.assertRaises(ValueError):
-            _matrix_data({**batch, "results": batch["results"][:-1],
-                          "run_count": 3})
-
-    @unittest.skipUnless(HAS_MATPLOTLIB, "matplotlib not installed")
-    def test_research_matrix_figures_do_not_overwrite(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "matrix_figures"
-            batch = self.matrix()
-            files = render_matrix(batch, out)
-            self.assertEqual(4, len(files))
-            self.assertEqual({".png", ".svg"}, {p.suffix for p in files})
-            self.assertTrue(all(p.stat().st_size > 0 for p in files))
-            with self.assertRaises(FileExistsError):
-                render_matrix(batch, out)
 
 
 if __name__ == "__main__":

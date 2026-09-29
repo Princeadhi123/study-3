@@ -98,6 +98,14 @@ class MCQSessionService:
             message = compose_student_message(feed, self.style_selector)
             feed["student"]["message"] = message["message"]
             feed["student"]["message_source"] = message["message_source"]
+            if checkpoint == "end":
+                feed["student"]["summary"] = (
+                    "All 40 questions answered. These results describe "
+                    "your answers on this assessment, not your overall mastery.")
+                feed["student"]["total"] = {
+                    "correct": feed["teacher"]["total"]["correct"],
+                    "out_of": FULL_LENGTH,
+                }
             session["checkpoints"][checkpoint] = feed
         session["status"] = "complete" if answered == FULL_LENGTH else "in_progress"
         self.store.save(session)

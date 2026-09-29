@@ -36,12 +36,19 @@ class MCQSessionServiceTests(unittest.TestCase):
             self.assertEqual(mid["checkpoint"], "midpoint")
             self.assertEqual(mid["feed"]["teacher"]["total"],
                              {"correct": 20, "out_of": 20})
+            self.assertNotIn("total", mid["feed"]["student"])
             second = service.questions(sid, 2)
             self.assertEqual(len(second["questions"]), 20)
             end = service.submit_half(sid, 2, responses(bank, False, 40)[20:])
             self.assertEqual(end["checkpoint"], "end")
             self.assertEqual(end["feed"]["teacher"]["total"],
                              {"correct": 20, "out_of": 40})
+            self.assertEqual(end["feed"]["student"]["total"],
+                             {"correct": 20, "out_of": 40})
+            self.assertEqual(
+                "All 40 questions answered. These results describe "
+                "your answers on this assessment, not your overall mastery.",
+                end["feed"]["student"]["summary"])
             self.assertEqual(service.snapshot(sid)["status"], "complete")
             with self.assertRaises(ValueError):
                 service.submit_response(sid, responses(bank)[0])

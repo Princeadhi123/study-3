@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import scenario_runner
 from scenario_report import compile_report, write_report
 from scenario_runner import generate_responses, run_scenario
 from session_store import SessionStore
@@ -123,8 +124,10 @@ class ScenarioTests(unittest.TestCase):
                 return Decision()
 
             def checkpoint(self, probabilities, sid, regime):
+                status = ("CONFIDENT_STRUGGLE" if sid == "sB"
+                          and len(probabilities) == 10 else "UNCERTAIN_BEHAVIOR")
                 return type("Result", (), {"to_dict": lambda self: {
-                    "status": "UNCERTAIN_BEHAVIOR", "lower": .1,
+                    "status": status, "lower": .1,
                     "upper": .9, "n_items": len(probabilities), "regime": regime}})()
 
         class Graph:
@@ -147,6 +150,20 @@ class ScenarioTests(unittest.TestCase):
                          result["conformal"]["midpoint_status"])
         self.assertEqual([{"skill_id": "prerequisite"}],
                          result["graph"]["prerequisites"]["sB"])
+        routing = result["graph"]["routing"]
+        self.assertEqual("exploratory_only_researcher_only", routing["status"])
+        self.assertEqual("end", routing["checkpoint"])
+        flagged = routing["recommendations"]["sB"]
+        self.assertEqual("CONFIDENT_STRUGGLE", flagged["checkpoint_status"])
+        self.assertEqual("DIRECT_SKILL_REVIEW", flagged["recommendation_type"])
+        self.assertIsNone(flagged["prerequisite_skill_id"])
+        self.assertIsNone(flagged["prerequisite_skill_name"])
+        self.assertEqual("No grounded prerequisite candidate; review Hinta "
+                         "directly.", flagged["message"])
+        for sid in ("sA", "sC", "sD"):
+            self.assertEqual("NONE", routing["recommendations"][sid]
+                             ["recommendation_type"])
+        self.assertNotIn("routing", json.dumps(result["observed"]))
         self.assertEqual(40, result["observed"]["end"]["teacher"]["total"]["correct"])
         report = compile_report([result])
         self.assertEqual(.6, report["trace"][0]["kt_probability"])
@@ -207,6 +224,182 @@ class ScenarioTests(unittest.TestCase):
                      "scenario": {**result["scenario"], "seed": 43}}
             with self.assertRaises(ValueError):
                 compile_report([result, other])
+
+
+class _RoutingGate:
+    def __init__(self, end_statuses, midpoint_statuses=None, k=10):
+        self.k = k
+        self._end = dict(end_statuses)
+        self._midpoint = dict(midpoint_statuses or {})
+
+    def item_decision(self, probability, regime):
+        return type("Item", (), {"prediction_set": (0, 1),
+                                 "status": type("Status", (), {"value": "UNCERTAIN_BEHAVIOR"})()})()
+
+    def checkpoint(self, probabilities, sid, regime):
+        statuses = self._end if len(probabilities) == 10 else self._midpoint
+        status = statuses.get(sid, "UNCERTAIN_BEHAVIOR")
+        return type("Result", (), {"to_dict": lambda self: {
+            "n_items": len(probabilities), "regime": regime,
+            "status": status}})()
+
+
+class _RoutingGraph:
+    def __init__(self, candidates):
+        self._candidates = candidates
+
+    def foundational_for(self, sid, allow_weak_evidence):
+        return self._candidates.get(sid, [])
+
+
+GROUNDED_S_B = {"skill_id": "sB", "skill_name": "Peruslaskut",
+                "relation": "prerequisite", "evidence": "grounded",
+                "depth": 1, "score": .9, "edge_weight": .9}
+
+
+class PrivateRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.bank = make_bank()
+        self.bank["skill_names"]["sA"] = "Murtoluvut"
+        self.bank["skill_names"]["sB"] = "Hinta"
+
+    def run_private(self, gate=None, graph=None):
+        trace = {"p_correct_before_each_answer": [.6] * 40,
+                 "coverage": {"unknown_item_ids": []}}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+                "scenario_runner.trace_responses", return_value=trace):
+            kwargs = {"device": "cpu"} if gate is not None else {}
+            return run_scenario(self.bank, {"profile": "all_correct"},
+                                SessionStore(Path(tmp)),
+                                gate=gate, graph=graph, **kwargs)
+
+    def test_k10_end_statuses_map_to_private_recommendations(self):
+        gate = _RoutingGate({"sA": "CONFIDENT_STRUGGLE",
+                             "sB": "MASTERY_SAFE",
+                             "sC": "UNCERTAIN_BEHAVIOR"})
+        graph = _RoutingGraph({"sA": [dict(GROUNDED_S_B)]})
+        result = self.run_private(gate, graph)
+        routing = result["graph"]["routing"]
+        self.assertEqual("exploratory_only_researcher_only", routing["status"])
+        self.assertEqual("end", routing["checkpoint"])
+        recs = routing["recommendations"]
+        self.assertEqual(list(self.bank["skill_names"]), list(recs))
+        flagged = recs["sA"]
+        self.assertEqual("sA", flagged["target_skill_id"])
+        self.assertEqual("Murtoluvut", flagged["target_skill_name"])
+        self.assertEqual("CONFIDENT_STRUGGLE", flagged["checkpoint_status"])
+        self.assertEqual("PREREQUISITE_REVIEW", flagged["recommendation_type"])
+        self.assertEqual("sB", flagged["prerequisite_skill_id"])
+        self.assertEqual("Peruslaskut", flagged["prerequisite_skill_name"])
+        self.assertEqual("Exploratory prerequisite review candidate: "
+                         "Peruslaskut (for Murtoluvut).", flagged["message"])
+        for sid, status in (("sB", "MASTERY_SAFE"),
+                            ("sC", "UNCERTAIN_BEHAVIOR"),
+                            ("sD", "UNCERTAIN_BEHAVIOR")):
+            rec = recs[sid]
+            self.assertEqual(status, rec["checkpoint_status"])
+            self.assertEqual("NONE", rec["recommendation_type"])
+            self.assertIsNone(rec["prerequisite_skill_id"])
+            self.assertIsNone(rec["prerequisite_skill_name"])
+            self.assertIsNone(rec["message"])
+
+    def test_ranked_selection_picks_first_grounded_candidate(self):
+        candidates = [
+            {"skill_id": "sX", "skill_name": "Weak edge",
+             "relation": "prerequisite", "evidence": "weak", "depth": 1},
+            dict(GROUNDED_S_B),
+            {"skill_id": "sC", "skill_name": "Remote edge",
+             "relation": "prerequisite", "evidence": "grounded", "depth": 2},
+        ]
+        result = self.run_private(_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}),
+                          _RoutingGraph({"sA": candidates}))
+        rec = result["graph"]["routing"]["recommendations"]["sA"]
+        self.assertEqual("PREREQUISITE_REVIEW", rec["recommendation_type"])
+        self.assertEqual("sB", rec["prerequisite_skill_id"])
+
+    def test_ineligible_candidates_fall_back_to_direct_review(self):
+        ineligible = [
+            [],
+            [{"skill_id": "sB"}],
+            [{**GROUNDED_S_B, "evidence": "weak"}],
+            [{**GROUNDED_S_B, "relation": "curriculum_order"}],
+            [{**GROUNDED_S_B, "skill_id": "sA"}],
+            [{**GROUNDED_S_B, "skill_id": "  "}],
+            [{**GROUNDED_S_B, "skill_name": ""}],
+            [{**GROUNDED_S_B, "skill_name": None}],
+            [{**GROUNDED_S_B, "depth": 3}],
+            ["not-a-dict"],
+        ]
+        for candidates in ineligible:
+            with self.subTest(candidates=candidates):
+                result = self.run_private(_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}),
+                                  _RoutingGraph({"sA": candidates}))
+                rec = result["graph"]["routing"]["recommendations"]["sA"]
+                self.assertEqual("CONFIDENT_STRUGGLE", rec["checkpoint_status"])
+                self.assertEqual("DIRECT_SKILL_REVIEW",
+                                 rec["recommendation_type"])
+                self.assertIsNone(rec["prerequisite_skill_id"])
+                self.assertIsNone(rec["prerequisite_skill_name"])
+                self.assertEqual("No grounded prerequisite candidate; review "
+                                 "Murtoluvut directly.", rec["message"])
+
+    def test_midpoint_struggle_alone_never_routes(self):
+        gate = _RoutingGate({"sA": "MASTERY_SAFE"},
+                            midpoint_statuses={"sA": "CONFIDENT_STRUGGLE"})
+        result = self.run_private(gate, _RoutingGraph({"sA": [dict(GROUNDED_S_B)]}))
+        self.assertEqual("CONFIDENT_STRUGGLE", result["conformal"]
+                         ["checkpoints"]["midpoint"]["sA"]["status"])
+        rec = result["graph"]["routing"]["recommendations"]["sA"]
+        self.assertEqual("MASTERY_SAFE", rec["checkpoint_status"])
+        self.assertEqual("NONE", rec["recommendation_type"])
+        self.assertIsNone(rec["message"])
+
+    def test_non_k10_gate_fails_closed(self):
+        result = self.run_private(_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}, k=5),
+                          _RoutingGraph({"sA": [dict(GROUNDED_S_B)]}))
+        self.assertEqual({"status": "k10_required"},
+                         result["graph"]["routing"])
+        self.assertNotIn("recommendations", result["graph"]["routing"])
+        self.assertNotIn("PREREQUISITE_REVIEW", json.dumps(result["observed"]))
+
+    def test_wrong_sized_end_checkpoint_fails_closed(self):
+        end = {sid: {"n_items": 5, "status": "CONFIDENT_STRUGGLE"}
+               for sid in self.bank["skill_names"]}
+        end["sB"]["n_items"] = 10
+        routing = scenario_runner._prerequisite_routing(
+            self.bank, _RoutingGate({}), end, {"sA": [dict(GROUNDED_S_B)]})
+        self.assertEqual({"status": "k10_required"}, routing)
+
+    def test_routing_requires_both_gate_and_graph(self):
+        graph_only = self.run_private(graph=_RoutingGraph({"sA": [dict(GROUNDED_S_B)]}))
+        self.assertEqual("exploratory_only", graph_only["graph"]["status"])
+        self.assertIn("sA", graph_only["graph"]["prerequisites"])
+        self.assertNotIn("routing", graph_only["graph"])
+        gate_only = self.run_private(gate=_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}))
+        self.assertEqual({"status": "not_requested"}, gate_only["graph"])
+
+    def test_observed_student_feed_is_identical_across_routing_outcomes(self):
+        graph = _RoutingGraph({"sA": [dict(GROUNDED_S_B)]})
+        routed = self.run_private(_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}), graph)
+        direct = self.run_private(_RoutingGate({"sA": "CONFIDENT_STRUGGLE"}),
+                          _RoutingGraph({}))
+        quiet = self.run_private(_RoutingGate({"sA": "MASTERY_SAFE"}), graph)
+        self.assertEqual("PREREQUISITE_REVIEW", routed["graph"]["routing"]
+                         ["recommendations"]["sA"]["recommendation_type"])
+        self.assertEqual("DIRECT_SKILL_REVIEW", direct["graph"]["routing"]
+                         ["recommendations"]["sA"]["recommendation_type"])
+        self.assertEqual("NONE", quiet["graph"]["routing"]
+                         ["recommendations"]["sA"]["recommendation_type"])
+        self.assertEqual(routed["observed"], direct["observed"])
+        self.assertEqual(routed["observed"], quiet["observed"])
+        student = routed["observed"]["end"]["student"]
+        self.assertIn("message", student)
+        self.assertEqual(quiet["observed"]["end"]["student"]["message"],
+                         student["message"])
+        blob = json.dumps(routed["observed"])
+        for term in ("Peruslaskut", "PREREQUISITE_REVIEW",
+                     "CONFIDENT_STRUGGLE", "exploratory_only"):
+            self.assertNotIn(term, blob)
 
 
 if __name__ == "__main__":

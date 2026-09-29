@@ -258,118 +258,6 @@ def render(report: dict, out_dir: Path, aggregate: bool = False) -> list[Path]:
     return written
 
 
-MATRIX_KINDS = (
-    ("within_half_order", "Within-half\nreorder"),
-    ("repeated_items_prior_correct", "Repeated: prior\ncorrect"),
-    ("repeated_items_prior_incorrect", "Repeated: prior\nincorrect"),
-    ("unknown_item_ids_same_text", "Unknown IDs,\nsame text"),
-)
-
-
-def _matrix_values(run: dict, base_hash: str, kinds: set[str]) -> dict:
-    baseline = run["baseline"]
-    variants = run["variants"]
-    if (run["base_bank_sha256"] != base_hash
-            or baseline["bank_sha256"] != base_hash
-            or len(baseline["responses"]) != 40
-            or {v["kind"] for v in variants} != kinds
-            or len(variants) != 4):
-        raise ValueError("research matrix has incompatible runs")
-    if any(len(baseline["conformal"]["checkpoints"][label]) != 4
-           for label in ("midpoint", "end")):
-        raise ValueError("expected four skills at each checkpoint")
-    values = {}
-    for variant in variants:
-        metrics = variant["comparison_to_baseline"]
-        kt = metrics["mean_absolute_kt_change"]
-        items = metrics["item_status_changes"]
-        checkpoints = metrics["checkpoint_status_changes"]
-        if (not 0 <= kt <= 1 or not 0 <= items <= 40
-                or not 0 <= checkpoints <= 8):
-            raise ValueError("research matrix metric outside its expected range")
-        values[variant["kind"]] = (kt, items / 40, checkpoints / 8)
-    return values
-
-
-def _matrix_data(batch: dict) -> dict:
-    if (batch.get("schema") != "phase3_research_matrix_batch_v1"
-            or batch.get("scope") != "researcher_only"):
-        raise ValueError("expected a researcher-only research matrix batch")
-    runs = batch.get("results", [])
-    if batch.get("run_count") != len(runs) or not runs:
-        raise ValueError("research matrix run count is inconsistent")
-    data = {profile: {} for profile in ("learning", "fatigue")}
-    kinds = {kind for kind, _ in MATRIX_KINDS}
-    for run in runs:
-        scenario = run["scenario"]
-        profile, seed = scenario["profile"], scenario["seed"]
-        if profile not in data or seed in data[profile]:
-            raise ValueError("research matrix has incompatible runs")
-        data[profile][seed] = _matrix_values(run, batch["base_bank_sha256"], kinds)
-    if (set(data["learning"]) != set(data["fatigue"])
-            or len(data["learning"]) < 2):
-        raise ValueError("both profiles require matching multiple seeds")
-    return data
-
-
-def _matrix_panel(ax, data: dict, metric: int, ylabel: str) -> None:
-    for profile, color, offset in (("learning", BLUE, -0.16),
-                                   ("fatigue", ORANGE, 0.16)):
-        for index, (kind, _) in enumerate(MATRIX_KINDS):
-            vals = [data[profile][seed][kind][metric]
-                    for seed in sorted(data[profile])]
-            center = index + offset
-            jitter = [(i - (len(vals) - 1) / 2) * 0.025
-                      for i in range(len(vals))]
-            ax.scatter([center + j for j in jitter], vals, color=color,
-                       alpha=0.65, s=34, label=profile if index == 0 else None)
-            mean = sum(vals) / len(vals)
-            ax.plot([center - 0.10, center + 0.10], [mean, mean],
-                    color=color, linewidth=3)
-    ax.set_xticks(range(len(MATRIX_KINDS)), [label for _, label in MATRIX_KINDS])
-    ax.set_ylabel(ylabel)
-    ax.set_ylim(bottom=0)
-    ax.grid(axis="y", alpha=0.2)
-    ax.legend(title="Synthetic profile", loc="upper left",
-              bbox_to_anchor=(1.01, 1), borderaxespad=0)
-
-
-def render_matrix(batch: dict, out_dir: Path) -> list[Path]:
-    data = _matrix_data(batch)
-    out_dir = Path(out_dir)
-    stems = ("matrix_paired_kt_change", "matrix_conformal_status_changes")
-    planned = [out_dir / f"{stem}.{extension}"
-               for stem in stems for extension in ("png", "svg")]
-    _check_collisions(planned)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    plt = _pyplot()
-    fig, ax = plt.subplots(figsize=(10, 5.2))
-    _matrix_panel(ax, data, 0, "Mean absolute paired KT probability change")
-    ax.set_title("Paired sensitivity to order, repeated history, and item ID")
-    fig.text(0.5, 0.01,
-             "Dots: individual seeds; bars: means (not confidence intervals). "
-             "Same answers paired by question ID; synthetic, researcher-only.\n"
-             "Repeated history also changes sequence position; unknown IDs reuse approved text.",
-             ha="center", fontsize="small")
-    fig.tight_layout(rect=(0, 0.11, 1, 1))
-    for path in planned[:2]:
-        fig.savefig(path, dpi=200)
-    plt.close(fig)
-    fig, axes = plt.subplots(2, 1, figsize=(10, 9.5))
-    _matrix_panel(axes[0], data, 1, "Changed item statuses / 40")
-    _matrix_panel(axes[1], data, 2, "Changed skill checkpoint statuses / 8")
-    axes[0].set_title("Exploratory conformal status changes vs paired baseline")
-    fig.text(0.5, 0.01,
-             "Dots: individual seeds; bars: seed means. Four skills x midpoint/end; "
-             "historical k=5/k=10 gates are NOT validated on this fixed test.",
-             ha="center", fontsize="small")
-    fig.tight_layout(rect=(0, 0.055, 1, 1))
-    for path in planned[2:]:
-        fig.savefig(path, dpi=200)
-    plt.close(fig)
-    return planned
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path,
@@ -379,14 +267,9 @@ def main():
     parser.add_argument("--aggregate", action="store_true",
                         help="add per-skill median/IQR figures when a "
                              "scenario has multiple seeds")
-    parser.add_argument("--research-matrix", action="store_true",
-                        help="render paired sensitivity figures from a research matrix batch")
     args = parser.parse_args()
-    if args.research_matrix and args.aggregate:
-        parser.error("--aggregate applies only to scenario reports")
     report = json.loads(args.report.read_text(encoding="utf-8"))
-    written = (render_matrix(report, args.out_dir) if args.research_matrix else
-               render(report, args.out_dir, aggregate=args.aggregate))
+    written = render(report, args.out_dir, aggregate=args.aggregate)
     print(f"Wrote {len(written)} private figure(s) to {args.out_dir}")
 
 

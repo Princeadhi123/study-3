@@ -123,6 +123,52 @@ def generate_responses(bank: dict, spec: dict) -> list[dict]:
     return rows
 
 
+def _eligible_prerequisite(candidates: list, target: str) -> dict | None:
+    for candidate in candidates:
+        if (isinstance(candidate, dict)
+                and isinstance(candidate.get("skill_id"), str)
+                and candidate["skill_id"].strip()
+                and candidate["skill_id"].strip() != target
+                and isinstance(candidate.get("skill_name"), str)
+                and candidate["skill_name"].strip()
+                and candidate.get("relation") == "prerequisite"
+                and candidate.get("evidence") == "grounded"
+                and candidate.get("depth") in (1, 2)):
+            return candidate
+    return None
+
+
+def _prerequisite_routing(bank: dict, gate, end_checkpoints: dict,
+                          prerequisites: dict) -> dict:
+    end = {sid: end_checkpoints.get(sid, {}) for sid in bank["skill_names"]}
+    if gate.k != 10 or any(c.get("n_items") != 10 for c in end.values()):
+        return {"status": "k10_required"}
+    recommendations = {}
+    for sid, skill_name in bank["skill_names"].items():
+        status = end[sid].get("status")
+        record = {"target_skill_id": sid, "target_skill_name": skill_name,
+                  "checkpoint_status": status, "recommendation_type": "NONE",
+                  "prerequisite_skill_id": None,
+                  "prerequisite_skill_name": None, "message": None}
+        if status == "CONFIDENT_STRUGGLE":
+            candidate = _eligible_prerequisite(prerequisites.get(sid, []), sid)
+            if candidate is None:
+                record.update(
+                    recommendation_type="DIRECT_SKILL_REVIEW",
+                    message=f"No grounded prerequisite candidate; review "
+                            f"{skill_name} directly.")
+            else:
+                record.update(
+                    recommendation_type="PREREQUISITE_REVIEW",
+                    prerequisite_skill_id=candidate["skill_id"],
+                    prerequisite_skill_name=candidate["skill_name"],
+                    message=f"Exploratory prerequisite review candidate: "
+                            f"{candidate['skill_name']} (for {skill_name}).")
+        recommendations[sid] = record
+    return {"status": "exploratory_only_researcher_only", "checkpoint": "end",
+            "recommendations": recommendations}
+
+
 def run_scenario(bank: dict, spec: dict, store: SessionStore,
                  kt=None, device: str | None = None,
                  gate=None, graph=None, midpoint_gate=None,
@@ -189,6 +235,10 @@ def run_scenario(bank: dict, spec: dict, store: SessionStore,
             "prerequisites": {sid: graph.foundational_for(sid, allow_weak_evidence=False)
                               for sid in bank["skill_names"]},
         }
+        if gate is not None:
+            result["graph"]["routing"] = _prerequisite_routing(
+                bank, gate, result["conformal"]["checkpoints"]["end"],
+                result["graph"]["prerequisites"])
     return result
 
 

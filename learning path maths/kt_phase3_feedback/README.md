@@ -22,6 +22,49 @@ Current bank:
 That file contains private answer keys. Phase 3 references it; it must not be
 copied into student payloads or committed to a public artifact store.
 
+## End-to-end flow
+
+```text
+Approved immutable Phase 2 bank (fixed order, private answer keys)
+        |
+        |  student path — localhost only
+        v
+api.py -> MCQSessionService
+        |   serve questions 1-20, accept ordered responses
+        |     -> midpoint feed at response 20
+        |   serve questions 21-40, accept ordered responses
+        |     -> end feed at response 40
+        v
+Phase 2 observed scorer + bank-matched descriptive taxonomy
+        |
+        v
+deterministic compose_student_message (bounded style selector; no LLM)
+        |
+        v
+api.py projects student fields only:
+  message, message_source, per-skill and per-subtopic counts;
+  end also returns total {"correct": ..., "out_of": 40}
+  (midpoint carries no aggregate grade)
+
+private SessionStore -> ignored artifacts/sessions/:
+  selected index/text, key-derived correctness, timestamps,
+  bank sha256, checkpoint feeds
+
+        |  private research branch — never student-facing, no LLM
+        v
+scenario_runner.py
+  synthetic fixed-order baselines over the same approved bank
+        |
+        v
+frozen KT trace -> historical k5/k10 conformal diagnostics
+(not validated for this fixed bank)
+-> global skill graph + end-only exploratory routing
+-> scenario_report.py / visualize_scenarios.py (ignored artifacts only)
+```
+
+The live student API never runs KT, conformal, graph, routing, or LLM code;
+those exist only in the private research branch and researcher routes.
+
 ## Files
 
 | file | role |
@@ -67,6 +110,15 @@ subtopic mastery claims in these rows. The default service requires this
 bank-matched taxonomy; unrecognized synthetic banks remain taxonomy-free
 unless a validated mapping is supplied explicitly. The feedback text and
 bounded style-selector context still use only skill-level observed evidence.
+
+Checkpoint feedback is split into `student` and `teacher` halves. The
+`student` payload contains the deterministic `message`, `message_source`,
+and observed per-skill and per-subtopic `correct`/`out_of` counts. The
+midpoint checkpoint deliberately carries **no aggregate grade**; only the
+end checkpoint adds `total: {"correct": ..., "out_of": 40}` and an
+observed-results summary that makes no mastery claim. The `teacher`
+half — and KT, conformal, graph, routing, and answer-key data — stays
+private and is never returned on student routes.
 
 ## Session lifecycle
 
@@ -224,6 +276,21 @@ gate to its five-answer midpoint and marks that interval approximate. Neither
 historical block calibration validates this fixed synthetic instrument.
 No scenario, report, or student API path makes an LLM call.
 
+When both the `k=10` gate and the graph are supplied, the private result also
+contains `graph.routing` (`status="exploratory_only_researcher_only"`,
+`checkpoint="end"`): a per-skill recommendation record for each bank skill in
+bank order. Only the **end** `k=10` checkpoint status is consulted — never the
+midpoint or per-item statuses. `CONFIDENT_STRUGGLE` selects the first ranked
+candidate whose `skill_id` differs from the target, has a nonempty
+`skill_name`, and is a `relation="prerequisite"`, `evidence="grounded"` edge at
+depth 1 or 2, then emits `PREREQUISITE_REVIEW`; a struggle with no eligible
+candidate emits `DIRECT_SKILL_REVIEW`; every other status emits `NONE`. If the
+gate or any end checkpoint is not `k=10`-sized, routing emits only
+`{"status": "k10_required"}` and no recommendations. These records flag the
+target skill only — they never claim a prerequisite itself was failed — and
+they are private metadata: they are not merged into observed feeds, student
+messages, style-selector context, or any API payload.
+
 Compile one or more scenario JSON files into a deterministic report (same
 `bank_sha256` required; name + seed must be unique):
 
@@ -255,39 +322,67 @@ statuses are annotated when present. The simulated P and the KT pre-answer P
 are distinct estimands; the figures make no calibration claim. Filenames are
 sanitized, collisions are detected, and existing images are never overwritten.
 
-For the private five-seed paired research matrix, render paper-oriented PNG and SVG
-figures directly from the saved batch (not the older scenario report):
+Paired order/history/ID sensitivity experiments (the former
+`research_matrix.py` runner and the `--research-matrix` report/figure
+options) have been **removed** — code and saved outputs alike — to keep
+scope on the fixed-40 flow only.
+
+## 2026-09-29 full-bank validation package
+
+All paths below live under ignored `artifacts/`: they are private local
+outputs that may contain key-derived scores, and they must not be committed
+publicly or stored alongside embeddings or answer keys.
+
+- `artifacts/fixed40_checkpoint_feedback_20260929_v3.json` — **current**
+  service replay of the ten saved sessions: midpoint/end student feedback
+  (including the end-only `total`) plus overall observed scores.
+- `artifacts/report_fixed40_baselines_20260929/` — baseline report compiled
+  from the ten saved sessions without rerunning KT: `scenario_report.json`,
+  `scenario_summary.csv`, `per_skill_trace.csv`, `subtopic_summary.csv`.
+- `artifacts/figures_fixed40_baselines_20260929/` — 48 PNGs: 40 per-seed
+  skill traces plus 8 aggregate figures.
+
+Regenerate the baseline figures from the retained report (the existing path
+refuses overwrite — use a fresh output name). The v3 feedback file is not
+regenerated by this command: it was independently replayed through
+`MCQSessionService` from the saved answer rows.
 
 ```bash
-python visualize_scenarios.py artifacts/research_matrix_learning_fatigue_5seeds_o17_v1.json \
-  --research-matrix --out-dir artifacts/figures_research_matrix_5seeds_o17_v2
+python visualize_scenarios.py artifacts/report_fixed40_baselines_20260929/scenario_report.json \
+  --out-dir artifacts/figures_fixed40_baselines_20260929 --aggregate
 ```
 
-For descriptive subtopic scores from the saved five-seed matrix, alongside
-**separate skill-level** conformal decisions at their historical `k=5` and
-`k=10` block sizes, run:
+Grounded results — ten synthetic fixed-order sessions, five seeds per
+profile, totals across each profile's five sessions:
 
-```bash
-python scenario_report.py artifacts/research_matrix_learning_fatigue_5seeds_o17_v1.json \
-  --research-matrix --out-dir artifacts/report_matrix_taxonomy_5seeds_o17_v2
-```
+| profile | first half | second half | final |
+|---|---:|---:|---:|
+| learning | 40/100 | 66/100 | 106/200 |
+| fatigue | 69/100 | 49/100 | 118/200 |
 
-This produces `subtopic_observed.csv` and `skill_conformal.csv` as distinct
-private tables, plus a JSON report. It never recalibrates or applies conformal
-to subtopics, and reads the saved model results without rerunning KT.
+All 64 Phase 3 tests pass, including the optional real-bank contract test
+covering boundary profiles (all correct, all incorrect, first-half-only,
+second-half-only) over the approved 40-question bank. Replaying the ten
+saved answer sequences through the current session service re-validated the
+bank fingerprint, fixed question order, key-derived scoring, student-payload
+privacy, and the end-only `total`.
 
-The paired KT figure plots each seed and its mean absolute probability change
-against the same answers keyed by question ID. The conformal figure plots the
-fractions of item statuses (out of 40) and skill checkpoint statuses (four
-skills at midpoint and end, out of eight) that differ from baseline. Seed
-means are descriptive, not confidence intervals; this is synthetic sensitivity,
-not fixed-bank coverage validation. Repeated synthetic history also shifts
-sequence position, and unknown IDs reuse approved text rather than introducing
-new questions. The five-seed batch did not request graph diagnostics.
+Example — fatigue seed 11 scored 13/20 at midpoint and 25/40 at end. Its
+midpoint message was `You have completed 20 questions. You are halfway
+through the assessment. Continue when you are ready.` and its end message
+was `You have completed all 40 questions. On Hinta, you answered 8 of 10
+questions correctly. For your next step, practice more questions on
+Peruslaskutoimitukset (5 of 10 correct).`
+
+Limits: these are synthetic trajectories, not a student pilot; the ten runs
+are seeded variations of two profiles, neither distinct exams nor a student
+cohort. KT calibration and conformal coverage on this fixed bank remain
+unvalidated, and graph routing candidates are exploratory pending domain
+review.
 
 ## Current validation status
 
-The fixed-bank validation stage is in place and passing all 47 Phase 3 tests.
+The fixed-bank validation stage is in place and passing all 64 Phase 3 tests.
 Completed checks so far:
 
 - deterministic boundary profiles score as expected on the approved bank;
@@ -303,12 +398,15 @@ Completed checks so far:
 - reports and plots are deterministic and refuse to overwrite outputs;
 - a real Phase 2 graph query returned the expected global skill-level
   candidates and no dangling or duplicate graph edges were found;
+- private `graph.routing` records derive only from end `k=10` checkpoint
+  statuses and grounded prerequisite edges, fail closed when the `k=10`
+  preconditions are unmet, and leave observed/student payloads byte-identical
+  across routing outcomes;
 - no live student pilot has been run and no LLM calls have been made.
 
-A first-pass comparison ran `all_correct`, `all_incorrect`, and learning seed
-7 with KT, conformal, and graph diagnostics. A five-seed comparison then ran
-`learning` and `fatigue` on seeds 11, 23, 37, 41, and 53 with KT and conformal
-diagnostics. The generated responses behaved as intended:
+The five-seed validation ran `learning` and `fatigue` on seeds
+11, 23, 37, 41, and 53 with KT, conformal, and graph diagnostics. The
+generated responses behaved as intended:
 
 | profile | simulated first half | actual first half | simulated second half | actual second half |
 |---|---:|---:|---:|---:|
@@ -368,30 +466,28 @@ verifies the public payload and private scoring path, and it skips otherwise.
 
 ## Remaining work
 
-1. Consolidate the validation package: add an automated first-half versus
-   second-half aggregate table, human-readable skill names, regime counts,
-   conformal status counts, and graph artifact provenance to the scenario
-   report/manifest.
-2. Reduce repeated-seed runtime by adding a batch/matrix runner that loads the
-   frozen model and embeddings once per batch instead of once per CLI run.
-3. Run controlled history/order experiments before adding more random seeds:
-   same answers with a different approved order, same order with a different
-   history, and per-item KT sensitivity checks.
-4. Evaluate the model against held-out historical sessions where their
+1. Consolidate the validation package further: the paired sensitivity
+   tooling was removed to keep scope on the fixed-40 flow (see the
+   2026-09-29 package above); remaining consolidation is folding
+   human-readable skill names, regime counts, conformal status counts, and
+   graph artifact provenance into the report/manifest.
+2. Evaluate the model against held-out historical sessions where their
    questions match the current data requirements. This is stronger than
    synthetic-only evidence but still does not validate the fixed instrument if
    the historical sessions differ from its order/content.
-5. Ask a domain expert to review graph candidates as acceptable,
+3. Ask a domain expert to review graph candidates — and any private
+   `graph.routing` recommendation built on them — as acceptable,
    questionable, or rejected. Empty graph output means no grounded edge passed
    the evidence threshold; it is not a claim that no prerequisite exists.
-6. If a future pilot becomes available, capture timestamps/response durations
+4. If a future pilot becomes available, capture timestamps/response durations
    and cold-start versus prior-history state. Until real fixed-test sessions
    are evaluated, keep midpoint `k=5` approximate and end `k=10` exploratory.
-7. Keep observed feedback, KT, conformal, and graph outputs separate. A future
-   LLM composer should only use verified observed counts and explicitly
-   reviewed diagnostic context; it must not receive private answer keys, raw
-   synthetic ability, unvalidated conformal status, or unreviewed graph
-   candidates as authoritative facts.
-8. Student deployment still needs authentication/authorization, production
+5. Keep observed feedback, KT, conformal, graph, and private routing outputs
+   separate. A future LLM composer should only use verified observed counts
+   and explicitly reviewed diagnostic context; it must not receive private
+   answer keys, raw synthetic ability, unvalidated conformal status,
+   unreviewed graph candidates, or private routing records as authoritative
+   facts.
+6. Student deployment still needs authentication/authorization, production
    data handling, a frontend or framework route layer, and a decision about
    which diagnostics are safe to expose.

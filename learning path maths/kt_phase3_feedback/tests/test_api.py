@@ -91,16 +91,23 @@ class Phase3APITests(unittest.TestCase):
     def test_full_session_returns_bounded_student_message(self):
         session = self.start_session()
         sid = session["session_id"]
-        status, _ = self.request(
+        status, midpoint = self.request(
             "POST", f"/sessions/{sid}/half-submissions",
             {"half": 1, "responses": responses(self.bank, count=20)})
         self.assertEqual(status, 200)
+        self.assertNotIn("total", midpoint["feedback"])
         status, payload = self.request(
             "POST", f"/sessions/{sid}/half-submissions",
             {"half": 2,
              "responses": responses(self.bank, count=40)[20:]})
         self.assertEqual(status, 200)
         self.assertEqual(payload["checkpoint"], "end")
+        self.assertEqual(payload["feedback"]["total"],
+                         {"correct": 40, "out_of": 40})
+        self.assertEqual(
+            payload["feedback"]["summary"],
+            "All 40 questions answered. These results describe "
+            "your answers on this assessment, not your overall mastery.")
         self.assertEqual(
             payload["feedback"]["message"],
             "You have completed all 40 questions. Your results by topic "

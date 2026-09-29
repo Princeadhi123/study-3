@@ -1,14 +1,9 @@
-"""Produce deterministic private research tables from fixed-bank scenario results."""
+"""Produce deterministic private tables from fixed-bank scenario results."""
 import argparse
 import csv
 import json
 import statistics
 from pathlib import Path
-
-import phase3_paths
-from feedback_service import (load_assessment_taxonomy, observed_subtopic_counts,
-                              validate_assessment_taxonomy)
-from session_store import bank_fingerprint
 
 TRACE_FIELDS = ("scenario", "seed", "bank_sha256", "skill_id", "position",
                 "half", "skill_attempt", "question_id", "selected_index",
@@ -22,10 +17,6 @@ SUMMARY_FIELDS = ("scenario", "seed", "bank_sha256", "checkpoint", "skill_id",
 SUBTOPIC_FIELDS = ("scenario", "seed", "bank_sha256", "checkpoint", "skill_id",
                    "skill_name", "subtopic_id", "subtopic_name", "observed_correct",
                    "n_items")
-MATRIX_SUBTOPIC_FIELDS = ("profile", "seed", "checkpoint", "skill_id", "skill_name",
-                          "subtopic_id", "subtopic_name", "observed_correct", "n_items")
-MATRIX_CONFORMAL_FIELDS = ("profile", "seed", "variant", "checkpoint", "skill_id",
-                           "status", "regime", "n_items", "calibrated_k")
 
 
 def compile_report(scenarios: list[dict]) -> dict:
@@ -151,117 +142,15 @@ def write_report(report: dict, out_dir: Path) -> None:
                 writer.writerow(values)
 
 
-def compile_matrix_taxonomy(batch: dict, bank: dict, taxonomy: dict) -> dict:
-    validate_assessment_taxonomy(bank, taxonomy)
-    if (batch.get("schema") != "phase3_research_matrix_batch_v1"
-            or batch.get("scope") != "researcher_only"
-            or batch.get("base_bank_sha256") != bank_fingerprint(bank)
-            or batch.get("run_count") != len(batch.get("results", []))):
-        raise ValueError("research batch and taxonomy bank do not match")
-    observed_rows, conformal_rows, seen = [], [], set()
-    question_order = [q["question_id"] for q in bank["questions"]]
-    for run in batch["results"]:
-        profile, seed = run["scenario"]["profile"], run["scenario"]["seed"]
-        if (profile, seed) in seen or run["base_bank_sha256"] != bank_fingerprint(bank):
-            raise ValueError("research batch has duplicate runs or mixed banks")
-        seen.add((profile, seed))
-        baseline = run["baseline"]
-        rows = baseline["responses"]
-        if ([row["question_id"] for row in rows] != question_order
-                or baseline["bank_sha256"] != bank_fingerprint(bank)):
-            raise ValueError("baseline question order or bank changed")
-        if any(row["skill_id"] != question["skill_id"] or
-               row["correct"] is not (row["selected_index"] == question["answer_index"])
-               for row, question in zip(rows, bank["questions"])):
-            raise ValueError("baseline response correctness disagrees with approved answer key")
-        for variant in run["variants"]:
-            order = variant["question_order"]
-            if (not variant["observed_counts_unchanged"] or len(order) != 40
-                    or len(set(order)) != 40
-                    or set(order[:20]) != set(question_order[:20])
-                    or set(order[20:]) != set(question_order[20:])):
-                raise ValueError("paired variant changed the observed question sets")
-        for checkpoint, limit, k in (("midpoint", 20, 5), ("end", 40, 10)):
-            counts = observed_subtopic_counts(taxonomy, rows[:limit])
-            total = baseline["observed"][checkpoint]["teacher"]["total"]
-            if (sum(r["out_of"] for r in counts) != total["out_of"]
-                    or sum(r["correct"] for r in counts) != total["correct"]):
-                raise ValueError("subtopic scores disagree with baseline scoring")
-            observed_rows.extend({
-                "profile": profile, "seed": seed, "checkpoint": checkpoint,
-                "skill_id": row["skill_id"], "skill_name": row["skill_name"],
-                "subtopic_id": row["subtopic_id"],
-                "subtopic_name": row["subtopic_name"],
-                "observed_correct": row["correct"], "n_items": row["out_of"],
-            } for row in counts)
-            for variant, diagnostics in [("baseline", baseline["conformal"])] + [
-                    (v["kind"], v["conformal"]) for v in run["variants"]]:
-                calibrated_k = (diagnostics["midpoint_calibrated_k"] if checkpoint ==
-                                "midpoint" else diagnostics.get(
-                                    "end_calibrated_k", diagnostics.get("calibrated_k")))
-                if calibrated_k != k:
-                    raise ValueError("skill conformal gate is not calibrated for checkpoint size")
-                skills = diagnostics["checkpoints"][checkpoint]
-                if set(skills) != set(bank["skill_names"]):
-                    raise ValueError("skill conformal checkpoints do not match bank")
-                for sid, decision in skills.items():
-                    if decision["n_items"] != k:
-                        raise ValueError("conformal checkpoint must stay skill-level")
-                    conformal_rows.append({
-                        "profile": profile, "seed": seed, "variant": variant,
-                        "checkpoint": checkpoint, "skill_id": sid,
-                        "status": decision["status"], "regime": decision["regime"],
-                        "n_items": decision["n_items"], "calibrated_k": k,
-                    })
-    return {"schema": "phase3_matrix_taxonomy_report_v1", "scope": "researcher_only",
-            "base_bank_sha256": bank_fingerprint(bank),
-            "taxonomy_schema": taxonomy["schema"], "taxonomy_relation": taxonomy["relation"],
-            "run_count": len(seen), "subtopics": observed_rows,
-            "skill_conformal": conformal_rows,
-            "interpretation": "Subtopic counts are observed correct/out-of only. Conformal statuses are skill-level historical k=5/k=10 diagnostics, not calibrated for this fixed bank or any subtopic."}
-
-
-def write_matrix_taxonomy(report: dict, out_dir: Path) -> None:
-    out_dir = Path(out_dir)
-    outputs = [out_dir / name for name in
-               ("matrix_taxonomy_report.json", "subtopic_observed.csv",
-                "skill_conformal.csv")]
-    if any(path.exists() for path in outputs):
-        raise FileExistsError("Refusing to overwrite a matrix taxonomy output")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with outputs[0].open("x", encoding="utf-8") as stream:
-        json.dump(report, stream, ensure_ascii=False, indent=2)
-    for path, fields, rows in ((outputs[1], MATRIX_SUBTOPIC_FIELDS, report["subtopics"]),
-                               (outputs[2], MATRIX_CONFORMAL_FIELDS,
-                                report["skill_conformal"])):
-        with path.open("x", encoding="utf-8", newline="") as stream:
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            writer.writerows(rows)
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("scenarios", type=Path, nargs="+", help="private scenario JSON outputs")
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--research-matrix", action="store_true",
-                        help="report taxonomy counts and separate skill-level conformal from a saved matrix")
     args = parser.parse_args()
-    if args.research_matrix:
-        if len(args.scenarios) != 1:
-            parser.error("--research-matrix requires one saved matrix batch")
-        bank = json.loads(phase3_paths.require(phase3_paths.APPROVED_BANK).read_text(
-            encoding="utf-8"))
-        taxonomy = load_assessment_taxonomy(bank, required=True)
-        batch = json.loads(args.scenarios[0].read_text(encoding="utf-8"))
-        write_matrix_taxonomy(compile_matrix_taxonomy(batch, bank, taxonomy),
-                              args.out_dir)
-        print(f"Wrote private matrix taxonomy report to {args.out_dir}")
-    else:
-        scenarios = [json.loads(path.read_text(encoding="utf-8")) for path in args.scenarios]
-        report = compile_report(scenarios)
-        write_report(report, args.out_dir)
-        print(f"Wrote private scenario report to {args.out_dir}")
+    scenarios = [json.loads(path.read_text(encoding="utf-8")) for path in args.scenarios]
+    report = compile_report(scenarios)
+    write_report(report, args.out_dir)
+    print(f"Wrote private scenario report to {args.out_dir}")
 
 
 if __name__ == "__main__":
