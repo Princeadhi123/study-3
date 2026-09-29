@@ -1,0 +1,175 @@
+{
+  "schema": "phase3_assessment_taxonomy_draft_v1",
+  "status": "approved_for_descriptive_research_prototype",
+  "student_feedback_status": "observed_counts_only_no_subtopic_mastery_or_conformal",
+  "bank": "../kt_phase2_inference/artifacts/test_question_bank_text_only_approved_v2.json",
+  "bank_fingerprint": "c491edca280b583d4fa780e32702bec26c1cca9a243c911210b6060392204e99",
+  "approval": {
+    "reviewer": "AI-assisted manual item-content audit; not an independent educator",
+    "scope": "Descriptive question-to-subtopic mapping for this exact approved 40-question offline research prototype only",
+    "basis": "Each of the 40 visible prompts was compared with its proposed subtopic, and all question IDs and parent skill IDs were matched against the approved bank.",
+    "limitations": [
+      "These labels describe question content, not pedagogical prerequisites.",
+      "A small number of responses per subtopic cannot establish mastery, misconception, or future performance.",
+      "No independent educator or curriculum authority has certified these labels."
+    ]
+  },
+  "relation": "is_part_of_not_prerequisite",
+  "root": "Mathematics",
+  "topics": [
+    {
+      "skill_id": "skill_5918fabc5b75",
+      "skill_name": "Peruslaskutoimitukset",
+      "subtopics": [
+        {
+          "id": "arithmetic_order_of_operations",
+          "name": "Order of operations",
+          "question_ids": [
+            "23127__p10__q07e4b362538179c3__o24d3b21657c80f9c",
+            "23127__p10__q1c40f6abd4a51d34__o07d44b0b4e2e0d9b",
+            "23127__p10__q26b7391305bb53e7__o0ec5d00e5175138a",
+            "23127__p10__q29bb7de2f2bd739b__o1136761f07186ead",
+            "23127__p10__q0ccbb3e88ed3b715__o4c7237e888269437",
+            "23127__p10__q1d7ed4f6c655c203__o5ecd0eac0b919a05",
+            "23127__p10__q299a45545d6434fc__o01664e308966e120",
+            "23127__p10__q2a52a7db5fbacc15__o035bf13fba7c78e1"
+          ]
+        },
+        {
+          "id": "arithmetic_division_by_ten",
+          "name": "Division by ten",
+          "question_ids": [
+            "65204__p10__q317369c78834f798__o038732b487a43a51",
+            "65204__p10__q3fe42eef29bab2d9__o11d688f5b86e5036"
+          ]
+        }
+      ]
+    },
+    {
+      "skill_id": "skill_82e4c6d79fe0",
+      "skill_name": "Hinta",
+      "subtopics": [
+        {
+          "id": "price_subtraction",
+          "name": "Subtracting prices",
+          "question_ids": [
+            "19062__p10__q6698d8d0febd22aa__o24cda435d536d718"
+          ]
+        },
+        {
+          "id": "price_unit_price",
+          "name": "Unit prices and price per measure",
+          "question_ids": [
+            "79717__p1__qeffb016560021712__o01bae8ffd3d81fd4",
+            "653713__p4__q946d45957a2746a1__o7c1aa4ef2077bb15",
+            "653713__p3__q1cf64466888647cb__oa77a4bd3afab91f9",
+            "79717__p2__q32d47b510b68f842__o4e7e6ec741b14058",
+            "653713__p5__q0722e28763c17950__oe55ff617fd891802",
+            "653713__p6__qb73206ba0d284e0c__o627d28a41240218e"
+          ]
+        },
+        {
+          "id": "price_proportional_cost",
+          "name": "Cost for a given quantity",
+          "question_ids": [
+            "79720__p2__qe840d7df5041cfb2__ocaf00104d3b8bea8",
+            "79717__p3__q68eddd414b1c3673__oceb5aee08c735a3d",
+            "79720__p1__q109c0d7c9ac0bee2__o6954d1d0ede8460d"
+          ]
+        }
+      ]
+    },
+    {
+      "skill_id": "skill_304b0fda845f",
+      "skill_name": "Murtoluvut",
+      "subtopics": [
+        {
+          "id": "fractions_compare",
+          "name": "Comparing fractions",
+          "question_ids": [
+            "17639__p10__q1d8b22fe6257bc98__o04524bc505f1027b"
+          ]
+        },
+        {
+          "id": "fractions_multiply",
+          "name": "Multiplying fractions",
+          "question_ids": [
+            "39338__p10__q4bd6280b64454754__oa8ca4de49d22cf1c",
+            "39338__p10__q5f1e4aabbc541a3b__o8f7f1e6ee61a5b94"
+          ]
+        },
+        {
+          "id": "fractions_multiply_whole",
+          "name": "Multiplying a fraction by a whole number",
+          "question_ids": [
+            "47506__p1__q09d1d120642811bf__o34a62e883346940a"
+          ]
+        },
+        {
+          "id": "fractions_divide_whole",
+          "name": "Dividing a fraction by a whole number",
+          "question_ids": [
+            "47506__p8__qcc51534be3a3e23a__o7197e2866f97b3d1"
+          ]
+        },
+        {
+          "id": "fractions_add_same_denominator",
+          "name": "Adding fractions with the same denominator",
+          "question_ids": [
+            "17754__p10__q3c501c431a5f75cb__oec36fda6540975c9",
+            "17754__p10__q02fc7651eeff3595__ofb00806eff226d69",
+            "64974__p10__q01d29c49363cca85__o415d3a4d9721886f"
+          ]
+        },
+        {
+          "id": "fractions_add_different_denominators",
+          "name": "Adding fractions with different denominators",
+          "question_ids": [
+            "42903__p10__q308ea024c44e5c4c__o7dcc2f928a816786",
+            "42903__p10__qc6d6158988ac31d3__oaa6de5b5b60f3839"
+          ]
+        }
+      ]
+    },
+    {
+      "skill_id": "skill_91bcb30d3f0b",
+      "skill_name": "Prosenttilaskenta",
+      "subtopics": [
+        {
+          "id": "percent_of_number",
+          "name": "Finding a percentage of a number",
+          "question_ids": [
+            "459786__p10__q13bf7029212b1aae__oadc720eb9a0c17de",
+            "460002__p10__q05d66fa42a773bc2__o6b51258a178861dd"
+          ]
+        },
+        {
+          "id": "percent_find_whole",
+          "name": "Finding the whole from a percentage",
+          "question_ids": [
+            "459972__p10__qbf74fc2d62d61d6f__oeaee88efbc731632",
+            "459972__p1__q1fd796c3931c36f0__of2ba5e496304fbef",
+            "459972__p10__qaff17c40310ae601__o65a289bd8e6d5a65",
+            "460131__p10__q09ffa2c535cf3137__o7eb69369145914ef",
+            "460002__p10__q0aedf501f9cda8dc__o27611459b8dad17f",
+            "459972__p1__q971d7cb98273d764__o7c0a4c976e92f883"
+          ]
+        },
+        {
+          "id": "percent_as_multiplier",
+          "name": "Converting a percentage to a multiplier",
+          "question_ids": [
+            "460131__p10__q13a0e43cee444f8c__o3bd9f83da741f2fe"
+          ]
+        },
+        {
+          "id": "percent_find_rate",
+          "name": "Finding what percent one number is of another",
+          "question_ids": [
+            "460131__p10__q58804b37a5e9b683__o5e7af3576774b5e8"
+          ]
+        }
+      ]
+    }
+  ]
+}

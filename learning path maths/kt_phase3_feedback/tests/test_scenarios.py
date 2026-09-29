@@ -8,7 +8,7 @@ from unittest.mock import patch
 from scenario_report import compile_report, write_report
 from scenario_runner import generate_responses, run_scenario
 from session_store import SessionStore
-from tests.helpers import make_bank
+from tests.helpers import make_bank, make_taxonomy
 
 
 class ScenarioTests(unittest.TestCase):
@@ -91,6 +91,26 @@ class ScenarioTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 write_report(report, out)
 
+    def test_subtopic_research_report_has_observed_counts_without_conformal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_scenario(self.bank, {"profile": "all_correct", "seed": 11},
+                                  SessionStore(Path(tmp) / "sessions"),
+                                  taxonomy=make_taxonomy(self.bank))
+            report = compile_report([result])
+            self.assertEqual(8, len(report["subtopics"]))
+            self.assertEqual({"midpoint": 20, "end": 40}, {
+                label: sum(row["n_items"] for row in report["subtopics"]
+                           if row["checkpoint"] == label)
+                for label in ("midpoint", "end")})
+            self.assertEqual(40, sum(row["observed_correct"]
+                                     for row in report["subtopics"]
+                                     if row["checkpoint"] == "end"))
+            self.assertNotIn("conformal", json.dumps(report["subtopics"]))
+            out = Path(tmp) / "report"
+            write_report(report, out)
+            self.assertEqual(9, len((out / "subtopic_summary.csv").read_text(
+                encoding="utf-8").splitlines()))
+
     def test_kt_conformal_and_graph_are_diagnostic_only(self):
         class Decision:
             prediction_set = (0, 1)
@@ -133,6 +153,49 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(.4, report["summary"][4]["mean_absolute_gap"])
         self.assertEqual("approximate_k5_not_calibrated_k10",
                          report["summary"][0]["conformal_calibration_status"])
+
+    def test_paired_historical_gates_use_matching_block_sizes(self):
+        class Gate:
+            k = 10
+
+            def item_decision(self, probability, regime):
+                return type("Item", (), {"prediction_set": (0, 1),
+                                         "status": type("Status", (), {"value": "UNCERTAIN_BEHAVIOR"})()})()
+
+            def checkpoint(self, probabilities, sid, regime):
+                return type("Result", (), {"to_dict": lambda self: {
+                    "n_items": len(probabilities), "regime": regime,
+                    "status": "END_GATE"}})()
+
+        class MidpointGate(Gate):
+            k = 5
+
+            def checkpoint(self, probabilities, sid, regime):
+                return type("Result", (), {"to_dict": lambda self: {
+                    "n_items": len(probabilities), "regime": regime,
+                    "status": "MIDPOINT_GATE"}})()
+
+        trace = {"p_correct_before_each_answer": [.6] * 40,
+                 "coverage": {"unknown_item_ids": []}}
+        with tempfile.TemporaryDirectory() as tmp, patch(
+                "scenario_runner.trace_responses", return_value=trace):
+            result = run_scenario(self.bank, {"profile": "all_correct"},
+                                  SessionStore(Path(tmp)), device="cpu",
+                                  gate=Gate(), midpoint_gate=MidpointGate())
+            with self.assertRaisesRegex(ValueError, "paired k=5"):
+                run_scenario(self.bank, {"profile": "all_correct"},
+                             SessionStore(Path(tmp)), device="cpu",
+                             gate=Gate(), midpoint_gate=Gate())
+        self.assertEqual(5, result["conformal"]["midpoint_calibrated_k"])
+        self.assertEqual("historical_k5_not_validated_for_fixed_bank",
+                         result["conformal"]["midpoint_status"])
+        self.assertEqual("MIDPOINT_GATE",
+                         result["conformal"]["checkpoints"]["midpoint"]["sA"]["status"])
+        self.assertEqual("END_GATE",
+                         result["conformal"]["checkpoints"]["end"]["sA"]["status"])
+        self.assertEqual("researcher_only_fixed_40_question_bank",
+                         compile_report([result])["scope"])
+        self.assertNotIn("conformal", json.dumps(result["observed"]["end"]["student"]))
 
     def test_reject_mixed_banks_and_duplicate_runs(self):
         with tempfile.TemporaryDirectory() as tmp:

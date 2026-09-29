@@ -106,8 +106,8 @@ def build_batch(bank: dict, events: list[dict], kt: Any) -> dict:
 
 
 def trace_responses(bank: dict, responses: list[dict], kt: Any = None,
-                    device: str = "cpu") -> dict:
-    """Return a cautious per-step P(correct) trace for a 20/40 prefix."""
+                    device: str = "cpu", history_responses: list[dict] | None = None) -> dict:
+    """Return pre-answer probabilities with optional repeated-bank research history."""
     if kt is None:
         from frozen_model import load_frozen_model
         kt = load_frozen_model(device=device)
@@ -116,14 +116,22 @@ def trace_responses(bank: dict, responses: list[dict], kt: Any = None,
             or coverage["missing_option_values"]):
         raise ValueError(f"bank is not KT-text-compatible: {coverage}")
     events = response_events(bank, responses)
+    if history_responses is not None:
+        if not isinstance(history_responses, list) or len(history_responses) != HALF_LENGTH:
+            raise ValueError("research history must be 20 ordered bank responses")
+        events = response_events(bank, history_responses) + events
+    max_len = getattr(kt, "config", {}).get("max_seq_len")
+    if max_len is not None and len(events) > max_len:
+        raise ValueError("research history exceeds frozen model sequence length")
     batch = build_batch(bank, events, kt)
     probabilities = kt.probs(batch)
     if hasattr(probabilities, "tolist"):
         probabilities = probabilities.tolist()
-    probabilities = probabilities[0]
+    probabilities = probabilities[0][-len(responses):]
     return {
         "kind": "frozen_variant_d_response_trace",
         "model_status": "uncalibrated_for_20_40_question_feed",
+        "history_length": len(events) - len(responses),
         "p_correct_before_each_answer": [round(float(p), 6)
                                          for p in probabilities],
         "coverage": coverage,

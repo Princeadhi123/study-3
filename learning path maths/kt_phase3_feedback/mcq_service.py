@@ -7,6 +7,8 @@ public question fields and checkpoint feeds.
 import json
 from pathlib import Path
 
+from feedback_service import (attach_observed_subtopics, load_assessment_taxonomy,
+                              validate_assessment_taxonomy)
 from phase3_paths import APPROVED_BANK, SESSIONS, require
 from schemas import validate_submission
 from session_store import SessionStore, bank_fingerprint, utc_now
@@ -18,7 +20,8 @@ FULL_LENGTH = 40
 
 
 class MCQSessionService:
-    def __init__(self, bank: dict, store: SessionStore, style_selector=None):
+    def __init__(self, bank: dict, store: SessionStore, style_selector=None,
+                 taxonomy: dict | None = None):
         self.bank = bank
         self.store = store
         self.style_selector = style_selector
@@ -26,11 +29,15 @@ class MCQSessionService:
         # uniqueness before a session can be created.
         student_questions(self.bank, 1)
         student_questions(self.bank, 2)
+        self.taxonomy = taxonomy if taxonomy is not None else load_assessment_taxonomy(bank)
+        if self.taxonomy is not None:
+            validate_assessment_taxonomy(bank, self.taxonomy)
 
     @classmethod
     def from_default(cls, store: SessionStore | None = None):
         bank = json.loads(require(APPROVED_BANK).read_text(encoding="utf-8"))
-        return cls(bank, store or SessionStore(SESSIONS))
+        return cls(bank, store or SessionStore(SESSIONS),
+                   taxonomy=load_assessment_taxonomy(bank, required=True))
 
     @classmethod
     def from_bank_path(cls, bank_path: Path, store: SessionStore):
@@ -84,6 +91,9 @@ class MCQSessionService:
         if answered in (HALF_LENGTH, FULL_LENGTH):
             checkpoint = "midpoint" if answered == HALF_LENGTH else "end"
             feed = score_checkpoint(self.bank, self._response_prefix(session))
+            if self.taxonomy is not None:
+                attach_observed_subtopics(feed, self.bank,
+                                          self._response_prefix(session), self.taxonomy)
             from feedback_service import compose_student_message
             message = compose_student_message(feed, self.style_selector)
             feed["student"]["message"] = message["message"]

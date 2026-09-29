@@ -7,7 +7,7 @@ from pathlib import Path
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 from mcq_service import MCQSessionService
 from session_store import SessionStore
-from tests.helpers import make_bank, responses
+from tests.helpers import make_bank, make_taxonomy, responses
 
 
 class MCQSessionServiceTests(unittest.TestCase):
@@ -127,6 +127,40 @@ class MCQSessionServiceTests(unittest.TestCase):
                              "deterministic")
             self.assertNotIn("IGNORE",
                              mid["feed"]["student"]["message"])
+
+    def test_subtopic_counts_are_observed_and_public_without_diagnostics(self):
+        bank = make_bank()
+        taxonomy = make_taxonomy(bank)
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(bank, SessionStore(Path(tmp)), taxonomy=taxonomy)
+            sid = service.start_session()["session_id"]
+            midpoint = service.submit_half(sid, 1, responses(bank, count=20))["feed"]
+            self.assertEqual(20, sum(row["correct"] for row in
+                                     midpoint["student"]["subtopics"]))
+            self.assertEqual([5] * 4, [row["out_of"] for row in
+                                        midpoint["student"]["subtopics"]])
+            end = service.submit_half(sid, 2, responses(bank, False)[20:])["feed"]
+            self.assertEqual([{"correct": 5, "out_of": 10}] * 4,
+                             [{"correct": row["correct"], "out_of": row["out_of"]}
+                              for row in end["student"]["subtopics"]])
+            self.assertEqual(end["teacher"]["subtopics"], end["student"]["subtopics"])
+            blob = json.dumps(end["student"]["subtopics"])
+            for term in ("answer_index", "selected_index", "question_id",
+                         "conformal", "mastery", "prerequisite"):
+                self.assertNotIn(term, blob)
+
+    def test_taxonomy_rejects_stale_or_duplicate_mapping(self):
+        bank = make_bank()
+        taxonomy = make_taxonomy(bank)
+        with tempfile.TemporaryDirectory() as tmp:
+            taxonomy["bank_fingerprint"] = "stale"
+            with self.assertRaisesRegex(ValueError, "approved bank"):
+                MCQSessionService(bank, SessionStore(Path(tmp)), taxonomy=taxonomy)
+            taxonomy = make_taxonomy(bank)
+            taxonomy["topics"][0]["subtopics"][0]["question_ids"].append(
+                taxonomy["topics"][0]["subtopics"][0]["question_ids"][0])
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                MCQSessionService(bank, SessionStore(Path(tmp)), taxonomy=taxonomy)
 
     def test_session_rejects_changed_bank(self):
         bank = make_bank()

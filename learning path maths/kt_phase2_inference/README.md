@@ -465,8 +465,28 @@ than inherited from convention; α=0.10 is the current working baseline.
 
 ### Measured results (L3a on the real dump, alpha = 0.10)
 
-From `conformal_coverage_report.json` — 26,842 real students, split
-13,421 calibration / 13,421 evaluation:
+The tables below preserve the original calibration and checkpoint replay as a
+comparison baseline. The finite-sample quantile now selects the exact
+`ceil((n + 1) * (1 - alpha))`-th score rather than the next score. Corrected
+results are under `artifacts/conformal_rank_fix_20260929/`; the default
+research gate loads that folder's `k10_calibration.json` and `k10_coverage.json`.
+The historical `k=5` calibration there is separate and is not loaded by the
+Phase 3 scenario runner. Do not rerun the calibration CLI without distinct
+`--out` and `--coverage-out` paths if preserving either baseline matters.
+
+On the same held-out students, corrected `k=10` item coverage is 90.0499%
+(original 90.0509%) and checkpoint coverage is 89.9219% over 79,896 blocks
+(original 89.9244%; two fewer covered blocks). The corrected mean checkpoint
+interval width is 0.204510 (original 0.204520). The corrected checkpoint
+replay (`k10_checkpoint_decision_report.json`) changes two of 79,896 status
+calls from `UNCERTAIN_BEHAVIOR` to `MASTERY_SAFE`; struggle calls stay at
+13,313. A separately calibrated historical `k=5` run covers 89.8876% of
+175,201 held-out blocks, with mean width 0.242186. Thus the fix makes the
+quantile exact, not materially better on these empirical metrics; neither
+block size is validated on the fixed 20/40-question instrument.
+
+From the original `conformal_coverage_report.json` — 26,842 real students,
+split 13,421 calibration / 13,421 evaluation:
 
 | metric | value |
 |---|---|

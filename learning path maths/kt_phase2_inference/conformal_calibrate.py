@@ -136,20 +136,18 @@ def parse_args():
 def conformal_quantile(scores: np.ndarray, alpha: float) -> float:
     """The finite-sample-corrected (1-alpha) conformal quantile.
 
-    The correction is `ceil((n + 1)(1 - alpha)) / n`, not the plain empirical
-    quantile: it is what makes coverage hold at finite n rather than only
-    asymptotically. When the correction exceeds 1 the sample is too small to
-    certify this alpha at all, and the honest answer is `inf` -- a threshold
-    that admits every label, i.e. the set degrades to "don't know" rather
-    than to a false claim of confidence.
+    The threshold is the `ceil((n + 1)(1 - alpha))`-th smallest score,
+    not the plain empirical quantile. If that rank exceeds the calibration
+    sample, the threshold is `inf`: the prediction set degrades to "don't
+    know" rather than to a false claim of confidence.
     """
     n = len(scores)
     if n == 0:
         return float("inf")
-    level = np.ceil((n + 1) * (1 - alpha)) / n
-    if level > 1.0:
+    rank = int(np.ceil((n + 1) * (1 - alpha)))
+    if rank > n:
         return float("inf")
-    return float(np.quantile(scores, level, method="higher"))
+    return float(np.partition(scores, rank - 1)[rank - 1])
 
 
 def load_predictions(path: Path, allow_partial: bool) -> dict:

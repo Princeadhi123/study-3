@@ -54,6 +54,32 @@ class KTAdapterTests(unittest.TestCase):
         trace_responses(bank, responses(bank, count=20), kt=kt)
         self.assertEqual(int(kt.batch["item"][0, 0]), 1)
 
+    def test_repeated_bank_history_is_research_only_and_sliced(self):
+        bank = make_bank()
+        kt = FakeKT(bank)
+        trace = trace_responses(
+            bank, responses(bank), kt=kt,
+            history_responses=responses(bank, correct=False, count=20))
+        self.assertEqual(trace["history_length"], 20)
+        self.assertEqual(len(trace["p_correct_before_each_answer"]), 40)
+        self.assertEqual(kt.batch["skill"].shape, (1, 60))
+        self.assertTrue(torch.equal(kt.batch["correct"][0, :20], torch.zeros(20)))
+        self.assertTrue(torch.equal(kt.batch["correct"][0, 20:], torch.ones(40)))
+        self.assertEqual(trace["p_correct_before_each_answer"][0],
+                         round(float(torch.linspace(.1, .9, 60)[20]), 6))
+        self.assertNotIn("answer_index", str(trace))
+
+    def test_history_rejects_malformed_and_too_long(self):
+        bank = make_bank()
+        kt = FakeKT(bank)
+        with self.assertRaisesRegex(ValueError, "20 ordered"):
+            trace_responses(bank, responses(bank), kt=kt,
+                            history_responses=responses(bank, count=19))
+        kt.config = {"max_seq_len": 50}
+        with self.assertRaisesRegex(ValueError, "sequence length"):
+            trace_responses(bank, responses(bank), kt=kt,
+                            history_responses=responses(bank, count=20))
+
     def test_events_derive_selected_text_and_correctness(self):
         bank = make_bank()
         events = response_events(bank, responses(bank, count=20))

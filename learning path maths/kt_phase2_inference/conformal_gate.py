@@ -2,7 +2,7 @@
 
 This is the live half of Layer 3 (conformal_calibrate.py is the offline half). It is a pure decision function over numbers the frozen
 model already produced, plus the constants in
-`artifacts/conformal_calibration.json`.
+`paths.ACTIVE_CALIBRATION` (the corrected-rank historical k=10 artifact).
 
 Explicitly NOT in scope, by design:
 
@@ -141,12 +141,16 @@ class ConformalGate:
     def load(cls, calibration_path: Optional[Path] = None,
              coverage_path: Optional[Path] = None,
              skill_catalog_path: Optional[Path] = None) -> "ConformalGate":
-        cal_path = Path(calibration_path or paths.CALIBRATION)
-        paths.require(cal_path, "Run conformal_calibrate.py first.")
+        cal_path = Path(calibration_path or paths.ACTIVE_CALIBRATION)
+        paths.require(cal_path, "Run conformal_calibrate.py for corrected k=10 first.")
         cal = json.loads(cal_path.read_text(encoding="utf-8"))
 
-        cov_path = Path(coverage_path or paths.COVERAGE_REPORT)
-        cov = json.loads(cov_path.read_text(encoding="utf-8")) if cov_path.exists() else {}
+        cov_path = (Path(coverage_path) if coverage_path else
+                    paths.ACTIVE_COVERAGE_REPORT if calibration_path is None else None)
+        cov = (json.loads(paths.require(cov_path).read_text(encoding="utf-8"))
+               if cov_path is not None else {})
+        if cov and cov["alpha"] != cal["alpha"]:
+            raise ValueError("calibration and coverage alpha disagree")
 
         names = {}
         cat_path = Path(skill_catalog_path or paths.SKILL_CATALOG)

@@ -11,7 +11,7 @@ import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 from api import make_server
 from mcq_service import MCQSessionService
 from session_store import SessionStore
-from tests.helpers import make_bank, responses
+from tests.helpers import make_bank, make_taxonomy, responses
 
 
 class Phase3APITests(unittest.TestCase):
@@ -19,7 +19,8 @@ class Phase3APITests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.bank = make_bank()
         self.service = MCQSessionService(
-            self.bank, SessionStore(Path(self.tmp.name)))
+            self.bank, SessionStore(Path(self.tmp.name)),
+            taxonomy=make_taxonomy(self.bank))
         self.server = make_server(self.service)
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True)
@@ -75,6 +76,10 @@ class Phase3APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["checkpoint"], "midpoint")
         self.assertEqual(payload["feedback"]["skills"][0]["correct"], 5)
+        self.assertEqual(20, sum(row["correct"] for row in
+                                 payload["feedback"]["subtopics"]))
+        self.assertEqual(20, sum(row["out_of"] for row in
+                                 payload["feedback"]["subtopics"]))
         self.assertNotIn("teacher", json.dumps(payload))
         self.assertNotIn("answer_index", json.dumps(payload))
 
@@ -102,6 +107,8 @@ class Phase3APITests(unittest.TestCase):
             "are shown below. Keep practicing the topics shown below.")
         self.assertEqual(payload["feedback"]["message_source"],
                          "deterministic")
+        self.assertEqual(40, sum(row["out_of"] for row in
+                                 payload["feedback"]["subtopics"]))
         serialized = json.dumps(payload)
         for term in ("answer_index", "selected_text", "question_id",
                      "content_text", "teacher", "conformal"):

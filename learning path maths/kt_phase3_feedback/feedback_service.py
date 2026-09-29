@@ -1,14 +1,101 @@
 """Compose observed MCQ feedback with an explicitly labeled KT estimate."""
 import copy
+import json
+from pathlib import Path
 
 import phase3_paths  # adds Phase 2 to sys.path before its modules import `paths`
 from kt_adapter import trace_responses
 from mcq_test import score_checkpoint
+from session_store import bank_fingerprint
+
+
+def validate_assessment_taxonomy(bank: dict, taxonomy: dict) -> None:
+    if (taxonomy.get("schema") != "phase3_assessment_taxonomy_draft_v1"
+            or taxonomy.get("status") != "approved_for_descriptive_research_prototype"
+            or taxonomy.get("relation") != "is_part_of_not_prerequisite"
+            or taxonomy.get("student_feedback_status") !=
+            "observed_counts_only_no_subtopic_mastery_or_conformal"
+            or taxonomy.get("bank_fingerprint") != bank_fingerprint(bank)):
+        raise ValueError("assessment taxonomy must match the approved bank and descriptive scope")
+    questions = {q["question_id"]: q for q in bank["questions"]}
+    seen, subtopic_ids, skills = set(), set(), set()
+    for topic in taxonomy["topics"]:
+        sid = topic["skill_id"]
+        if (sid in skills or bank["skill_names"].get(sid) != topic["skill_name"]
+                or not isinstance(topic.get("subtopics"), list) or not topic["subtopics"]):
+            raise ValueError("assessment taxonomy topic does not match bank skill")
+        skills.add(sid)
+        for subtopic in topic["subtopics"]:
+            sub_id = subtopic["id"]
+            if (not isinstance(sub_id, str) or not sub_id or sub_id in subtopic_ids
+                    or not isinstance(subtopic.get("name"), str)
+                    or not subtopic["name"].strip()
+                    or not subtopic.get("question_ids")):
+                raise ValueError("assessment taxonomy has an invalid subtopic")
+            subtopic_ids.add(sub_id)
+            for qid in subtopic["question_ids"]:
+                if qid in seen or qid not in questions or questions[qid]["skill_id"] != sid:
+                    raise ValueError("assessment taxonomy has duplicate, unknown, or misplaced question")
+                seen.add(qid)
+    if seen != set(questions) or skills != set(bank["skill_names"]):
+        raise ValueError("assessment taxonomy must cover each bank question and skill exactly once")
+
+
+def load_assessment_taxonomy(bank: dict, path: Path | None = None,
+                             required: bool = False) -> dict | None:
+    path = Path(path or phase3_paths.ASSESSMENT_TAXONOMY)
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(f"Assessment taxonomy not found: {path}")
+        return None
+    taxonomy = json.loads(path.read_text(encoding="utf-8"))
+    if taxonomy.get("bank_fingerprint") != bank_fingerprint(bank):
+        if required:
+            raise ValueError("assessment taxonomy bank fingerprint does not match")
+        return None
+    validate_assessment_taxonomy(bank, taxonomy)
+    return taxonomy
+
+
+def observed_subtopic_counts(taxonomy: dict, rows: list[dict]) -> list[dict]:
+    answered = {}
+    for row in rows:
+        qid = row["question_id"]
+        if (qid in answered or not isinstance(row["correct"], bool)):
+            raise ValueError("subtopic counts require distinct questions and observed correctness")
+        answered[qid] = row
+    result = []
+    for topic in taxonomy["topics"]:
+        for subtopic in topic["subtopics"]:
+            questions = [answered[qid] for qid in subtopic["question_ids"] if qid in answered]
+            if questions:
+                result.append({"skill_id": topic["skill_id"],
+                               "skill_name": topic["skill_name"],
+                               "subtopic_id": subtopic["id"],
+                               "subtopic_name": subtopic["name"],
+                               "correct": sum(row["correct"] for row in questions),
+                               "out_of": len(questions)})
+    if sum(row["out_of"] for row in result) != len(rows):
+        raise ValueError("observed rows contain questions outside the assessment taxonomy")
+    return result
+
+
+def attach_observed_subtopics(feed: dict, bank: dict, responses: list[dict],
+                              taxonomy: dict) -> None:
+    rows = [{"question_id": row["question_id"],
+             "correct": row["selected_index"] == question["answer_index"]}
+            for row, question in zip(responses, bank["questions"])]
+    counts = observed_subtopic_counts(taxonomy, rows)
+    if ({"correct": sum(row["correct"] for row in counts),
+         "out_of": sum(row["out_of"] for row in counts)} != feed["teacher"]["total"]):
+        raise ValueError("subtopic observed counts disagree with validated scoring")
+    feed["student"]["subtopics"] = counts
+    feed["teacher"]["subtopics"] = copy.deepcopy(counts)
 
 
 def checkpoint_result(bank: dict, responses: list[dict],
                       include_kt: bool = False, kt=None,
-                      device: str = "cpu") -> dict:
+                      device: str = "cpu", taxonomy: dict | None = None) -> dict:
     """Return the private scoring result plus an optional frozen-model trace.
 
     `observed_feed` remains the authoritative feedback from submitted answers.
@@ -19,6 +106,10 @@ def checkpoint_result(bank: dict, responses: list[dict],
         "observed_feed": score_checkpoint(bank, responses),
         "model_estimate": {"status": "not_requested"},
     }
+    taxonomy = taxonomy if taxonomy is not None else load_assessment_taxonomy(bank)
+    if taxonomy is not None:
+        validate_assessment_taxonomy(bank, taxonomy)
+        attach_observed_subtopics(result["observed_feed"], bank, responses, taxonomy)
     if include_kt:
         result["model_estimate"] = trace_responses(
             bank, responses, kt=kt, device=device)

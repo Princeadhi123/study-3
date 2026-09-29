@@ -58,6 +58,16 @@ The private session record additionally stores `selected_text`, `correct`,
 timestamps, and checkpoint feeds. `artifacts/` is ignored because those records
 may contain private answer/scoring data.
 
+The bank-matched `assessment_taxonomy_draft.json` maps each question to one
+**descriptive** subtopic, not a prerequisite. At midpoint and end, student and
+teacher feedback may include `subtopics` with `skill_id`, `skill_name`,
+`subtopic_id`, `subtopic_name`, and observed `correct`/`out_of` counts. There
+are no question IDs, answer keys, KT probabilities, conformal decisions, or
+subtopic mastery claims in these rows. The default service requires this
+bank-matched taxonomy; unrecognized synthetic banks remain taxonomy-free
+unless a validated mapping is supplied explicitly. The feedback text and
+bounded style-selector context still use only skill-level observed evidence.
+
 ## Session lifecycle
 
 ```python
@@ -207,9 +217,11 @@ outcome is incorrect, the runner samples uniformly among wrong options.
 `--graph` prerequisites come from the **global skill graph only** — not a
 question-level graph — and are exploratory diagnostics, not student evidence.
 Item-level conformal decisions use each item's warm/cold regime; a per-skill
-checkpoint uses Phase 2's cold-if-any-item-is-cold rule. Midpoint intervals
-remain approximate (`k=5` versus the calibrated `k=10` block), and end
-intervals have not been validated for this fixed synthetic instrument.
+checkpoint uses Phase 2's cold-if-any-item-is-cold rule. The default research
+gate now loads the corrected historical `k=10` quantile. A separate historical
+`k=5` calibration exists, but the scenario runner still applies the `k=10`
+gate to its five-answer midpoint and marks that interval approximate. Neither
+historical block calibration validates this fixed synthetic instrument.
 No scenario, report, or student API path makes an LLM call.
 
 Compile one or more scenario JSON files into a deterministic report (same
@@ -243,9 +255,39 @@ statuses are annotated when present. The simulated P and the KT pre-answer P
 are distinct estimands; the figures make no calibration claim. Filenames are
 sanitized, collisions are detected, and existing images are never overwritten.
 
+For the private five-seed paired research matrix, render paper-oriented PNG and SVG
+figures directly from the saved batch (not the older scenario report):
+
+```bash
+python visualize_scenarios.py artifacts/research_matrix_learning_fatigue_5seeds_o17_v1.json \
+  --research-matrix --out-dir artifacts/figures_research_matrix_5seeds_o17_v2
+```
+
+For descriptive subtopic scores from the saved five-seed matrix, alongside
+**separate skill-level** conformal decisions at their historical `k=5` and
+`k=10` block sizes, run:
+
+```bash
+python scenario_report.py artifacts/research_matrix_learning_fatigue_5seeds_o17_v1.json \
+  --research-matrix --out-dir artifacts/report_matrix_taxonomy_5seeds_o17_v2
+```
+
+This produces `subtopic_observed.csv` and `skill_conformal.csv` as distinct
+private tables, plus a JSON report. It never recalibrates or applies conformal
+to subtopics, and reads the saved model results without rerunning KT.
+
+The paired KT figure plots each seed and its mean absolute probability change
+against the same answers keyed by question ID. The conformal figure plots the
+fractions of item statuses (out of 40) and skill checkpoint statuses (four
+skills at midpoint and end, out of eight) that differ from baseline. Seed
+means are descriptive, not confidence intervals; this is synthetic sensitivity,
+not fixed-bank coverage validation. Repeated synthetic history also shifts
+sequence position, and unknown IDs reuse approved text rather than introducing
+new questions. The five-seed batch did not request graph diagnostics.
+
 ## Current validation status
 
-The fixed-bank validation stage is in place and passing all 32 Phase 3 tests.
+The fixed-bank validation stage is in place and passing all 47 Phase 3 tests.
 Completed checks so far:
 
 - deterministic boundary profiles score as expected on the approved bank;

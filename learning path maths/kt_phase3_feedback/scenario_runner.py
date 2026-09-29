@@ -125,10 +125,13 @@ def generate_responses(bank: dict, spec: dict) -> list[dict]:
 
 def run_scenario(bank: dict, spec: dict, store: SessionStore,
                  kt=None, device: str | None = None,
-                 gate=None, graph=None) -> dict:
+                 gate=None, graph=None, midpoint_gate=None,
+                 taxonomy: dict | None = None) -> dict:
     if gate is not None and kt is None and device is None:
         raise ValueError("conformal diagnostics require a KT trace")
-    service = MCQSessionService(bank, store)
+    if midpoint_gate is not None and (gate is None or midpoint_gate.k != 5 or gate.k != 10):
+        raise ValueError("midpoint gate requires paired k=5 and k=10 research calibrations")
+    service = MCQSessionService(bank, store, taxonomy=taxonomy)
     scenario = validate_spec(service.bank, spec)
     rows = generate_responses(service.bank, spec)
     session_id = service.start_session()["session_id"]
@@ -169,11 +172,14 @@ def run_scenario(bank: dict, spec: dict, store: SessionStore,
                 indexes = [i for i, row in enumerate(rows[:count])
                            if row["skill_id"] == sid]
                 regime = "cold" if any(regimes[i] == "cold" for i in indexes) else "warm"
-                checkpoints[label][sid] = gate.checkpoint(
+                checkpoint_gate = midpoint_gate if label == "midpoint" and midpoint_gate else gate
+                checkpoints[label][sid] = checkpoint_gate.checkpoint(
                     [probabilities[i] for i in indexes], sid, regime=regime).to_dict()
         result["conformal"] = {
             "status": "exploratory_only", "calibrated_k": gate.k,
-            "midpoint_status": "approximate_k5_not_calibrated_k10",
+            "midpoint_calibrated_k": midpoint_gate.k if midpoint_gate else gate.k,
+            "midpoint_status": ("historical_k5_not_validated_for_fixed_bank" if midpoint_gate
+                                else "approximate_k5_not_calibrated_k10"),
             "end_status": "k10_protocol_not_validated_for_synthetic_fixed_bank",
             "items": items, "checkpoints": checkpoints,
         }
@@ -203,16 +209,21 @@ def main():
         parser.error("--conformal requires --kt-device")
     spec = (json.loads(args.spec.read_text(encoding="utf-8")) if args.spec else
             {"profile": args.profile, "seed": args.seed})
-    gate = graph = None
+    gate = midpoint_gate = graph = None
     if args.conformal:
         from conformal_gate import ConformalGate
+        import paths as phase2_paths
         gate = ConformalGate.load()
+        midpoint_gate = ConformalGate.load(
+            calibration_path=phase2_paths.HISTORICAL_K5_CALIBRATION,
+            coverage_path=phase2_paths.HISTORICAL_K5_COVERAGE)
     if args.graph:
         from kg_query import KnowledgeGraph
         graph = KnowledgeGraph.load()
     service = MCQSessionService.from_default(SessionStore(phase3_paths.SESSIONS))
     result = run_scenario(service.bank, spec, service.store,
-                          device=args.kt_device, gate=gate, graph=graph)
+                          device=args.kt_device, gate=gate, graph=graph,
+                          midpoint_gate=midpoint_gate)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("x", encoding="utf-8") as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)

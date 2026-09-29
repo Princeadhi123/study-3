@@ -32,6 +32,27 @@ class RealBankContractTests(unittest.TestCase):
                     set(question),
                 )
 
+    def test_taxonomy_covers_real_bank_and_student_scores_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self.service(tmpdir)
+            self.assertIsNotNone(service.taxonomy)
+            self.assertEqual(15, sum(len(topic["subtopics"])
+                                     for topic in service.taxonomy["topics"]))
+            sid = service.start_session()["session_id"]
+            rows = [{"question_id": question["question_id"],
+                     "selected_index": question["answer_index"]}
+                    for question in service.bank["questions"]]
+            midpoint = service.submit_half(sid, 1, rows[:20])["feed"]["student"]
+            end = service.submit_half(sid, 2, rows[20:])["feed"]["student"]
+            self.assertEqual((20, 20), (sum(r["correct"] for r in midpoint["subtopics"]),
+                                        sum(r["out_of"] for r in midpoint["subtopics"])))
+            self.assertEqual((40, 40), (sum(r["correct"] for r in end["subtopics"]),
+                                        sum(r["out_of"] for r in end["subtopics"])))
+            self.assertEqual(15, len(end["subtopics"]))
+            self.assertTrue(all(set(row) == {"skill_id", "skill_name", "subtopic_id",
+                                             "subtopic_name", "correct", "out_of"}
+                                for row in end["subtopics"]))
+
     def test_approved_bank_scores_two_ordered_halves_privately(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = self.service(tmpdir)

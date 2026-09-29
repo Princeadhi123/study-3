@@ -10,6 +10,7 @@ PHASE2_ARTIFACTS = PHASE2_ROOT / "artifacts"
 ARTIFACTS = PHASE3_ROOT / "artifacts"
 SESSIONS = ARTIFACTS / "sessions"
 APPROVED_BANK = PHASE2_ARTIFACTS / "test_question_bank_text_only_approved_v2.json"
+ASSESSMENT_TAXONOMY = PHASE3_ROOT / "assessment_taxonomy_draft.json"
 
 # Phase 2 modules are the private source of truth for the bank validator,
 # observed feed builder, and frozen-model loader. Phase 3 deliberately does

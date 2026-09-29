@@ -8,7 +8,7 @@ import torch
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 from feedback_service import checkpoint_result, compose_student_message
 from mcq_test import score_checkpoint
-from tests.helpers import SKILLS, make_bank, responses
+from tests.helpers import SKILLS, make_bank, make_taxonomy, responses
 
 
 class FakeKT:
@@ -30,6 +30,16 @@ class FeedbackServiceTests(unittest.TestCase):
         result = checkpoint_result(bank, responses(bank, count=20))
         self.assertEqual(result["observed_feed"]["checkpoint"], "midpoint")
         self.assertEqual(result["model_estimate"], {"status": "not_requested"})
+
+    def test_checkpoint_taxonomy_counts_are_separate_from_model(self):
+        bank = make_bank()
+        result = checkpoint_result(bank, responses(bank, count=20),
+                                   taxonomy=make_taxonomy(bank))
+        self.assertEqual(20, sum(row["correct"] for row in
+                                 result["observed_feed"]["student"]["subtopics"]))
+        self.assertEqual(result["model_estimate"], {"status": "not_requested"})
+        self.assertNotIn("conformal", json.dumps(
+            result["observed_feed"]["student"]["subtopics"]))
 
     def test_optional_kt_estimate_is_separate(self):
         bank = make_bank()
