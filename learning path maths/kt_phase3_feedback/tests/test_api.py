@@ -83,6 +83,30 @@ class Phase3APITests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len(second["questions"]), 20)
 
+    def test_full_session_returns_bounded_student_message(self):
+        session = self.start_session()
+        sid = session["session_id"]
+        status, _ = self.request(
+            "POST", f"/sessions/{sid}/half-submissions",
+            {"half": 1, "responses": responses(self.bank, count=20)})
+        self.assertEqual(status, 200)
+        status, payload = self.request(
+            "POST", f"/sessions/{sid}/half-submissions",
+            {"half": 2,
+             "responses": responses(self.bank, count=40)[20:]})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["checkpoint"], "end")
+        self.assertEqual(
+            payload["feedback"]["message"],
+            "You have completed all 40 questions. Your results by topic "
+            "are shown below. Keep practicing the topics shown below.")
+        self.assertEqual(payload["feedback"]["message_source"],
+                         "deterministic")
+        serialized = json.dumps(payload)
+        for term in ("answer_index", "selected_text", "question_id",
+                     "content_text", "teacher", "conformal"):
+            self.assertNotIn(term, serialized)
+
     def test_out_of_order_response_is_rejected(self):
         session = self.start_session()
         sid = session["session_id"]

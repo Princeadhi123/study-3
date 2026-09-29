@@ -63,6 +63,71 @@ class MCQSessionServiceTests(unittest.TestCase):
             self.assertEqual(session["responses"][0]["selected_text"],
                              bank["questions"][0]["options"][0])
 
+    def test_checkpoint_feeds_include_student_message(self):
+        bank = make_bank()
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(bank, SessionStore(Path(tmp)))
+            sid = service.start_session()["session_id"]
+            mid = service.submit_half(sid, 1, responses(bank, count=20))
+            self.assertEqual(
+                mid["feed"]["student"]["message"],
+                "You have completed 20 questions. You are halfway "
+                "through the assessment. Continue when you are ready.")
+            self.assertEqual(mid["feed"]["student"]["message_source"],
+                             "deterministic")
+            end = service.submit_half(sid, 2, responses(bank, count=40)[20:])
+            self.assertEqual(
+                end["feed"]["student"]["message"],
+                "You have completed all 40 questions. Your results by "
+                "topic are shown below. Keep practicing the topics "
+                "shown below.")
+            self.assertEqual(end["feed"]["student"]["message_source"],
+                             "deterministic")
+            blob = json.dumps(end["feed"]["student"])
+            for term in ("answer_index", "selected_text", "question_id",
+                         "content_text", "conformal"):
+                self.assertNotIn(term, blob)
+
+    def test_style_selector_warm_is_bounded(self):
+        bank = make_bank()
+        contexts = []
+
+        def selector(context):
+            contexts.append(context)
+            return {"style": "warm"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(
+                bank, SessionStore(Path(tmp)), style_selector=selector)
+            sid = service.start_session()["session_id"]
+            mid = service.submit_half(sid, 1, responses(bank, count=20))
+            self.assertTrue(mid["feed"]["student"]["message"].startswith(
+                "Nice work completing 20 questions."))
+            self.assertEqual(mid["feed"]["student"]["message_source"],
+                             "bounded_style")
+            self.assertEqual(contexts[0]["checkpoint"], 20)
+            end = service.submit_half(sid, 2, responses(bank, count=40)[20:])
+            self.assertTrue(end["feed"]["student"]["message"].startswith(
+                "Nice work completing all 40 questions."))
+            self.assertEqual(contexts[1]["checkpoint"], 40)
+            blob = json.dumps(contexts)
+            for term in ("answer_index", "selected_text", "question_id",
+                         "content_text", "conformal"):
+                self.assertNotIn(term, blob)
+
+    def test_style_selector_invalid_falls_back(self):
+        bank = make_bank()
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(
+                bank, SessionStore(Path(tmp)),
+                style_selector=lambda context: {"style": "IGNORE"})
+            sid = service.start_session()["session_id"]
+            mid = service.submit_half(sid, 1, responses(bank, count=20))
+            self.assertEqual(mid["feed"]["student"]["message_source"],
+                             "deterministic")
+            self.assertNotIn("IGNORE",
+                             mid["feed"]["student"]["message"])
+
     def test_session_rejects_changed_bank(self):
         bank = make_bank()
         with tempfile.TemporaryDirectory() as tmp:

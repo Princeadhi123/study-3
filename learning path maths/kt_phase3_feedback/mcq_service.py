@@ -18,9 +18,10 @@ FULL_LENGTH = 40
 
 
 class MCQSessionService:
-    def __init__(self, bank: dict, store: SessionStore):
+    def __init__(self, bank: dict, store: SessionStore, style_selector=None):
         self.bank = bank
         self.store = store
+        self.style_selector = style_selector
         # Both calls validate protocol, approval, structure, and prompt
         # uniqueness before a session can be created.
         student_questions(self.bank, 1)
@@ -83,6 +84,10 @@ class MCQSessionService:
         if answered in (HALF_LENGTH, FULL_LENGTH):
             checkpoint = "midpoint" if answered == HALF_LENGTH else "end"
             feed = score_checkpoint(self.bank, self._response_prefix(session))
+            from feedback_service import compose_student_message
+            message = compose_student_message(feed, self.style_selector)
+            feed["student"]["message"] = message["message"]
+            feed["student"]["message_source"] = message["message_source"]
             session["checkpoints"][checkpoint] = feed
         session["status"] = "complete" if answered == FULL_LENGTH else "in_progress"
         self.store.save(session)

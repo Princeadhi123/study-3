@@ -35,6 +35,9 @@ copied into student payloads or committed to a public artifact store.
 | `provenance.py` | records artifact identities/hashes for reproducibility |
 | `api.py` | localhost-only JSON API for sessions and researcher diagnostics |
 | `demo_cli.py` | scripted local end-to-end run |
+| `scenario_runner.py` | fixed-bank synthetic scenario generator for researcher diagnostics |
+| `scenario_report.py` | compiles scenario runs into a deterministic report (`phase3_scenario_report_v1`) |
+| `visualize_scenarios.py` | optional PNG figures from a scenario report (requires matplotlib) |
 | `tests/` | synthetic-bank unit tests; no private artifacts required |
 
 ## Public and private data
@@ -163,6 +166,153 @@ python demo_cli.py --profile all_correct --kt-device cpu \
 Both commands refuse to overwrite outputs. Session JSON files remain private
 under `artifacts/sessions/`.
 
+## Fixed-bank scenario diagnostics (researcher only)
+
+`scenario_runner.py` replays synthetic response trajectories over the **fixed
+approved 40-question bank in fixed order**. It is a private diagnostic tool:
+
+- response correctness is sampled from synthetic per-question probabilities —
+  these are simulation inputs, **not** KT-derived estimates;
+- no output is student-facing; scenario results, reports, and figures belong
+  under ignored `artifacts/` paths only.
+
+```bash
+# one fixed-order run per spec/profile + seed
+python scenario_runner.py --profile learning --seed 7 \
+  --out artifacts/scenarios/learning_s7.json
+
+# optional diagnostics: KT trace (--kt-device), conformal gate (--conformal,
+# requires --kt-device), global skill graph prerequisites (--graph)
+python scenario_runner.py --profile learning --seed 7 --kt-device cpu \
+  --conformal --graph --out artifacts/scenarios/learning_s7_kt.json
+```
+
+Custom seeded profiles can be supplied with `--spec path/to/spec.json`:
+
+```json
+{
+  "name": "weak_fractions_seed_42",
+  "seed": 42,
+  "skill_probabilities": {"skill_304b0fda845f": 0.20},
+  "default_probability": 0.75,
+  "distractor_policy": "uniform_wrong"
+}
+```
+
+Deterministic profiles are `all_correct`, `all_incorrect`, `alternating`,
+`first_half_correct_second_half_wrong`, `weak_fractions_only`, and
+`weak_price_only`. Seeded profiles are `stable_strong`, `stable_weak`,
+`learning`, `fatigue`, `weak_fractions`, `guessing`, and custom specs. When an
+outcome is incorrect, the runner samples uniformly among wrong options.
+`--graph` prerequisites come from the **global skill graph only** — not a
+question-level graph — and are exploratory diagnostics, not student evidence.
+Item-level conformal decisions use each item's warm/cold regime; a per-skill
+checkpoint uses Phase 2's cold-if-any-item-is-cold rule. Midpoint intervals
+remain approximate (`k=5` versus the calibrated `k=10` block), and end
+intervals have not been validated for this fixed synthetic instrument.
+No scenario, report, or student API path makes an LLM call.
+
+Compile one or more scenario JSON files into a deterministic report (same
+`bank_sha256` required; name + seed must be unique):
+
+```bash
+python scenario_report.py artifacts/scenarios/*.json \
+  --out-dir artifacts/scenario_report
+```
+
+This writes `scenario_report.json` (schema `phase3_scenario_report_v1`),
+`scenario_summary.csv`, and `per_skill_trace.csv`, refusing to overwrite.
+
+Optional plotting (requires `matplotlib`, used with the non-interactive `Agg`
+backend; it is an optional dependency and is not needed by the pipeline):
+
+```bash
+python visualize_scenarios.py artifacts/scenario_report/scenario_report.json \
+  --out-dir artifacts/figures
+# alternatively, include per-skill median/IQR figures when there are multiple seeds
+# (choose a fresh directory because existing PNGs are never overwritten):
+python visualize_scenarios.py artifacts/scenario_report/scenario_report.json \
+  --out-dir artifacts/figures_aggregate --aggregate
+```
+
+One figure per scenario + seed + skill shows the simulated response
+probability, the KT pre-answer probability when present, and the observed
+running per-skill accuracy, with correct/incorrect markers and a midpoint line
+at global position 20. Midpoint (approx. k=5) and end (k=10) conformal
+statuses are annotated when present. The simulated P and the KT pre-answer P
+are distinct estimands; the figures make no calibration claim. Filenames are
+sanitized, collisions are detected, and existing images are never overwritten.
+
+## Current validation status
+
+The fixed-bank validation stage is in place and passing all 32 Phase 3 tests.
+Completed checks so far:
+
+- deterministic boundary profiles score as expected on the approved bank;
+- every scenario is a fresh cold-start synthetic session with no prior
+  student history (`attempt=1`, `time_bin=0`, and `rt_mask=0`);
+- seeded learning, fatigue, stable, guessing, and weak-skill profiles are
+  reproducible and record simulated probabilities plus sampled responses;
+- incorrect outcomes uniformly select a wrong option;
+- observed scoring, KT tracing, conformal diagnostics, and graph diagnostics
+  remain contractually separate;
+- mixed warm/cold skill checkpoints use Phase 2's cold-if-any-item-is-cold
+  rule while retaining per-item regimes;
+- reports and plots are deterministic and refuse to overwrite outputs;
+- a real Phase 2 graph query returned the expected global skill-level
+  candidates and no dangling or duplicate graph edges were found;
+- no live student pilot has been run and no LLM calls have been made.
+
+A first-pass comparison ran `all_correct`, `all_incorrect`, and learning seed
+7 with KT, conformal, and graph diagnostics. A five-seed comparison then ran
+`learning` and `fatigue` on seeds 11, 23, 37, 41, and 53 with KT and conformal
+diagnostics. The generated responses behaved as intended:
+
+| profile | simulated first half | actual first half | simulated second half | actual second half |
+|---|---:|---:|---:|---:|
+| learning | 47.8% | 40% | 67.2% | 66% |
+| fatigue | 68.3% | 69% | 51.7% | 49% |
+
+The corresponding KT mean moved in the expected direction, but much less
+strongly than the synthetic response parameter:
+
+| profile | mean KT first half | mean KT second half |
+|---|---:|---:|
+| learning | 52.6% | 57.2% |
+| fatigue | 66.4% | 63.5% |
+
+This is an encouraging direction, not a calibration result. All of these runs
+answer a cold-start question: how the fixed test, scorer, KT, conformal gate,
+and graph respond to a fresh sequence with a rising or falling response
+pattern. They do not model warm-start students, prior history, real learning,
+or real fatigue. KT remains question/content-sensitive: the sharp per-item
+changes reflect the specific next question and response history, not merely
+the declared synthetic ability schedule. The end conformal rows are
+exploratory because fixed-bank coverage has not been independently validated;
+midpoint rows remain an approximate `k=5` diagnostic.
+
+The graph diagnostic is working as an exploratory global-skill lookup. For the
+current bank, only price has grounded prerequisite candidates; basic
+arithmetic, fractions, and percentages return none. Empty means "no grounded
+edge above the evidence threshold", not that no pedagogical prerequisite
+exists. Graph candidates still require domain review before downstream use.
+
+## Reading the scenario figures
+
+For an individual scenario figure:
+
+- blue line: the probability used to generate the synthetic response;
+- orange line: KT's pre-answer probability when KT diagnostics are enabled;
+- gray line: observed running per-skill accuracy;
+- green circle: generated answer was correct;
+- red cross: generated answer was incorrect;
+- black dashed line: global midpoint after question 20.
+
+For an aggregate figure, the blue and orange lines are medians across seeds.
+The blue band may be nearly invisible when all seeds share the same simulated
+probability schedule. Always read aggregate plots alongside the summary CSV;
+neither plot compares ground truth directly to validated mastery.
+
 ## Tests
 
 ```bash
@@ -176,12 +326,30 @@ verifies the public payload and private scoring path, and it skips otherwise.
 
 ## Remaining work
 
-1. Build a frontend against the localhost API, or replace `api.py` with the
-   deployment framework's authenticated route layer.
-2. Capture real per-answer timestamps/response durations if timing will be
-   exposed to KT; otherwise keep `rt_mask=0` and disclose it.
-3. Decide whether each test starts cold or resumes prior student history.
-4. Evaluate scripted and human trajectories per skill; do not rely only on the
-   model's aggregate AUC.
-5. Keep model estimates visually and contractually separate from observed
-   feedback until calibration for the 20/40-question setting is established.
+1. Consolidate the validation package: add an automated first-half versus
+   second-half aggregate table, human-readable skill names, regime counts,
+   conformal status counts, and graph artifact provenance to the scenario
+   report/manifest.
+2. Reduce repeated-seed runtime by adding a batch/matrix runner that loads the
+   frozen model and embeddings once per batch instead of once per CLI run.
+3. Run controlled history/order experiments before adding more random seeds:
+   same answers with a different approved order, same order with a different
+   history, and per-item KT sensitivity checks.
+4. Evaluate the model against held-out historical sessions where their
+   questions match the current data requirements. This is stronger than
+   synthetic-only evidence but still does not validate the fixed instrument if
+   the historical sessions differ from its order/content.
+5. Ask a domain expert to review graph candidates as acceptable,
+   questionable, or rejected. Empty graph output means no grounded edge passed
+   the evidence threshold; it is not a claim that no prerequisite exists.
+6. If a future pilot becomes available, capture timestamps/response durations
+   and cold-start versus prior-history state. Until real fixed-test sessions
+   are evaluated, keep midpoint `k=5` approximate and end `k=10` exploratory.
+7. Keep observed feedback, KT, conformal, and graph outputs separate. A future
+   LLM composer should only use verified observed counts and explicitly
+   reviewed diagnostic context; it must not receive private answer keys, raw
+   synthetic ability, unvalidated conformal status, or unreviewed graph
+   candidates as authoritative facts.
+8. Student deployment still needs authentication/authorization, production
+   data handling, a frontend or framework route layer, and a decision about
+   which diagnostics are safe to expose.
