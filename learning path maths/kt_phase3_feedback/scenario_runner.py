@@ -6,6 +6,7 @@ import random
 from pathlib import Path
 
 import phase3_paths
+from feedback_service import assessment_feedback_graph
 from kt_adapter import trace_responses
 from mcq_service import MCQSessionService
 from session_store import SessionStore, bank_fingerprint
@@ -123,52 +124,6 @@ def generate_responses(bank: dict, spec: dict) -> list[dict]:
     return rows
 
 
-def _eligible_prerequisite(candidates: list, target: str) -> dict | None:
-    for candidate in candidates:
-        if (isinstance(candidate, dict)
-                and isinstance(candidate.get("skill_id"), str)
-                and candidate["skill_id"].strip()
-                and candidate["skill_id"].strip() != target
-                and isinstance(candidate.get("skill_name"), str)
-                and candidate["skill_name"].strip()
-                and candidate.get("relation") == "prerequisite"
-                and candidate.get("evidence") == "grounded"
-                and candidate.get("depth") in (1, 2)):
-            return candidate
-    return None
-
-
-def _prerequisite_routing(bank: dict, gate, end_checkpoints: dict,
-                          prerequisites: dict) -> dict:
-    end = {sid: end_checkpoints.get(sid, {}) for sid in bank["skill_names"]}
-    if gate.k != 10 or any(c.get("n_items") != 10 for c in end.values()):
-        return {"status": "k10_required"}
-    recommendations = {}
-    for sid, skill_name in bank["skill_names"].items():
-        status = end[sid].get("status")
-        record = {"target_skill_id": sid, "target_skill_name": skill_name,
-                  "checkpoint_status": status, "recommendation_type": "NONE",
-                  "prerequisite_skill_id": None,
-                  "prerequisite_skill_name": None, "message": None}
-        if status == "CONFIDENT_STRUGGLE":
-            candidate = _eligible_prerequisite(prerequisites.get(sid, []), sid)
-            if candidate is None:
-                record.update(
-                    recommendation_type="DIRECT_SKILL_REVIEW",
-                    message=f"No grounded prerequisite candidate; review "
-                            f"{skill_name} directly.")
-            else:
-                record.update(
-                    recommendation_type="PREREQUISITE_REVIEW",
-                    prerequisite_skill_id=candidate["skill_id"],
-                    prerequisite_skill_name=candidate["skill_name"],
-                    message=f"Exploratory prerequisite review candidate: "
-                            f"{candidate['skill_name']} (for {skill_name}).")
-        recommendations[sid] = record
-    return {"status": "exploratory_only_researcher_only", "checkpoint": "end",
-            "recommendations": recommendations}
-
-
 def run_scenario(bank: dict, spec: dict, store: SessionStore,
                  kt=None, device: str | None = None,
                  gate=None, graph=None, midpoint_gate=None,
@@ -177,7 +132,11 @@ def run_scenario(bank: dict, spec: dict, store: SessionStore,
         raise ValueError("conformal diagnostics require a KT trace")
     if midpoint_gate is not None and (gate is None or midpoint_gate.k != 5 or gate.k != 10):
         raise ValueError("midpoint gate requires paired k=5 and k=10 research calibrations")
-    service = MCQSessionService(bank, store, taxonomy=taxonomy)
+    if graph is not None and not isinstance(graph, dict):
+        raise ValueError("graph must be the bank-matched assessment taxonomy, not a global graph")
+    if graph is not None and taxonomy is not None and graph != taxonomy:
+        raise ValueError("graph and taxonomy must describe the same assessment")
+    service = MCQSessionService(bank, store, taxonomy=graph if graph is not None else taxonomy)
     scenario = validate_spec(service.bank, spec)
     rows = generate_responses(service.bank, spec)
     session_id = service.start_session()["session_id"]
@@ -231,14 +190,12 @@ def run_scenario(bank: dict, spec: dict, store: SessionStore,
         }
     if graph is not None:
         result["graph"] = {
-            "status": "exploratory_only", "scope": "global_skill_graph_not_question_graph",
-            "prerequisites": {sid: graph.foundational_for(sid, allow_weak_evidence=False)
-                              for sid in bank["skill_names"]},
-        }
-        if gate is not None:
-            result["graph"]["routing"] = _prerequisite_routing(
-                bank, gate, result["conformal"]["checkpoints"]["end"],
-                result["graph"]["prerequisites"])
+            "status": "descriptive_observed_counts_only",
+            "scope": "approved_bank_topics_subtopics_only",
+            "relation": "is_part_of_not_prerequisite", "bank_sha256": bank_fingerprint(bank),
+            "checkpoints": {checkpoint: assessment_feedback_graph(bank, graph, submissions[:limit])
+                            for checkpoint, limit in (("midpoint", 20), ("end", 40))}}
+
     return result
 
 
@@ -267,10 +224,9 @@ def main():
         midpoint_gate = ConformalGate.load(
             calibration_path=phase2_paths.HISTORICAL_K5_CALIBRATION,
             coverage_path=phase2_paths.HISTORICAL_K5_COVERAGE)
-    if args.graph:
-        from kg_query import KnowledgeGraph
-        graph = KnowledgeGraph.load()
     service = MCQSessionService.from_default(SessionStore(phase3_paths.SESSIONS))
+    if args.graph:
+        graph = service.taxonomy
     result = run_scenario(service.bank, spec, service.store,
                           device=args.kt_device, gate=gate, graph=graph,
                           midpoint_gate=midpoint_gate)

@@ -93,6 +93,47 @@ def attach_observed_subtopics(feed: dict, bank: dict, responses: list[dict],
     feed["teacher"]["subtopics"] = copy.deepcopy(counts)
 
 
+def assessment_feedback_graph(bank: dict, taxonomy: dict, responses: list[dict]) -> dict:
+    from schemas import validate_submission
+    validate_assessment_taxonomy(bank, taxonomy)
+    if len(responses) not in (20, 40):
+        raise ValueError("assessment graph requires an ordered 20/40 response checkpoint")
+    rows = []
+    for i, response in enumerate(responses):
+        question = bank["questions"][i]
+        selected = validate_submission(response, question, i)
+        rows.append({"question_id": question["question_id"],
+                     "correct": selected == question["answer_index"]})
+    counts = {row["subtopic_id"]: row for row in observed_subtopic_counts(taxonomy, rows)}
+    topics, recommendations = [], {}
+    for topic in taxonomy["topics"]:
+        leaves = []
+        for subtopic in topic["subtopics"]:
+            scored = counts.get(subtopic["id"], {"correct": 0, "out_of": 0})
+            leaves.append({"subtopic_id": subtopic["id"], "subtopic_name": subtopic["name"],
+                           "correct": scored["correct"], "out_of": scored["out_of"],
+                           "incorrect": scored["out_of"] - scored["correct"]})
+        topics.append({"skill_id": topic["skill_id"], "skill_name": topic["skill_name"],
+                       "correct": sum(leaf["correct"] for leaf in leaves),
+                       "out_of": sum(leaf["out_of"] for leaf in leaves), "subtopics": leaves})
+        errors = [copy.deepcopy(leaf) for leaf in leaves if leaf["incorrect"] > 0]
+        names = ", ".join(leaf["subtopic_name"] for leaf in errors)
+        recommendations[topic["skill_id"]] = {
+            "skill_id": topic["skill_id"], "skill_name": topic["skill_name"],
+            "recommendation_type": "ASSESSMENT_SUBTOPIC_PRACTICE" if errors else "NONE",
+            "subtopics": errors,
+            "message": (f"Observed incorrect answers occurred in {names}. Consider reviewing these "
+                        "assessed subtopics; the counts do not diagnose a misconception." if errors else
+                        "No incorrect answers were observed in the answered questions for this skill.")}
+    return {"schema": "phase3_assessment_feedback_graph_v1",
+            "status": "descriptive_observed_counts_only",
+            "scope": "approved_bank_topics_subtopics_only",
+            "relation": "is_part_of_not_prerequisite", "bank_sha256": bank_fingerprint(bank),
+            "checkpoint": "midpoint" if len(rows) == 20 else "end",
+            "topics": topics, "recommendations": recommendations,
+            "recommendation_status": "descriptive_practice_candidates_pending_educator_review"}
+
+
 def checkpoint_result(bank: dict, responses: list[dict],
                       include_kt: bool = False, kt=None,
                       device: str = "cpu", taxonomy: dict | None = None) -> dict:

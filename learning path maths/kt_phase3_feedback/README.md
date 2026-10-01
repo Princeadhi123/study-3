@@ -58,12 +58,12 @@ scenario_runner.py
         v
 frozen KT trace -> historical k5/k10 conformal diagnostics
 (not validated for this fixed bank)
--> global skill graph + end-only exploratory routing
+-> bank-matched assessment taxonomy -> observed-error practice candidates
 -> scenario_report.py / visualize_scenarios.py (ignored artifacts only)
 ```
 
-The live student API never runs KT, conformal, graph, routing, or LLM code;
-those exist only in the private research branch and researcher routes.
+The live student API never runs KT, conformal, assessment-graph, or LLM
+code; those exist only in the private research branch and researcher routes.
 
 ## Files
 
@@ -117,8 +117,8 @@ and observed per-skill and per-subtopic `correct`/`out_of` counts. The
 midpoint checkpoint deliberately carries **no aggregate grade**; only the
 end checkpoint adds `total: {"correct": ..., "out_of": 40}` and an
 observed-results summary that makes no mastery claim. The `teacher`
-half — and KT, conformal, graph, routing, and answer-key data — stays
-private and is never returned on student routes.
+half — and KT, conformal, assessment-graph practice candidates, and
+answer-key data — stays private and is never returned on student routes.
 
 ## Session lifecycle
 
@@ -244,7 +244,7 @@ python scenario_runner.py --profile learning --seed 7 \
   --out artifacts/scenarios/learning_s7.json
 
 # optional diagnostics: KT trace (--kt-device), conformal gate (--conformal,
-# requires --kt-device), global skill graph prerequisites (--graph)
+# requires --kt-device), bank-matched assessment taxonomy (--graph)
 python scenario_runner.py --profile learning --seed 7 --kt-device cpu \
   --conformal --graph --out artifacts/scenarios/learning_s7_kt.json
 ```
@@ -266,30 +266,33 @@ Deterministic profiles are `all_correct`, `all_incorrect`, `alternating`,
 `weak_price_only`. Seeded profiles are `stable_strong`, `stable_weak`,
 `learning`, `fatigue`, `weak_fractions`, `guessing`, and custom specs. When an
 outcome is incorrect, the runner samples uniformly among wrong options.
-`--graph` prerequisites come from the **global skill graph only** — not a
-question-level graph — and are exploratory diagnostics, not student evidence.
-Item-level conformal decisions use each item's warm/cold regime; a per-skill
-checkpoint uses Phase 2's cold-if-any-item-is-cold rule. The default research
-gate now loads the corrected historical `k=10` quantile. A separate historical
-`k=5` calibration exists, but the scenario runner still applies the `k=10`
-gate to its five-answer midpoint and marks that interval approximate. Neither
+`--graph` attaches the **bank-matched assessment taxonomy** — the approved
+topic/subtopic map (`relation="is_part_of_not_prerequisite"`), not a global
+prerequisite or question-level graph. The runner accepts only a taxonomy
+dict for `graph` and rejects global graph objects; when a separate taxonomy
+is also supplied, both must describe the same assessment. Item-level
+conformal decisions use each item's warm/cold regime; a per-skill checkpoint
+uses Phase 2's cold-if-any-item-is-cold rule. The default research gate now
+loads the corrected historical `k=10` quantile, and a separate historical
+`k=5` calibration is used for the five-answer midpoint in the CLI. Neither corrected
 historical block calibration validates this fixed synthetic instrument.
 No scenario, report, or student API path makes an LLM call.
 
-When both the `k=10` gate and the graph are supplied, the private result also
-contains `graph.routing` (`status="exploratory_only_researcher_only"`,
-`checkpoint="end"`): a per-skill recommendation record for each bank skill in
-bank order. Only the **end** `k=10` checkpoint status is consulted — never the
-midpoint or per-item statuses. `CONFIDENT_STRUGGLE` selects the first ranked
-candidate whose `skill_id` differs from the target, has a nonempty
-`skill_name`, and is a `relation="prerequisite"`, `evidence="grounded"` edge at
-depth 1 or 2, then emits `PREREQUISITE_REVIEW`; a struggle with no eligible
-candidate emits `DIRECT_SKILL_REVIEW`; every other status emits `NONE`. If the
-gate or any end checkpoint is not `k=10`-sized, routing emits only
-`{"status": "k10_required"}` and no recommendations. These records flag the
-target skill only — they never claim a prerequisite itself was failed — and
-they are private metadata: they are not merged into observed feeds, student
-messages, style-selector context, or any API payload.
+When the graph is supplied, the private result contains
+`graph.checkpoints` (`midpoint` and `end`) built by
+`assessment_feedback_graph`: per-skill observed counts, per-subtopic
+correct/incorrect counts, and a `recommendations` map keyed by skill with
+`recommendation_type` (`ASSESSMENT_SUBTOPIC_PRACTICE` when the skill has
+assessed subtopics with observed incorrect answers, else `NONE`), the
+subtopics carrying those errors, and a descriptive message. The graph
+scope is `approved_bank_topics_subtopics_only` — there is no conformal
+gating of practice candidates and no global prerequisite routing. The taxonomy
+and conformal branches are independent; the flow diagram lists both diagnostics,
+not a model-based prerequisite gate for assessment feedback. These
+candidates describe observed errors inside this assessment only, are
+pending educator review, and are private metadata: they are not merged
+into observed feeds, student messages, style-selector context, or any API
+payload, and they make no prerequisite or misconception inference.
 
 Compile one or more scenario JSON files into a deterministic report (same
 `bank_sha256` required; name + seed must be unique):
@@ -382,7 +385,7 @@ review.
 
 ## Current validation status
 
-The fixed-bank validation stage is in place and passing all 64 Phase 3 tests.
+The fixed-bank validation stage is in place and passing all 75 Phase 3 tests.
 Completed checks so far:
 
 - deterministic boundary profiles score as expected on the approved bank;
@@ -391,17 +394,19 @@ Completed checks so far:
 - seeded learning, fatigue, stable, guessing, and weak-skill profiles are
   reproducible and record simulated probabilities plus sampled responses;
 - incorrect outcomes uniformly select a wrong option;
-- observed scoring, KT tracing, conformal diagnostics, and graph diagnostics
-  remain contractually separate;
+- observed scoring, KT tracing, conformal diagnostics, and assessment-graph
+  candidates remain contractually separate;
 - mixed warm/cold skill checkpoints use Phase 2's cold-if-any-item-is-cold
   rule while retaining per-item regimes;
 - reports and plots are deterministic and refuse to overwrite outputs;
-- a real Phase 2 graph query returned the expected global skill-level
-  candidates and no dangling or duplicate graph edges were found;
-- private `graph.routing` records derive only from end `k=10` checkpoint
-  statuses and grounded prerequisite edges, fail closed when the `k=10`
-  preconditions are unmet, and leave observed/student payloads byte-identical
-  across routing outcomes;
+- the bank-matched assessment taxonomy produces observed-error practice
+  candidates only — no global routing and no conformal gating;
+- (archived) a real Phase 2 graph query once returned the expected global
+  skill-level candidates and no dangling or duplicate graph edges were
+  found — retained history, not current scope;
+- (archived) private `graph.routing` records once derived from end `k=10`
+  checkpoint statuses and grounded prerequisite edges — retained history,
+  not current scope;
 - no live student pilot has been run and no LLM calls have been made.
 
 The five-seed validation ran `learning` and `fatigue` on seeds
@@ -431,11 +436,32 @@ the declared synthetic ability schedule. The end conformal rows are
 exploratory because fixed-bank coverage has not been independently validated;
 midpoint rows remain an approximate `k=5` diagnostic.
 
-The graph diagnostic is working as an exploratory global-skill lookup. For the
-current bank, only price has grounded prerequisite candidates; basic
-arithmetic, fractions, and percentages return none. Empty means "no grounded
-edge above the evidence threshold", not that no pedagogical prerequisite
-exists. Graph candidates still require domain review before downstream use.
+Archived (no longer run — global prerequisite routing is out of scope): the
+former graph diagnostic worked as an exploratory global-skill lookup; for the
+current bank only price had grounded prerequisite candidates, and basic
+arithmetic, fractions, and percentages returned none. Empty meant "no
+grounded edge above the evidence threshold", not that no pedagogical
+prerequisite exists.
+
+## 2026-10-01 assessment-pipeline report
+
+The current regenerated report is `artifacts/assessment_pipeline_20261001/`
+— 54 scenario rows with checkpoint/subtopic CSVs, `comparison.png`, and
+`feedback_report.html` using the bank-matched assessment taxonomy for
+practice candidates and the saved conformal diagnostics separately. It was
+produced by replay/rescope of the saved fixed-40 evaluation: frozen
+responses, KT traces, and conformal predictions are preserved as saved, and
+no external calls are made. The earlier `full_pipeline_20261001` outputs
+used the retired global-routing scope and are kept only as archived history.
+
+```bash
+python evaluate_scenarios.py --replay artifacts/full_pipeline_20261001.json \
+  --assessment-only --out artifacts/assessment_pipeline_20261001.json
+python compare_scenarios.py artifacts/assessment_pipeline_20261001.json \
+  --full-pipeline --out-dir artifacts/assessment_pipeline_20261001
+```
+
+Both commands refuse to overwrite existing outputs.
 
 ## Reading the scenario figures
 

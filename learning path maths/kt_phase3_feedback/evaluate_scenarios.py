@@ -10,6 +10,7 @@ from pathlib import Path
 import phase3_paths
 from kt_adapter import trace_responses
 from mcq_service import MCQSessionService
+from feedback_service import assessment_feedback_graph, validate_assessment_taxonomy
 from scenario_runner import generate_responses
 from session_store import SessionStore, bank_fingerprint
 
@@ -169,23 +170,173 @@ def replay_feedback(original: dict, bank: dict, taxonomy: dict) -> dict:
     return updated
 
 
+def _attach_assessment_scope(case: dict, bank: dict, taxonomy: dict) -> None:
+    submissions = [{"question_id": r["question_id"], "selected_index": r["selected_index"]}
+                   for r in case["responses"]]
+    graphs = {checkpoint: assessment_feedback_graph(bank, taxonomy, submissions[:limit])
+              for checkpoint, limit in (("midpoint", 20), ("end", 40))}
+    for checkpoint, graph in graphs.items():
+        expected = {s["skill_id"]: (s["correct"], s["out_of"])
+                    for s in case["observed"][checkpoint]["skills"]}
+        actual = {s["skill_id"]: (s["correct"], s["out_of"]) for s in graph["topics"]}
+        if actual != expected:
+            raise ValueError("assessment graph counts differ from saved feedback")
+        observed_subtopics = {s["subtopic_id"]: (s["correct"], s["out_of"])
+                             for s in case["observed"][checkpoint]["subtopics"]}
+        graph_subtopics = {s["subtopic_id"]: (s["correct"], s["out_of"])
+                          for topic in graph["topics"] for s in topic["subtopics"] if s["out_of"]}
+        if observed_subtopics != graph_subtopics:
+            raise ValueError("assessment graph subtopics differ from saved feedback")
+    case["graph"] = {"status": "descriptive_observed_counts_only",
+                     "scope": "approved_bank_topics_subtopics_only",
+                     "relation": "is_part_of_not_prerequisite",
+                     "bank_sha256": bank_fingerprint(bank), "checkpoints": graphs}
+    observed = case["observed"]["end"]
+    case["teacher_end"] = {
+        "status": "private_observed_summary_with_separate_research_diagnostics",
+        "message_source": "deterministic",
+        "message": f"All 40 questions were completed. Observed result: {observed['total']['correct']}/40. "
+                   "Skill and subtopic counts describe this assessment only. Use follow-up questions "
+                   "to check understanding before choosing instruction.",
+        "total": copy.deepcopy(observed["total"]), "skills": copy.deepcopy(observed["skills"]),
+        "subtopics": copy.deepcopy(observed["subtopics"]),
+        "assessment_practice": copy.deepcopy(graphs["end"]["recommendations"]),
+        "research_diagnostics": {"conformal_end": copy.deepcopy(case["conformal"]["checkpoints"]["end"])},
+        "limitations": ["KT is not calibrated for this assessment",
+                        "historical conformal coverage does not validate this fixed bank",
+                        "practice candidates only describe errors within this assessment and require educator review",
+                        "few answers per subtopic cannot establish mastery or a misconception"]}
+
+
+def rescope_saved_diagnostics(original: dict, bank: dict, taxonomy: dict) -> dict:
+    if (original.get("schema") != "phase3_fixed40_comparison_v1"
+            or original.get("bank_sha256") != bank_fingerprint(bank)):
+        raise ValueError("saved assessment scope requires matching bank and schema")
+    validate_assessment_taxonomy(bank, taxonomy)
+    updated = copy.deepcopy(original)
+    for before, after in zip(original["scenarios"], updated["scenarios"]):
+        if "conformal" not in before:
+            raise ValueError("assessment-only rescope requires saved conformal diagnostics")
+        _attach_assessment_scope(after, bank, taxonomy)
+        for key in ("responses", "kt_pre_answer_probability", "kt_coverage", "observed", "selector_context", "conformal"):
+            if before[key] != after[key]:
+                raise ValueError("assessment rescope must preserve frozen evidence and diagnostics")
+    provenance = updated.get("diagnostic_provenance", {})
+    provenance.pop("graph_nodes", None)
+    provenance.pop("graph_edges", None)
+    updated["diagnostic_scope"] = "assessment_topics_subtopics_only_with_separate_historical_conformal"
+    return updated
+
+
+def attach_saved_diagnostics(original: dict, bank: dict, end_gate, midpoint_gate, taxonomy: dict) -> dict:
+    if (original.get("schema") != "phase3_fixed40_comparison_v1"
+            or original.get("bank_sha256") != bank_fingerprint(bank)):
+        raise ValueError("saved diagnostics require the matching approved bank")
+    if end_gate.k != 10 or midpoint_gate.k != 5:
+        raise ValueError("saved diagnostics require paired k=5 and k=10 gates")
+    updated = copy.deepcopy(original)
+    validate_assessment_taxonomy(bank, taxonomy)
+    questions = bank["questions"]
+    for case in updated["scenarios"]:
+        rows, probabilities = case["responses"], case["kt_pre_answer_probability"]
+        if (len(rows) != 40 or len(probabilities) != 40 or
+                [r["question_id"] for r in rows] != [q["question_id"] for q in questions]):
+            raise ValueError("diagnostics require 40 ordered saved responses and predictions")
+        if any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1
+               for p in probabilities):
+            raise ValueError("saved probabilities must be finite numbers in [0, 1]")
+        for row, question in zip(rows, questions):
+            if (row["skill_id"] != question["skill_id"] or
+                    type(row["selected_index"]) is not int or
+                    row["selected_index"] not in range(len(question["options"])) or
+                    not isinstance(row["correct"], bool) or
+                    row["correct"] != (row["selected_index"] == question["answer_index"])):
+                raise ValueError("saved responses disagree with the approved bank")
+        coverage = case["kt_coverage"]
+        if any(coverage.get(key) for key in
+               ("missing_skill_indexes", "missing_content_indexes", "missing_option_values")):
+            raise ValueError("saved KT trace has missing coverage")
+        if "unknown_item_ids" not in coverage:
+            raise ValueError("saved KT item regimes are required")
+        unknown = set(coverage["unknown_item_ids"])
+        if unknown - {q["item_id"] for q in questions}:
+            raise ValueError("unknown item coverage does not match bank")
+        regimes = ["cold" if q["item_id"] in unknown else "warm" for q in questions]
+        checkpoints, items = {}, []
+        for i, probability in enumerate(probabilities):
+            decision = end_gate.item_decision(probability, regimes[i])
+            items.append({"position": i + 1, "regime": regimes[i],
+                          "prediction_set": list(decision.prediction_set),
+                          "status": decision.status.value})
+        for checkpoint, limit, gate in (("midpoint", 20, midpoint_gate), ("end", 40, end_gate)):
+            checkpoints[checkpoint] = {}
+            for sid in bank["skill_names"]:
+                indexes = [i for i, q in enumerate(questions[:limit]) if q["skill_id"] == sid]
+                if len(indexes) != gate.k:
+                    raise ValueError("skill checkpoint size must match its calibration")
+                regime = "cold" if any(regimes[i] == "cold" for i in indexes) else "warm"
+                checkpoints[checkpoint][sid] = gate.checkpoint(
+                    [probabilities[i] for i in indexes], sid, regime=regime).to_dict()
+        case["conformal"] = {"status": "exploratory_only_not_fixed_bank_validated",
+                             "midpoint_calibrated_k": 5, "end_calibrated_k": 10,
+                             "items": items, "checkpoints": checkpoints,
+                             "scope_warning": "Historical coverage is not validated on this synthetic fixed bank; status names are not mastery evidence."}
+        _attach_assessment_scope(case, bank, taxonomy)
+    for before, after in zip(original["scenarios"], updated["scenarios"]):
+        for key in ("responses", "kt_pre_answer_probability", "kt_coverage", "observed", "selector_context"):
+            if before[key] != after[key]:
+                raise ValueError("diagnostics must not modify saved evidence or student feedback")
+    updated["diagnostic_scope"] = "private_synthetic_fixed40_end_to_end_not_student_or_llm_validation"
+    return updated
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--replay", type=Path,
                         help="replay saved feedback without loading or rerunning KT")
+    parser.add_argument("--diagnostics", action="store_true",
+                        help="attach historical conformal and bank-matched assessment graph to saved traces")
+    parser.add_argument("--assessment-only", action="store_true",
+                        help="replace old graph scope while preserving saved KT and conformal outputs")
     args = parser.parse_args()
+    if (args.diagnostics or args.assessment_only) and not args.replay:
+        parser.error("diagnostic options require --replay to preserve saved KT traces")
+    if args.diagnostics and args.assessment_only:
+        parser.error("choose --diagnostics or --assessment-only, not both")
     if args.out.exists():
         raise FileExistsError(f"Refusing to overwrite {args.out}")
     service = MCQSessionService.from_default(SessionStore(phase3_paths.SESSIONS))
     if args.replay:
         source = args.replay.read_bytes()
-        result = replay_feedback(json.loads(source), service.bank, service.taxonomy)
+        saved = json.loads(source)
+        result = (rescope_saved_diagnostics(saved, service.bank, service.taxonomy) if args.assessment_only
+                  else replay_feedback(saved, service.bank, service.taxonomy))
         result["replay_source_sha256"] = hashlib.sha256(source).hexdigest()
     else:
         from frozen_model import load_frozen_model
         kt = load_frozen_model(device="cpu")
         result = run(service.bank, service.taxonomy, kt)
+    if args.diagnostics:
+        import paths as phase2_paths
+        from conformal_gate import ConformalGate
+        result = attach_saved_diagnostics(
+            result, service.bank, ConformalGate.load(),
+            ConformalGate.load(calibration_path=phase2_paths.HISTORICAL_K5_CALIBRATION,
+                               coverage_path=phase2_paths.HISTORICAL_K5_COVERAGE),
+            service.taxonomy)
+        files = {"end_calibration": phase2_paths.ACTIVE_CALIBRATION,
+                 "end_coverage": phase2_paths.ACTIVE_COVERAGE_REPORT,
+                 "midpoint_calibration": phase2_paths.HISTORICAL_K5_CALIBRATION,
+                 "midpoint_coverage": phase2_paths.HISTORICAL_K5_COVERAGE,
+                 "assessment_taxonomy": phase3_paths.ASSESSMENT_TAXONOMY}
+        result["diagnostic_provenance"] = {
+            name: {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            for name, path in files.items()}
+    if args.assessment_only:
+        path = phase3_paths.ASSESSMENT_TAXONOMY
+        result.setdefault("diagnostic_provenance", {})["assessment_taxonomy"] = {
+            "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("x", encoding="utf-8") as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)

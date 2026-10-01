@@ -13,7 +13,7 @@ SUMMARY_FIELDS = ("scenario", "seed", "bank_sha256", "checkpoint", "skill_id",
                   "observed_correct", "n_items", "observed_accuracy",
                   "mean_true_probability", "mean_kt_probability", "mean_absolute_gap",
                   "conformal_status", "conformal_lower", "conformal_upper",
-                  "conformal_calibration_status", "graph_prerequisites")
+                  "conformal_calibration_status", "assessment_practice_candidates")
 SUBTOPIC_FIELDS = ("scenario", "seed", "bank_sha256", "checkpoint", "skill_id",
                    "skill_name", "subtopic_id", "subtopic_name", "observed_correct",
                    "n_items")
@@ -34,6 +34,8 @@ def compile_report(scenarios: list[dict]) -> dict:
                                                     s["scenario"]["seed"])):
         if scenario.get("schema") != "phase3_fixed_scenario_v1":
             raise ValueError("unsupported scenario result schema")
+        if scenario["graph"].get("status") != "not_requested" and scenario["graph"].get("scope") != "approved_bank_topics_subtopics_only":
+            raise ValueError("scenario reports require the assessment-only graph scope")
         rows = scenario["responses"]
         if len(rows) != 40 or [r["position"] for r in rows] != list(range(1, 41)):
             raise ValueError("scenario must contain 40 fixed-order responses")
@@ -88,7 +90,8 @@ def compile_report(scenarios: list[dict]) -> dict:
                 probabilities = [rows[i]["true_probability"] for i in positions]
                 predicted = [kt[i] for i in positions] if kt is not None else None
                 interval = conformal.get("checkpoints", {}).get(checkpoint, {}).get(sid, {})
-                graph = scenario["graph"].get("prerequisites", {}).get(sid)
+                graph = scenario["graph"].get("checkpoints", {}).get(checkpoint, {}).get(
+                    "recommendations", {}).get(sid)
                 total = skill["total"]
                 summary_rows.append({
                     "scenario": name, "seed": seed, "bank_sha256": fingerprint,
@@ -106,7 +109,7 @@ def compile_report(scenarios: list[dict]) -> dict:
                     "conformal_calibration_status": (
                         conformal.get("midpoint_status") if checkpoint == "midpoint" else
                         conformal.get("end_status")),
-                    "graph_prerequisites": graph,
+                    "assessment_practice_candidates": graph,
                 })
     return {
         "schema": "phase3_scenario_report_v1", "bank_sha256": scenarios[0]["bank_sha256"],
@@ -135,10 +138,10 @@ def write_report(report: dict, out_dir: Path) -> None:
             writer.writeheader()
             for row in rows:
                 values = {field: row[field] for field in fields}
-                if "graph_prerequisites" in values:
-                    values["graph_prerequisites"] = (
-                        json.dumps(values["graph_prerequisites"], ensure_ascii=False)
-                        if values["graph_prerequisites"] is not None else "")
+                if "assessment_practice_candidates" in values:
+                    values["assessment_practice_candidates"] = (
+                        json.dumps(values["assessment_practice_candidates"], ensure_ascii=False)
+                        if values["assessment_practice_candidates"] is not None else "")
                 writer.writerow(values)
 
 
