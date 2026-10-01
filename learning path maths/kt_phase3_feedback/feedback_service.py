@@ -118,6 +118,7 @@ def checkpoint_result(bank: dict, responses: list[dict],
 
 _MIDPOINT_QUESTIONS = 20
 _END_QUESTIONS = 40
+_SKILLS_PER_ASSESSMENT = 4
 _ALLOWED_STYLES = {"plain", "warm"}
 
 
@@ -139,7 +140,7 @@ def compose_student_message(observed_feed: dict, style_selector=None) -> dict:
             bounded = True
     return {
         "message": _message_text(
-            checkpoint, style, context["observed_performance"]),
+            checkpoint, style, context["observed_performance"], skills),
         "message_source": "bounded_style" if bounded else "deterministic",
     }
 
@@ -180,6 +181,19 @@ def _validated_skills(observed_feed: dict) -> tuple[str, list[dict]]:
         })
     if not skills:
         raise ValueError("observed_feed student skills must be nonempty")
+    if (len(skills) != _SKILLS_PER_ASSESSMENT
+            or len({s["skill_id"] for s in skills}) != len(skills)):
+        raise ValueError(
+            "observed_feed student skills must list exactly "
+            f"{_SKILLS_PER_ASSESSMENT} distinct skills")
+    answered = (_MIDPOINT_QUESTIONS if checkpoint == "midpoint"
+                else _END_QUESTIONS)
+    expected_out_of = answered // _SKILLS_PER_ASSESSMENT
+    for index, skill in enumerate(skills):
+        if skill["total"] != expected_out_of:
+            raise ValueError(
+                f"student skills[{index}] out_of must be "
+                f"{expected_out_of} at {checkpoint}")
     return checkpoint, skills
 
 
@@ -220,27 +234,58 @@ def _unique_min_skill(skills: list[dict]) -> dict | None:
     return None
 
 
-def _message_text(checkpoint: str, style: str, performance: dict) -> str:
+def _name_list(skills: list[dict]) -> str:
+    names = [s["display_name"] for s in skills]
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _message_text(checkpoint: str, style: str, performance: dict,
+                  skills: list[dict]) -> str:
     warm = style == "warm"
     if checkpoint == "midpoint":
         first = ("Nice work completing 20 questions." if warm
                  else "You have completed 20 questions.")
         return (f"{first} You are halfway through the assessment. "
-                "Continue when you are ready.")
+                "Take a moment if you need one, then continue when you "
+                "are ready.")
     first = ("Nice work completing all 40 questions." if warm
              else "You have completed all 40 questions.")
+    if all(s["correct"] == s["total"] for s in skills):
+        return (f"{first} You answered every question correctly on this "
+                "assessment. Keep building on this with further "
+                "practice.")
+    if all(s["correct"] == 0 for s in skills):
+        return (f"{first} None of the answers on this assessment were "
+                "correct. Start with a short worked example in one of "
+                "the topics below, then try a similar question. This "
+                "result is a starting point, not a verdict on what you "
+                "can learn.")
+    if len({s["correct"] for s in skills}) == 1:
+        return (f"{first} Your observed scores were equal across the "
+                "topics. Choose one topic below to practice next, then "
+                "try a short set of questions.")
     strongest = performance["strongest_skill"]
     if strongest:
         second = (f"On {strongest['display_name']}, you answered "
                   f"{strongest['correct']} of {strongest['total']} "
                   "questions correctly.")
     else:
-        second = "Your results by topic are shown below."
+        best = max(s["correct"] for s in skills)
+        tied = [s for s in skills if s["correct"] == best]
+        second = (f"Your highest observed scores were on "
+                  f"{_name_list(tied)} ({best} of {tied[0]['total']} "
+                  "correct in each).")
     growth = performance["growth_skill"]
     if growth:
         third = (f"For your next step, practice more questions on "
                  f"{growth['display_name']} ({growth['correct']} of "
                  f"{growth['total']} correct).")
     else:
-        third = "Keep practicing the topics shown below."
+        low = min(s["correct"] for s in skills)
+        tied = [s for s in skills if s["correct"] == low]
+        third = (f"For your next step, choose one of {_name_list(tied)} "
+                 f"to practice ({low} of {tied[0]['total']} correct in "
+                 "each).")
     return f"{first} {second} {third}"

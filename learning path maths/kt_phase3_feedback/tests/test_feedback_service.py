@@ -83,7 +83,8 @@ class ComposeStudentMessageTests(unittest.TestCase):
         self.assertEqual(
             result["message"],
             "You have completed 20 questions. You are halfway through "
-            "the assessment. Continue when you are ready.")
+            "the assessment. Take a moment if you need one, then "
+            "continue when you are ready.")
         self.assertEqual(result["message_source"], "deterministic")
         for term in ("fast", "slow", "speed", "tired", "fatigue"):
             self.assertNotIn(term, result["message"].lower())
@@ -105,7 +106,8 @@ class ComposeStudentMessageTests(unittest.TestCase):
         self.assertEqual(
             result["message"],
             "Nice work completing 20 questions. You are halfway through "
-            "the assessment. Continue when you are ready.")
+            "the assessment. Take a moment if you need one, then "
+            "continue when you are ready.")
         self.assertEqual(result["message_source"], "bounded_style")
 
     def test_end_unique_strength_and_growth(self):
@@ -137,8 +139,9 @@ class ComposeStudentMessageTests(unittest.TestCase):
             make_feed("end", [10, 10, 10, 10]), selector)
         self.assertEqual(
             result["message"],
-            "You have completed all 40 questions. Your results by topic "
-            "are shown below. Keep practicing the topics shown below.")
+            "You have completed all 40 questions. You answered every "
+            "question correctly on this assessment. Keep building on "
+            "this with further practice.")
         performance = selector.contexts[0]["observed_performance"]
         self.assertIsNone(performance["strongest_skill"])
         self.assertIsNone(performance["growth_skill"])
@@ -151,8 +154,11 @@ class ComposeStudentMessageTests(unittest.TestCase):
         result = compose_student_message(make_feed("end", [0, 0, 0, 0]))
         self.assertEqual(
             result["message"],
-            "You have completed all 40 questions. Your results by topic "
-            "are shown below. Keep practicing the topics shown below.")
+            "You have completed all 40 questions. None of the answers on "
+            "this assessment were correct. Start with a short worked "
+            "example in one of the topics below, then try a similar "
+            "question. This result is a starting point, not a verdict "
+            "on what you can learn.")
 
     def test_end_tied_counts_have_no_comparative_skill(self):
         selector = RecordingSelector({"style": "plain"})
@@ -163,8 +169,64 @@ class ComposeStudentMessageTests(unittest.TestCase):
         self.assertIsNone(performance["growth_skill"])
         self.assertEqual(
             result["message"],
-            "You have completed all 40 questions. Your results by topic "
-            "are shown below. Keep practicing the topics shown below.")
+            "You have completed all 40 questions. Your highest observed "
+            "scores were on Skill sA and Skill sB (7 of 10 correct in "
+            "each). For your next step, choose one of Skill sC and "
+            "Skill sD to practice (5 of 10 correct in each).")
+
+    def test_end_score_pattern_messages(self):
+        cases = [
+            ([10, 10, 10, 10],
+             "You answered every question correctly on this assessment. "
+             "Keep building on this with further practice."),
+            ([0, 0, 0, 0],
+             "None of the answers on this assessment were correct. "
+             "Start with a short worked example in one of the topics "
+             "below, then try a similar question. This result is a "
+             "starting point, not a verdict on what you can learn."),
+            ([5, 5, 5, 5],
+             "Your observed scores were equal across the topics. "
+             "Choose one topic below to practice next, then try a "
+             "short set of questions."),
+            ([8, 8, 5, 2],
+             "Your highest observed scores were on Skill sA and "
+             "Skill sB (8 of 10 correct in each). For your next step, "
+             "practice more questions on Skill sD (2 of 10 correct)."),
+            ([9, 5, 3, 3],
+             "On Skill sA, you answered 9 of 10 questions correctly. "
+             "For your next step, choose one of Skill sC and Skill sD "
+             "to practice (3 of 10 correct in each)."),
+        ]
+        for style, first in (("plain", "You have completed all 40 "
+                                     "questions."),
+                             ("warm", "Nice work completing all 40 "
+                                      "questions.")):
+            for counts, tail in cases:
+                with self.subTest(style=style, counts=counts):
+                    result = compose_student_message(
+                        make_feed("end", counts),
+                        RecordingSelector({"style": style}))
+                    self.assertEqual(result["message"],
+                                     f"{first} {tail}")
+
+    def test_fixed_contract_feed_is_refused(self):
+        duplicate = make_feed("end", [9, 5, 7, 6])
+        duplicate["student"]["skills"][1]["skill_id"] = "sA"
+        short = make_feed("end", [9, 5, 7, 6])
+        short["student"]["skills"] = short["student"]["skills"][:3]
+        extra = make_feed("end", [9, 5, 7, 6])
+        extra["student"]["skills"].append(
+            {"skill_id": "sE", "skill_name": "Skill sE",
+             "correct": 4, "out_of": 10, "text": "4 of 10"})
+        wrong_end_out_of = make_feed("end", [9, 5, 7, 6])
+        wrong_end_out_of["student"]["skills"][1]["out_of"] = 5
+        wrong_midpoint_out_of = make_feed("midpoint", [3, 4, 2, 5])
+        wrong_midpoint_out_of["student"]["skills"][0]["out_of"] = 10
+        for bad in (duplicate, short, extra, wrong_end_out_of,
+                    wrong_midpoint_out_of):
+            with self.subTest(bad=bad["student"]["skills"]):
+                with self.assertRaises(ValueError):
+                    compose_student_message(bad)
 
     def test_invalid_selector_outputs_fall_back_to_plain(self):
         feed = make_feed("end", [9, 5, 7, 6])

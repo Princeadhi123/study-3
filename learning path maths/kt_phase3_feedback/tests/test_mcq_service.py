@@ -53,6 +53,47 @@ class MCQSessionServiceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 service.submit_response(sid, responses(bank)[0])
 
+    def test_submit_half_rejects_malformed_batch_without_writes(self):
+        bank = make_bank()
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(bank, SessionStore(Path(tmp)))
+            sid = service.start_session()["session_id"]
+            pristine = service.private_record(sid)
+            rows = responses(bank, count=20)
+            rows[19]["selected_index"] = len(bank["questions"][19]["options"])
+            with self.assertRaises(ValueError):
+                service.submit_half(sid, 1, rows)
+            self.assertEqual(pristine, service.private_record(sid))
+            rows = responses(bank, count=20)
+            rows[10]["question_id"] = rows[0]["question_id"]
+            with self.assertRaises(ValueError):
+                service.submit_half(sid, 1, rows)
+            self.assertEqual(pristine, service.private_record(sid))
+            mid = service.submit_half(sid, 1, responses(bank, count=20))
+            self.assertEqual(mid["checkpoint"], "midpoint")
+            midpoint = service.private_record(sid)
+            rows = responses(bank, count=40)[20:]
+            rows[-1]["selected_index"] = "0"
+            with self.assertRaises(ValueError):
+                service.submit_half(sid, 2, rows)
+            self.assertEqual(midpoint, service.private_record(sid))
+            end = service.submit_half(sid, 2, responses(bank, count=40)[20:])
+            self.assertEqual(end["checkpoint"], "end")
+
+    def test_submit_half_requires_strict_integer_half(self):
+        bank = make_bank()
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MCQSessionService(bank, SessionStore(Path(tmp)))
+            sid = service.start_session()["session_id"]
+            pristine = service.private_record(sid)
+            for bad in (True, False, 1.0, "1"):
+                with self.subTest(half=bad):
+                    with self.assertRaises(ValueError):
+                        service.submit_half(
+                            sid, bad, responses(bank, count=20))
+                    self.assertEqual(pristine,
+                                     service.private_record(sid))
+
     def test_submit_response_is_ordered_and_private(self):
         bank = make_bank()
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,15 +120,16 @@ class MCQSessionServiceTests(unittest.TestCase):
             self.assertEqual(
                 mid["feed"]["student"]["message"],
                 "You have completed 20 questions. You are halfway "
-                "through the assessment. Continue when you are ready.")
+                "through the assessment. Take a moment if you need "
+                "one, then continue when you are ready.")
             self.assertEqual(mid["feed"]["student"]["message_source"],
                              "deterministic")
             end = service.submit_half(sid, 2, responses(bank, count=40)[20:])
             self.assertEqual(
                 end["feed"]["student"]["message"],
-                "You have completed all 40 questions. Your results by "
-                "topic are shown below. Keep practicing the topics "
-                "shown below.")
+                "You have completed all 40 questions. You answered "
+                "every question correctly on this assessment. Keep "
+                "building on this with further practice.")
             self.assertEqual(end["feed"]["student"]["message_source"],
                              "deterministic")
             blob = json.dumps(end["feed"]["student"])

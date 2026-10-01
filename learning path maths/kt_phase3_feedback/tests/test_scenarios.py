@@ -1,4 +1,5 @@
 """Fixed-instrument synthetic scenario and research-report regression checks."""
+import copy
 import json
 import tempfile
 import unittest
@@ -224,6 +225,62 @@ class ScenarioTests(unittest.TestCase):
                      "scenario": {**result["scenario"], "seed": 43}}
             with self.assertRaises(ValueError):
                 compile_report([result, other])
+
+
+class SavedEvaluationReplayTests(unittest.TestCase):
+    def fixture(self):
+        bank = make_bank()
+        taxonomy = make_taxonomy(bank)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_scenario(bank, {"profile": "all_correct"},
+                                  SessionStore(Path(tmp)), taxonomy=taxonomy)
+        case = {"name": "all_correct", "group": "deterministic", "seed": 42,
+                "responses": result["responses"],
+                "observed": {c: result["observed"][c]["student"] for c in ("midpoint", "end")},
+                "selector_context": {"midpoint": {}, "end": {}},
+                "kt_pre_answer_probability": [.5] * 40, "kt_coverage": {}}
+        case["observed"]["end"]["message"] = "previous feedback"
+        return bank, taxonomy, {"schema": "phase3_fixed40_comparison_v1",
+                                "bank_sha256": result["bank_sha256"], "scenarios": [case]}
+
+    def test_replay_preserves_saved_model_data_and_original(self):
+        from evaluate_scenarios import replay_feedback
+        bank, taxonomy, original = self.fixture()
+        before = copy.deepcopy(original)
+        with patch("evaluate_scenarios.trace_responses", side_effect=AssertionError("must not run KT")):
+            updated = replay_feedback(original, bank, taxonomy)
+        self.assertEqual(before, original)
+        case = updated["scenarios"][0]
+        self.assertEqual("previous feedback", case["observed_before"]["end"]["message"])
+        self.assertIn("You answered every question correctly", case["observed"]["end"]["message"])
+        self.assertEqual(before["scenarios"][0]["responses"], case["responses"])
+        self.assertEqual([.5] * 40, case["kt_pre_answer_probability"])
+        self.assertNotIn("total_correct", case["selector_context"]["midpoint"]["observed_performance"])
+        original["bank_sha256"] = "different"
+        with self.assertRaises(ValueError):
+            replay_feedback(original, bank, taxonomy)
+
+    def test_comparison_reports_duplicates_and_refuses_invalid_predictions(self):
+        from compare_scenarios import summarize
+        bank, taxonomy, original = self.fixture()
+        original["scenarios"] = [copy.deepcopy(original["scenarios"][0]) for _ in range(54)]
+        for i, case in enumerate(original["scenarios"]):
+            case["name"] = f"case_{i}"
+        for case, name in zip(original["scenarios"][-2:], ("wrong_option_1", "wrong_option_2")):
+            case.update(name=name, group="distractor")
+        summary, feedback, subtopics, skills, diagnostic = summarize(original, bank)
+        self.assertEqual((54, 108, 1), (len(summary), len(feedback),
+                                        diagnostic["unique_response_sequences"]))
+        self.assertEqual("case_0", summary[1]["duplicate_response_sequence_of"])
+        for invalid in (float("nan"), -0.1, 1.1, True):
+            broken = copy.deepcopy(original)
+            broken["scenarios"][0]["kt_pre_answer_probability"][0] = invalid
+            with self.subTest(probability=invalid), self.assertRaises(ValueError):
+                summarize(broken, bank)
+        broken = copy.deepcopy(original)
+        broken["scenarios"][0]["responses"][0]["selected_index"] = True
+        with self.assertRaises(ValueError):
+            summarize(broken, bank)
 
 
 class _RoutingGate:

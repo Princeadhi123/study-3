@@ -119,12 +119,18 @@ class MCQSessionService:
 
     def submit_half(self, session_id: str, half: int,
                     responses: list[dict]) -> dict:
+        if (not isinstance(half, int) or isinstance(half, bool)
+                or half not in (1, 2)):
+            raise ValueError("half submissions must arrive in order")
         session = self._load_current(session_id)
         expected_start = 0 if half == 1 else HALF_LENGTH
-        if half not in (1, 2) or len(session["responses"]) != expected_start:
+        if len(session["responses"]) != expected_start:
             raise ValueError("half submissions must arrive in order")
         if not isinstance(responses, list) or len(responses) != HALF_LENGTH:
             raise ValueError("a half submission must contain exactly 20 rows")
+        for offset, row in enumerate(responses):
+            validate_submission(row, self.bank["questions"][expected_start + offset],
+                                expected_start + offset)
         result = None
         for row in responses:
             result = self.submit_response(session_id, row)

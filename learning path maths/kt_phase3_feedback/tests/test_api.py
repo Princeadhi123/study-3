@@ -110,8 +110,9 @@ class Phase3APITests(unittest.TestCase):
             "your answers on this assessment, not your overall mastery.")
         self.assertEqual(
             payload["feedback"]["message"],
-            "You have completed all 40 questions. Your results by topic "
-            "are shown below. Keep practicing the topics shown below.")
+            "You have completed all 40 questions. You answered every "
+            "question correctly on this assessment. Keep building on "
+            "this with further practice.")
         self.assertEqual(payload["feedback"]["message_source"],
                          "deterministic")
         self.assertEqual(40, sum(row["out_of"] for row in
