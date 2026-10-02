@@ -348,9 +348,9 @@ Batch prevalidation is not a database transaction or a guarantee against concurr
 
 Older packages:
 
-- `fixed40_comparison_20261001*`: observed/KT comparison and feedback revisions, without the full later diagnostic branch.
-- `full_pipeline_20261001*`: conformal plus the now-retired global-routing scope. Do not use its graph panel as the current design.
-- `report_fixed40_baselines_20260929/` and associated figures/feedback: earlier learning/fatigue baseline material, retained as historical context.
+- `fixed40_comparison_20261001*`: observed/KT comparison and feedback revisions, without the full later diagnostic branch. (Rendered output directories cleaned 2026-10-02; the source JSONs are retained.)
+- `full_pipeline_20261001*`: conformal plus the now-retired global-routing scope. Do not use its graph panel as the current design. (Rendered output directory cleaned 2026-10-02; the source JSON is retained.)
+- `report_fixed40_baselines_20260929/` and associated figures/feedback: earlier learning/fatigue baseline material, retained as historical context (the figures directory was cleaned 2026-10-02 and is regenerable from the retained report).
 
 All artifacts are private local outputs under ignored paths. A report can contain private derived evidence even when it omits raw answer keys. Review what is shared externally.
 
