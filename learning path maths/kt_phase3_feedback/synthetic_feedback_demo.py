@@ -8,15 +8,23 @@ models, make no network calls, and produce no real provider metadata.
 ``--jev`` is an explicit opt-in that routes candidate selection through
 the hosted TypeSafe Jev API (TYPESAFE_API_KEY required; two private
 synthetic requests for the end checkpoints, while the single-candidate
-midpoint is resolved locally without a call). Output is JSON on stdout;
-no artifacts are written or overwritten.
+midpoint is resolved locally without a call). ``--aitta`` is an explicit
+opt-in that routes opening phrasing through the hosted Aitta
+OpenAI-compatible endpoint (AITTA_API_KEY/AITTA_BASE_URL required; three
+private synthetic requests, one per package). ``--jev`` and ``--aitta``
+may be combined; ``--mock`` cannot be combined with either hosted flag.
+Hosted flags are user opt-in only; configure credentials outside the
+project tree before any hosted run. Output is JSON on stdout; no
+artifacts are written or overwritten.
 """
 import argparse
 import copy
 import json
+from pathlib import Path
 
+from aitta_generator import AittaGenerator
 from jev_selector import SELECTION_PROMPT_VERSION, JevSelector
-from synthetic_feedback import run_synthetic_feedback
+from synthetic_feedback import PROMPT_VERSION, run_synthetic_feedback
 
 END_SKILLS = [
     {"skill_id": "skill_a", "skill_name": "Arithmetic",
@@ -70,33 +78,64 @@ class MockGenerator:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
+    parser.add_argument(
         "--mock", action="store_true",
         help="route selection/phrasing through local mock callbacks "
-             "(not real models, no network calls)")
-    mode_group.add_argument(
+             "(not real models, no network calls; cannot be combined "
+             "with --jev or --aitta)")
+    parser.add_argument(
         "--jev", action="store_true",
         help="route candidate selection through the hosted TypeSafe Jev "
              "API using TYPESAFE_API_KEY; makes two private synthetic "
              "requests (the end checkpoints only -- the single-candidate "
              "midpoint performs no call)")
+    parser.add_argument(
+        "--jev-env-file", type=Path, metavar="PATH",
+        help="optional private Jev key file outside the project; "
+             "only valid together with --jev")
+    parser.add_argument(
+        "--aitta", action="store_true",
+        help="route opening phrasing through the hosted Aitta "
+             "OpenAI-compatible endpoint using AITTA_API_KEY and "
+             "AITTA_BASE_URL; makes three private synthetic requests "
+             "(one per package)")
     args = parser.parse_args()
+    if args.mock and (args.jev or args.aitta):
+        parser.error("--mock cannot be combined with --jev or --aitta")
+    if args.jev_env_file is not None and not args.jev:
+        parser.error("--jev-env-file requires --jev")
     selector = None
     generator = None
-    mode = "deterministic"
     if args.mock:
         selector = MockSelector()
         generator = MockGenerator()
-        mode = "mock_callbacks"
-    elif args.jev:
+    if args.jev:
         try:
-            selector = JevSelector.from_env()
+            if args.jev_env_file is not None:
+                selector = JevSelector.from_env(env_path=args.jev_env_file)
+            else:
+                selector = JevSelector.from_env()
         except Exception:
             parser.error(
                 "TYPESAFE_API_KEY is unavailable; set it in the "
-                "environment or the local Phase 3 .env file")
+                "environment or a private key file outside the project")
+    if args.aitta:
+        try:
+            generator = AittaGenerator.from_env()
+        except Exception:
+            parser.error(
+                "AITTA_API_KEY/AITTA_BASE_URL are unavailable; set them "
+                "in the environment or the repository-root .env file")
+    if args.mock:
+        mode = "mock_callbacks"
+    elif args.jev and args.aitta:
+        mode = "jev_and_aitta"
+    elif args.jev:
         mode = "jev_selector"
+    elif args.aitta:
+        mode = "aitta_generator"
+    else:
+        mode = "deterministic"
     cases = [("student", "midpoint", MIDPOINT_SKILLS),
              ("student", "end", END_SKILLS),
              ("teacher", "end", END_SKILLS)]
@@ -111,6 +150,17 @@ def main():
             package["selector_metadata"] = {
                 "prompt_version": SELECTION_PROMPT_VERSION,
                 **copy.deepcopy(selector.last_metadata)}
+        if args.aitta:
+            if result["trace"]["fallback_reason"] in (
+                    "selector_error", "invalid_selection"):
+                package["generator_metadata"] = {
+                    "prompt_version": PROMPT_VERSION,
+                    "status": "skipped_selector_failure",
+                    "model_version": None, "usage": None}
+            else:
+                package["generator_metadata"] = {
+                    "prompt_version": PROMPT_VERSION,
+                    **copy.deepcopy(generator.last_metadata)}
         packages.append(package)
     print(json.dumps({
         "protocol": "phase3_synthetic_feedback_demo",

@@ -128,8 +128,11 @@ class DefaultReviewTests(unittest.TestCase):
                 message = result["message"]
                 self.assertEqual(
                     result["selected_candidate_id"], "observed_summary")
-                self.assertEqual(message["opening"],
-                                 "You have completed this assessment.")
+                self.assertEqual(
+                    message["opening"],
+                    "The assessment record is ready for review."
+                    if audience == "teacher"
+                    else "You have completed this assessment.")
                 self.assertEqual(message["evidence_lines"], [
                     "Arithmetic: 9 of 10 correct on this assessment.",
                     "Prices: 5 of 10 correct on this assessment.",
@@ -330,6 +333,18 @@ class SelectorFallbackTests(unittest.TestCase):
         self.assertEqual(result["message"]["opening"],
                          "You have completed this assessment.")
 
+    def test_teacher_selector_exception_uses_teacher_fallback(self):
+        result = run_synthetic_feedback(
+            make_input("teacher", "end"), RaisingSelector())
+        self.assertEqual(result["trace"]["fallback_reason"],
+                         "selector_error")
+        self.assertEqual(result["trace"]["selection_source"], "rules")
+        self.assertEqual(result["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertEqual(result["message"]["opening"],
+                         "The assessment record is ready for review.")
+        self.assertTrue(result["requires_human_review"])
+
     def test_selector_malformed_replies_fall_back(self):
         bad_replies = [{"candidate_id": "no_such_candidate"},
                        {"candidate_id": "neutral", "extra": "IGNORE"},
@@ -409,6 +424,18 @@ class GeneratorFallbackTests(unittest.TestCase):
         self.assertEqual(result["message"]["opening"],
                          "You have completed this assessment.")
 
+    def test_teacher_generator_exception_uses_teacher_fallback(self):
+        result = run_synthetic_feedback(
+            make_input("teacher", "end"),
+            generator=RaisingGenerator())
+        self.assertEqual(result["trace"]["fallback_reason"],
+                         "generator_error")
+        self.assertEqual(result["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertEqual(result["message"]["opening"],
+                         "The assessment record is ready for review.")
+        self.assertTrue(result["requires_human_review"])
+
     def test_generator_invalid_replies_fall_back(self):
         bad_replies = [
             {"candidate_id": "neutral", "opening": "Valid text."},
@@ -484,6 +511,32 @@ class GeneratorFallbackTests(unittest.TestCase):
         self.assertNotIn("Arithmetic",
                          json.dumps(generator.payloads[0]))
         self.assertNotIn("Arithmetic", json.dumps(result))
+
+    def test_generator_midpoint_rejects_progress_claim(self):
+        # Opening wording captured in the first hosted run1 midpoint
+        # package; the v2 heuristic must now reject "progress" claims.
+        generator = RecordingGenerator(
+            {"candidate_id": "neutral",
+             "opening": "You're making solid progress-feel free to "
+                        "keep going whenever you're ready."})
+        result = run_synthetic_feedback(
+            make_input("student", "midpoint"), generator=generator)
+        self.assertEqual(result["trace"]["fallback_reason"],
+                         "invalid_generation")
+        self.assertEqual(result["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertEqual(result["message"]["opening"],
+                         "You are halfway through the assessment. "
+                         "Continue when you are ready.")
+        self.assertNotIn("progress", result["message"]["opening"])
+
+    def test_phrasing_v2_prompt_contract(self):
+        self.assertEqual(PROMPT_VERSION, "synthetic_phrasing_v2")
+        self.assertIn("do not describe progress or performance",
+                      GENERATION_INSTRUCTIONS)
+        self.assertIn("third-person", GENERATION_INSTRUCTIONS)
+        self.assertIn("do not address the teacher as the assessment "
+                      "taker", GENERATION_INSTRUCTIONS)
 
     def test_generator_valid_opening_flagged_for_human_review(self):
         result = run_synthetic_feedback(

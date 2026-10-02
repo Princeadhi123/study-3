@@ -79,8 +79,11 @@ code; those exist only in the private research branch and researcher routes.
 | `api.py` | localhost-only JSON API for sessions and researcher diagnostics |
 | `demo_cli.py` | scripted local end-to-end run |
 | `synthetic_feedback.py` | provider-independent synthetic feedback review seam (input validation, candidates, fallback) |
-| `jev_selector.py` | hosted TypeSafe Jev selector adapter for the synthetic review path; mock-tested, not yet hosted-verified |
-| `synthetic_feedback_demo.py` | prints local review packages; optional `--mock` callbacks (not real models) or `--jev` hosted selection |
+| `jev_selector.py` | hosted TypeSafe Jev selector adapter for the synthetic review path; mock-tested and smoke-verified on synthetic fixtures (run1) |
+| `aitta_generator.py` | hosted Aitta OpenAI-compatible phrasing adapter; v1 and v2 smoke-verified on synthetic fixtures; full replay reuses v2 captures |
+| `synthetic_feedback_demo.py` | prints local review packages; optional `--mock` callbacks (not real models), `--jev` hosted selection, `--aitta` hosted phrasing, or `--jev --aitta` combined |
+| `replay_provider_scenarios.py` | replays the frozen 54-scenario snapshot through the Jev/Aitta seam (prepare mode is provider-free) |
+| `render_provider_replay.py` | renders a captured replay report to a local HTML review page (no network, exclusive output) |
 | `scenario_runner.py` | fixed-bank synthetic scenario generator for researcher diagnostics |
 | `scenario_report.py` | compiles scenario runs into a deterministic report (`phase3_scenario_report_v1`) |
 | `visualize_scenarios.py` | optional PNG figures from a scenario report (requires matplotlib) |
@@ -487,18 +490,79 @@ neither plot compares ground truth directly to validated mastery.
 `synthetic_feedback.py` is a standalone, provider-independent seam for a
 hosted candidate selector plus a hosted phrasing generator. It is
 standard library only, makes no network or credential access, and
-persists nothing. `jev_selector.py` adds the first real adapter on that
-seam: a TypeSafe Jev HTTP selector. It is implemented and mock-tested
-against a fake opener but **not yet hosted-verified** — hosted
-verification awaits key setup and explicit user approval, and the Aitta
-phrasing generator remains unimplemented.
+persists nothing. `jev_selector.py` and `aitta_generator.py` add the two real adapters
+on that seam: a TypeSafe Jev HTTP selector and an Aitta
+OpenAI-compatible phrasing generator. Both are implemented and
+mock-tested against fake openers, and were technically verified once in
+a hosted synthetic smoke run (run1, 2026-10-02: 2 Jev + 3 Aitta
+requests on the fixed synthetic fixtures, no real student data; see
+`artifacts/hosted_combined_20261002_run1_review.md` — local, not
+committed). That run used the `synthetic_phrasing_v1` prompt; the
+revised `synthetic_phrasing_v2` instructions (no progress claims,
+third-person teacher wording) were then smoke-verified in a second
+hosted run (2 Jev + 3 Aitta requests, all successful). No
+improved-output claim is made. The deterministic teacher-end fallback
+was also corrected to third-person wording ("The assessment record is
+ready for review.").
+
+A frozen 54-scenario replay (`replay_provider_scenarios.py`) covered
+all saved scenario labels — 162 packages (student midpoint, student
+end, teacher end each) — with 98 fresh Jev calls; ten end selections
+reused identical Jev requests, and all Aitta responses reused the three
+already-captured v2 contexts, so the replay made **zero** additional
+Aitta calls. Reuse is not independent repeated calls: the coverage is
+54 labels / 162 packages, not 270 independent provider runs. All 108
+end selections chose `observed_summary`, matching the rules baseline
+every time — agreement, not demonstrated advantage. Frozen capture and
+review: `artifacts/provider_replay_20261002/` (`inputs.json`,
+`baselines.json`, `report.json`, `provider_captures/`, `review.md`).
 
 ```bash
 python synthetic_feedback_demo.py          # deterministic rules baseline
 python synthetic_feedback_demo.py --mock   # local mock callbacks, not real models
 python synthetic_feedback_demo.py --jev    # hosted Jev selection (2 calls; needs TYPESAFE_API_KEY)
-python -m unittest tests.test_synthetic_feedback tests.test_jev_selector -v
+python synthetic_feedback_demo.py --aitta  # hosted Aitta phrasing (3 calls; needs AITTA_API_KEY + AITTA_BASE_URL)
+python synthetic_feedback_demo.py --jev --aitta   # combined (up to 5 calls)
+python -m unittest tests.test_synthetic_feedback tests.test_jev_selector tests.test_aitta_generator -v
 ```
+
+Frozen-scenario replay and local render (Windows paths):
+
+```text
+python replay_provider_scenarios.py --mode prepare --out-dir artifacts\NEW_RUN
+python render_provider_replay.py artifacts\provider_replay_20261002\report.json --out artifacts\provider_replay_20261002\review.html
+python replay_provider_scenarios.py --mode hosted --max-new-calls 100 --jev-env-file C:\private\typesafe.env --seed-demo artifacts\hosted_combined_20261002_v2.json --out-dir artifacts\NEW_RUN
+```
+
+`--mode prepare` is provider-free: it writes only the sanitized input
+snapshot and deterministic baselines. `--mode hosted` requires an
+external Jev key file and an explicit `--max-new-calls` budget, reuses
+identical captured requests (including failures), and never retries.
+All output paths are created exclusively — existing captures are never
+overwritten. `render_provider_replay.py` is offline-only: the HTML
+contains no JavaScript or external assets and escapes all dynamic text.
+
+Hosted flags are user opt-in only. Keep credentials out of the
+repository and out of IDE-managed files: a private key file outside the
+project, created or edited with an external editor (for example
+Notepad), reduces the risk of editor metadata recording it. The demo
+never reads a key file itself — it only forwards the path to the
+adapter. `JevSelector.from_env()` reads `TYPESAFE_API_KEY` from the
+environment first, else the Phase 3-local `.env`, or a caller-supplied
+private key file outside the project:
+
+```text
+python synthetic_feedback_demo.py --jev --jev-env-file C:\private\typesafe.env
+```
+
+`AittaGenerator.from_env()` reads `AITTA_API_KEY`, `AITTA_BASE_URL`, and
+optional `AITTA_MODEL` from the environment first, then the
+repository-root `.env` for any value still unset (it never reads the
+Phase 3-local `.env`; unrelated entries in the root file are ignored
+without parsing or logging their values). Set-but-invalid values —
+including an explicitly empty `AITTA_MODEL` — fail rather than silently
+falling back; the model defaults to `openai/gpt-oss-120b` only when
+`AITTA_MODEL` is entirely absent.
 
 The demo prints private review packages (schema
 `phase3_synthetic_feedback_review_v1`) for student midpoint, student
@@ -522,19 +586,40 @@ the fixtures are not measured results, and every draft keeps
   or raw response text. Midpoint resolves locally: a single-candidate
   choice makes no network call. The adapter stores the key privately
   and reads it only via `JevSelector.from_env()` (environment variable
-  first, else the Phase 3-local `.env` — never the repo-root file);
+  first, else the Phase 3-local `.env`, or an explicit `--jev-env-file`
+  path — never the repo-root file by default);
+- `AittaGenerator` revalidates the exact generation payload before any
+  request, but wires a *narrower* context than the local payload: only
+  `{audience, checkpoint, selected_candidate: {candidate_id, strategy,
+  review_status}}` reaches the model — no evidence, counts, skill
+  names, skill IDs, or `permitted_evidence`. The model writes a neutral
+  opening; all facts are rendered by application code. The request uses
+  the fixed `synthetic_phrasing_v2` instructions verbatim with
+  `max_tokens=1024`, `reasoning_effort="low"`, and JSON-object response
+  format — no temperature, retries, or extra prompts. Responses must be
+  a single `finish_reason="stop"` choice whose message content is exact
+  `{candidate_id, opening}` JSON; the opening passes the same shape and
+  heuristic checks, the response `model` and token `usage` are
+  validated (consistent prompt + completion = total), and every failure
+  sanitizes to `AittaGenerationError('Aitta request failed')` before
+  the runner sees it (recorded as `generator_error`, distinct from a
+  returned-but-invalid `invalid_generation`);
 - selector exceptions or malformed/unknown selections fall back to the
   rules baseline and skip the generator; generator exceptions or
   invalid openings fall back to fixed wording for the same candidate;
   no retries;
 - injected callbacks are arbitrary synchronous callables and cannot be
   forcibly timed out inside the module — provider adapters must enforce
-  their own transport timeouts (`JevSelector` forwards a configurable
-  `timeout`, default 30 s);
+  their own transport timeouts (`JevSelector` and `AittaGenerator` both
+  forward a configurable `timeout`, default 30 s, with zero retries);
 - the review trace's `provider_metadata` holds only placeholders
-  (`model_version`/`cost` stay None); under `--jev` the real Jev model,
-  token usage, and `jev_selection_v1` prompt version are recorded in
-  each package's adjacent `selector_metadata`;
+  (`model_version`/`cost` stay None); under `--jev`/`--aitta` the real
+  model strings, token usage, and prompt versions are recorded in each
+  package's adjacent `selector_metadata`/`generator_metadata` — and
+  when a selector failure makes the runner skip the generator, that
+  package's `generator_metadata` reports
+  `status: "skipped_selector_failure"` with null model/usage instead
+  of stale metadata from an earlier package;
 - generated prose passes shape and heuristic checks only — not a
   semantic-grounding guarantee — and no draft claims to be approved for
   learners.

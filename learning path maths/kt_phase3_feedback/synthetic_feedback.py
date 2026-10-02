@@ -1,9 +1,10 @@
 """Provider-independent synthetic feedback review foundation (Phase 3).
 
-This module is a local, review-only foundation for a future Jev-style
-candidate selector plus a hosted phrasing generator. It is not an Aitta
-or Jev adapter: provider identity, endpoints, and APIs are pending
-provider documentation, so only an injection seam exists here.
+This module is a local, review-only foundation for a Jev-style
+candidate selector plus a hosted phrasing generator. It is not itself
+a provider adapter: the Jev selector and Aitta generator adapters
+(`jev_selector.py`, `aitta_generator.py`) plug into the injection seam
+defined here.
 
 Boundaries:
 
@@ -41,18 +42,22 @@ REVIEW_SCHEMA = "phase3_synthetic_feedback_review_v1"
 
 CANDIDATE_VERSION = "synthetic_candidates_v1"
 POLICY_VERSION = "synthetic_policy_v1"
-PROMPT_VERSION = "synthetic_phrasing_v1"
+PROMPT_VERSION = "synthetic_phrasing_v2"
 
 GENERATION_INSTRUCTIONS = (
     "Write one short opening for a private synthetic feedback review. "
     "Return only a JSON object with candidate_id matching the supplied "
     "candidate and opening. Use no digits, numerical claims, topic names, "
-    "diagnoses, mastery claims, prerequisite advice, claims of learning or "
-    "fatigue, or advice about answers. For midpoint, offer only neutral "
-    "encouragement to continue when ready. For end, briefly acknowledge "
-    "completion of this assessment. Observed counts, if permitted by the "
-    "selected candidate, are rendered separately by the application. Do "
-    "not claim this draft is approved for learners."
+    "diagnoses, mastery claims, prerequisite advice, claims of learning, "
+    "progress, improvement or fatigue, or advice about answers. For "
+    "student midpoint, offer only neutral encouragement to continue when "
+    "ready; do not describe progress or performance. For student end, "
+    "briefly acknowledge completion of this assessment. For teacher end, "
+    "describe the assessment record in third-person language; do not "
+    "address the teacher as the assessment taker or thank them for "
+    "completing it. Observed counts, if permitted by the selected "
+    "candidate, are rendered separately by the application. Do not claim "
+    "this draft is approved for learners."
 )
 
 AUDIENCES = ("student", "teacher")
@@ -69,6 +74,7 @@ OBSERVED_CANDIDATE_ID = "observed_summary"
 MIDPOINT_OPENING = ("You are halfway through the assessment. "
                     "Continue when you are ready.")
 END_OPENING = "You have completed this assessment."
+TEACHER_END_OPENING = "The assessment record is ready for review."
 SCOPE_SUFFIX = ("These observations describe this assessment, "
                 "not overall mastery.")
 
@@ -82,8 +88,8 @@ MAX_SKILL_NAME_CHARS = 60
 _SKILL_ID_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 _SKILL_NAME_CHARS = frozenset(string.ascii_letters + " -")
 _BANNED_TERMS = ("master", "misconception", "diagnos", "fatigue", "tired",
-                 "prerequis", "learned", "improv", "percent", "score",
-                 "correct", "incorrect")
+                 "prerequis", "learned", "improv", "progress", "percent",
+                 "score", "correct", "incorrect")
 
 _INPUT_KEYS = frozenset(
     ("schema", "data_origin", "audience", "checkpoint", "skills"))
@@ -156,7 +162,11 @@ def run_synthetic_feedback(evidence: dict, selector=None,
                 selected = chosen
                 selection_source = "injected_selector"
 
-    opening = MIDPOINT_OPENING if checkpoint == "midpoint" else END_OPENING
+    default_opening = (
+        MIDPOINT_OPENING if checkpoint == "midpoint"
+        else TEACHER_END_OPENING if audience == "teacher"
+        else END_OPENING)
+    opening = default_opening
     phrasing_source = "deterministic"
     validation = VALIDATION_DETERMINISTIC
     if generator is not None and not selector_failed:
@@ -183,9 +193,7 @@ def run_synthetic_feedback(evidence: dict, selector=None,
                 validation = VALIDATION_GENERATED
 
     template_baseline = _render(
-        candidates[0],
-        MIDPOINT_OPENING if checkpoint == "midpoint" else END_OPENING,
-        checkpoint, skills)
+        candidates[0], default_opening, checkpoint, skills)
     message = _render(selected, opening, checkpoint, skills)
     trace = {
         "candidate_version": CANDIDATE_VERSION,
