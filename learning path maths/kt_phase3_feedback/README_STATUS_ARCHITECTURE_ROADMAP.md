@@ -1,6 +1,6 @@
 # Phase 3: status, architecture, known limitations, and development roadmap
 
-**Snapshot date:** 2026-10-01  
+**Snapshot date:** 2026-10-02 (status and roadmap sections updated for the local synthetic feedback foundation and mock-tested Jev selector adapter; the 2026-10-01 research findings and test counts below are unchanged historical snapshots)
 **Scope:** the approved, fixed-order 40-question mathematics assessment  
 **Purpose:** a standalone technical and research handoff for collaborators, educational review, and discussion with another assistant such as Gemini.
 
@@ -16,7 +16,7 @@ The most recent complete Phase 3 test run passed **75 tests with zero failures, 
 
 The current local flow is ready for expert review and a controlled synthetic-data Jev/LLM experiment. It is not a production deployment, a real student pilot, or a calibrated mastery assessment.
 
-**TypeSafe AI's Jev and generative LLM feedback are not integrated yet. No Jev or LLM calls have been made in the documented scenario evaluations.** Current student messages and the private teacher-end summary are deterministic templates.
+**The Jev selector is implemented for the synthetic review path only; generative phrasing feedback is not integrated. No Jev, Aitta, or LLM calls have been made in the documented scenario evaluations or the new local synthetic-feedback demo.** Current student messages and the private teacher-end summary are deterministic templates. A provider-independent synthetic review foundation (`synthetic_feedback.py`, result schema `phase3_synthetic_feedback_review_v1`) now exists locally: it validates caller-attested synthetic inputs, builds fresh allowlisted payloads, applies a rules-baseline candidate selection and deterministic template rendering, and exposes optional selector/generator injection with deterministic fallback. `jev_selector.py` adds a real TypeSafe Jev HTTP selector adapter on that seam (`POST /v1/systemone`, bearer auth, no redirects, 1 MiB cap, sanitized failures). It is implemented and covered by mocked-opener tests but is **not hosted-verified**: no real call has been made; hosted verification awaits key setup and explicit user approval. The phrasing-generator side remains unimplemented.
 
 ## 2. Project boundaries and source of truth
 
@@ -55,8 +55,10 @@ Changing the bank is a versioned assessment change, not a silent replacement. Se
 | Assessment-only feedback graph and observed-error practice candidates | Implemented privately; pending educator review |
 | Global prerequisite routing in active Phase 3 feedback | Removed from current scope |
 | Private deterministic teacher-end report | Implemented in evaluation artifacts, not a deployed teacher portal |
-| TypeSafe Jev selector | Proposed, not implemented |
-| LLM-generated student/teacher messages | Proposed, not implemented |
+| Synthetic feedback review foundation (`synthetic_feedback.py`) | Implemented locally; review-only drafts, rules baseline plus injected-callback seam, no provider calls |
+| TypeSafe Jev selector adapter (`jev_selector.py`) | Implemented, mock-tested locally; hosted verification pending key setup and user approval |
+| Aitta / LLM phrasing generator adapter | Proposed, not implemented; deterministic fallback seam exists |
+| TypeSafe agent skill (typesafe-ai/skills) | Read by reviewer for API shape; not installed into agent tooling |
 | Expert-labelled feedback-selection benchmark | Not yet created |
 | Independent educational review by Jo | Planned, not completed |
 | Real student pilot / learning-effect evaluation | Not run |
@@ -248,7 +250,7 @@ Most recent full command:
 python -m unittest discover -s tests -v
 ```
 
-Result: **75 tests passed, zero failures/errors/skips**. The optional real-bank/frozen-KT checks ran in the local environment for this run. Some tests require private local inputs, so another environment may skip them rather than reproduce the same count of executed checks.
+Result: **75 tests passed, zero failures/errors/skips**. The optional real-bank/frozen-KT checks ran in the local environment for this run. Some tests require private local inputs, so another environment may skip them rather than reproduce the same count of executed checks. This 75 count is the 2026-10-01 historical snapshot; the later synthetic feedback foundation and Jev adapter add their own stdlib-only modules (`tests/test_synthetic_feedback.py` + `tests/test_jev_selector.py`, 55 mocked tests) on top.
 
 Coverage includes ordering, strict option indices, midpoint/end boundaries, role projection, taxonomy matching, feedback extremes/ties, selector fallback/mutation protection, saved-data replay, assessment-only graph scope, and malformed batch rejection.
 
@@ -371,7 +373,10 @@ All artifacts are private local outputs under ignored paths. A report can contai
 | `visualize_scenarios.py` | Individual/seed-aggregate trace plots |
 | `provenance.py` | Bank/model/config/vocab records; embeddings use an explicitly labelled prefix hash |
 | `demo_cli.py` | Scripted local demonstration |
-| `tests/` | Contract, regression, API, replay, and local optional-artifact checks |
+| `synthetic_feedback.py` | Provider-independent synthetic review foundation: input validation, fixed candidates, rules baseline, injection seam, deterministic rendering; no adapters or provider calls |
+| `jev_selector.py` | Hosted Jev selector adapter (Selector protocol): payload revalidation, allowlisted state, no redirects, sanitized errors, credential handling via `TYPESAFE_API_KEY`/local `.env` |
+| `synthetic_feedback_demo.py` | Prints student-midpoint/student-end/teacher-end review packages from synthetic fixtures; `--mock` uses local test doubles, `--jev` uses hosted Jev selection |
+| `tests/` | Contract, regression, API, replay, synthetic-foundation, and local optional-artifact checks |
 
 ## 14. Current API and security boundary
 
@@ -397,9 +402,9 @@ The researcher header is local route separation, **not real authentication**. Re
 
 There is no authenticated teacher portal or production role-based permission model. File storage does not currently establish transactional/concurrent-session guarantees. These are explicit prototype limits, not claims solved by passing API tests.
 
-## 15. Planned Jev + LLM architecture — NOT IMPLEMENTED
+## 15. Jev + LLM architecture — local foundation implemented, providers pending
 
-TypeSafe AI's Jev is proposed as a typed decision/selection model. It is not the KT predictor, the conformal calibration mechanism, or the model that writes feedback prose.
+TypeSafe AI's Jev is proposed as a typed decision/selection model. It is not the KT predictor, the conformal calibration mechanism, or the model that writes feedback prose. Jev's HTTP API shape has been verified from live documentation and is implemented behind the seam in `jev_selector.py` (mock-tested, not hosted-verified). The phrasing side targets the CSC OpenAI-compatible Aitta endpoint already used by the existing `tagging_common` code, but no generator adapter has been implemented yet.
 
 ```text
 Validated observed evidence from the approved bank
@@ -421,6 +426,21 @@ Schema / ID / factual-reference checks and review flags
 Local review package: student midpoint, student end, teacher end
 ```
 
+### 15.0 Implemented provider-independent foundation
+
+`synthetic_feedback.py` (stdlib only, no network/credential/file access, no persistence) implements the local parts of this flow as a review-only foundation:
+
+- strict `phase3_synthetic_feedback_input_v1` validation — caller-attested `data_origin="synthetic"` (attestation, not proof of origin), audience/checkpoint rules (teacher midpoint refused), exactly four validated skill rows with fixed 5/10 denominators;
+- the fixed `synthetic_candidates_v1` / `synthetic_policy_v1` set: `observed_summary` then `neutral` at end, `neutral` only at midpoint, all `draft_pending_educator_review`;
+- fresh allowlisted payloads per call: student midpoint sends only audience/checkpoint plus permitted candidates (privately held midpoint counts never leave the module); end payloads carry only validated skill rows and the deterministic `{correct, out_of: 40}` total;
+- optional injected `Selector`/`Generator` protocols on deep-copied payloads; selector failure or invalid selection falls back to the rules baseline and skips the generator; generator failure or invalid output falls back to fixed wording for the same candidate; no retries;
+- generated openings pass `shape_and_heuristic_checks_only` — a shape/lexical guard, not semantic grounding; observed-count lines are always application-rendered; every result is `draft_not_for_learner_delivery` with `requires_human_review=True`;
+- a private `phase3_synthetic_feedback_review_v1` trace records candidate/policy/prompt versions, selection and phrasing sources, fallback reason, measured latency, and provider metadata slots that capture injected adapter class names, with `model_version`/`cost` remaining None until a real provider exists.
+
+`jev_selector.py` now implements the selector side against the documented Jev HTTP API: it revalidates the exact `phase3_synthetic_selection_v1` payload before requesting (rejecting private/extra fields and tampered totals, including bool-typed counts), posts only the allowlisted `{audience, checkpoint, evidence, candidates}` state plus the fixed `jev_selection_v1` choice question and per-candidate criteria, resolves single-candidate midpoint selections locally with no request, refuses redirects, caps responses at 1 MiB, validates choice/type/model/usage strictly, keeps no probabilities or confidence, and sanitizes all provider failures to `JevSelectionError` with `last_metadata` status transitions (`not_called` / `not_called_single_candidate` / `completed` / `failed`). Credentials resolve via `JevSelector.from_env()` — `TYPESAFE_API_KEY` in the environment first, else the Phase 3-local `.env`; the repo-root `.env` is never read and nothing loads at import time.
+
+Still pending: a hosted-verified Jev call (awaits key setup and explicit user approval), the Aitta phrasing-generator adapter, the TypeSafe skill package installation (reviewed as documentation, not installed), and a real provider account agreement. Injected synchronous callbacks cannot be forcibly timed out inside the runner — adapters own their own transport timeouts (`JevSelector` forwards its `timeout` to the opener). The review-package trace keeps `provider_metadata.model_version`/`cost` as None placeholders; under `--jev` the real Jev model, token usage, and `jev_selection_v1` prompt version are recorded in each package's adjacent `selector_metadata`.
+
 Draft candidates can be tested before Jo's review only in the explicitly labelled synthetic/local experiment. Educator review and approval are required before treating them as learner-ready; approval has not yet occurred.
 
 In parallel, KT/conformal remain labelled private research diagnostics. They do not authorize student-facing claims in the initial prototype.
@@ -441,13 +461,13 @@ Output validation must include strict shape/identifiers and supported numerical 
 
 ### 15.3 Failure behavior and provenance
 
-Future implementation must define timeouts, malformed-choice handling, provider failures, abstention/review behavior, retry limits, and deterministic fallback. Do not copy a provider confidence threshold into the pipeline without local validation.
+The local foundation already fixes malformed-choice handling, no-retry behavior, and deterministic fallback; the Jev adapter additionally implements a configurable transport timeout (default 30 s, forwarded to the opener) and zero retries. Still to define for the pending generator adapter: its own timeouts, provider failure handling, and abstention semantics. Do not copy a provider confidence threshold into the pipeline without local validation.
 
 Capture model/version, candidate/policy version, prompt version, sanitized evidence, selected candidate, generated text, validation outcome, latency, cost, and failure/fallback cause. No such external-provider run log exists yet.
 
-## 16. Proposed hosted-model data boundary
+## 16. Hosted-model data boundary
 
-This is a proposal, not an implemented allowlist/client.
+`synthetic_feedback.py` now implements the local allowlist mechanically: every outbound payload is built fresh per call, student-midpoint payloads omit all skills/counts, and end payloads carry only validated skill rows and the deterministic total. A hosted Jev client is implemented (`jev_selector.py`) but has made **no hosted calls** — and nothing here authorizes sending real (non-synthetic) data; the Aitta phrasing client is not implemented. Retention terms, provider agreements, and real-data consent remain unsettled, so the lists below stay proposed boundary rules rather than an active data-sharing authorization.
 
 Potentially allowed after agreement and review:
 
@@ -522,15 +542,15 @@ Exit criterion: reproducible local outputs and no ambiguity about current versus
 
 ### Stage B: define the model-mediated feedback experiment
 
-Select Jev access and an LLM/provider; agree to synthetic summary-only inputs. Define candidate schemas, IDs, acceptable evidence references, ordering, tie handling, and fallback. Draft a bounded generation specification. These choices are not settled implementation artifacts yet.
+Select Jev access and an LLM/provider; agree to synthetic summary-only inputs. A draft contract now exists as implemented code: `phase3_synthetic_feedback_input_v1` inputs, the `synthetic_candidates_v1`/`synthetic_policy_v1` candidate set, and the `synthetic_phrasing_v1` bounded generation specification with deterministic fallback. Jev's API is verified and implemented; the generator side is the CSC OpenAI-compatible Aitta endpoint already exercised by the existing `tagging_common` code, though no feedback generator adapter has been written yet. These are local review-only artifacts, not provider-agreed contracts — provider agreements and input approval are still pending.
 
 Exit criterion: explicit input/output contract and evidence-supported draft candidates, with review status visible.
 
 ### Stage C: implement and test the local Jev/LLM prototype
 
-Implement separate selector and generator adapters, safe credential handling, failure behavior, validation, and private trace logging. Test provider-free behavior with mocks first, then controlled hosted synthetic calls after access/privacy agreement.
+Provider-free groundwork is implemented: the injected `Selector`/`Generator` seam, validation, deterministic fallback, and the private review-package trace in `synthetic_feedback.py`, plus `synthetic_feedback_demo.py` printing student-midpoint, student-end, and teacher-end packages from identical synthetic fixtures (deterministic, `--mock`, and explicit-opt-in `--jev` modes). The selector adapter is now real: `jev_selector.py` implements the documented Jev HTTP contract with sanitized failures, credential loading, and strict response validation — but it is mock-tested only. Still to implement: the generator adapter (Aitta), the hosted-verified Jev run once key setup and user approval are in place, and any provider-agreement items.
 
-Test invalid candidate IDs, extra fields, changed counts, fabricated diagnoses, timeouts, provider failures, inconsistent reruns, and fallback. Produce student-midpoint, student-end, and teacher-end examples using identical captured evidence.
+Already covered locally: invalid candidate IDs, extra/malformed fields, callback exceptions, mutated payloads, fabricated diagnoses/numeric/skill-name prose, fallback paths, bad HTTP/timeout/redirect/malformed-body responses, unknown choices, and metadata resets. Still untested because no hosted call has run: real timeouts, provider failures, inconsistent hosted reruns.
 
 Exit criterion: the technical path works end to end, unsupported outputs are rejected/flagged, and no secret/raw private assessment data is exposed. This is not a claim of educational validity.
 

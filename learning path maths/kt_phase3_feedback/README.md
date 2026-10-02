@@ -78,6 +78,9 @@ code; those exist only in the private research branch and researcher routes.
 | `provenance.py` | records artifact identities/hashes for reproducibility |
 | `api.py` | localhost-only JSON API for sessions and researcher diagnostics |
 | `demo_cli.py` | scripted local end-to-end run |
+| `synthetic_feedback.py` | provider-independent synthetic feedback review seam (input validation, candidates, fallback) |
+| `jev_selector.py` | hosted TypeSafe Jev selector adapter for the synthetic review path; mock-tested, not yet hosted-verified |
+| `synthetic_feedback_demo.py` | prints local review packages; optional `--mock` callbacks (not real models) or `--jev` hosted selection |
 | `scenario_runner.py` | fixed-bank synthetic scenario generator for researcher diagnostics |
 | `scenario_report.py` | compiles scenario runs into a deterministic report (`phase3_scenario_report_v1`) |
 | `visualize_scenarios.py` | optional PNG figures from a scenario report (requires matplotlib) |
@@ -478,6 +481,63 @@ For an aggregate figure, the blue and orange lines are medians across seeds.
 The blue band may be nearly invisible when all seeds share the same simulated
 probability schedule. Always read aggregate plots alongside the summary CSV;
 neither plot compares ground truth directly to validated mastery.
+
+## Synthetic feedback foundation (review-only)
+
+`synthetic_feedback.py` is a standalone, provider-independent seam for a
+hosted candidate selector plus a hosted phrasing generator. It is
+standard library only, makes no network or credential access, and
+persists nothing. `jev_selector.py` adds the first real adapter on that
+seam: a TypeSafe Jev HTTP selector. It is implemented and mock-tested
+against a fake opener but **not yet hosted-verified** — hosted
+verification awaits key setup and explicit user approval, and the Aitta
+phrasing generator remains unimplemented.
+
+```bash
+python synthetic_feedback_demo.py          # deterministic rules baseline
+python synthetic_feedback_demo.py --mock   # local mock callbacks, not real models
+python synthetic_feedback_demo.py --jev    # hosted Jev selection (2 calls; needs TYPESAFE_API_KEY)
+python -m unittest tests.test_synthetic_feedback tests.test_jev_selector -v
+```
+
+The demo prints private review packages (schema
+`phase3_synthetic_feedback_review_v1`) for student midpoint, student
+end, and teacher end from the same literal synthetic fixture counts;
+the fixtures are not measured results, and every draft keeps
+`requires_human_review=True`. Boundaries enforced by the module:
+
+- input must carry the caller-attested `data_origin="synthetic"` label
+  — an attestation, not proof of origin;
+- outbound payloads are built fresh from a fixed allowlist: a student
+  midpoint payload contains only audience, checkpoint, and permitted
+  candidates (privately held midpoint counts are never sent out), and
+  an end payload carries only validated skill rows plus a deterministic
+  total;
+- `JevSelector` revalidates the exact selection payload before any
+  request, sends only the allowlisted `{audience, checkpoint, evidence,
+  candidates}` state plus the fixed `jev_selection_v1` choice question,
+  refuses redirects (the Bearer token cannot leak to another host),
+  caps the response at 1 MiB, and sanitizes every provider failure to
+  `JevSelectionError('Jev request failed')` — never echoing credentials
+  or raw response text. Midpoint resolves locally: a single-candidate
+  choice makes no network call. The adapter stores the key privately
+  and reads it only via `JevSelector.from_env()` (environment variable
+  first, else the Phase 3-local `.env` — never the repo-root file);
+- selector exceptions or malformed/unknown selections fall back to the
+  rules baseline and skip the generator; generator exceptions or
+  invalid openings fall back to fixed wording for the same candidate;
+  no retries;
+- injected callbacks are arbitrary synchronous callables and cannot be
+  forcibly timed out inside the module — provider adapters must enforce
+  their own transport timeouts (`JevSelector` forwards a configurable
+  `timeout`, default 30 s);
+- the review trace's `provider_metadata` holds only placeholders
+  (`model_version`/`cost` stay None); under `--jev` the real Jev model,
+  token usage, and `jev_selection_v1` prompt version are recorded in
+  each package's adjacent `selector_metadata`;
+- generated prose passes shape and heuristic checks only — not a
+  semantic-grounding guarantee — and no draft claims to be approved for
+  learners.
 
 ## Tests
 
