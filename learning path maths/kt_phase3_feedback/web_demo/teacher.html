@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthetic Assessment Demo — Teacher Review</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="teacher">
+<header class="masthead">
+  <div class="masthead-inner">
+    <div>
+      <h1>Synthetic Demo — Teacher Review</h1>
+      <p class="banner">Private local research view. Diagnostic values are
+      frozen-model research signals, not mastery evidence. All feedback is
+      a draft requiring educator review.</p>
+      <p class="meta small">English display labels and draft question
+      translations; source JSON retains original wording.</p>
+    </div>
+    <nav class="topnav" aria-label="Demo pages">
+      <a href="/">Student</a>
+      <a href="/teacher" aria-current="page">Teacher</a>
+    </nav>
+  </div>
+</header>
+<main id="teacher-root">
+  <p id="teacher-error" class="error" role="alert" hidden></p>
+  <div id="config-strip" class="strip" hidden></div>
+
+  <section id="unlock-panel" class="card narrow">
+    <h2>Unlock teacher view</h2>
+    <p class="meta">Enter the six-digit local PIN printed when the demo
+    server started.</p>
+    <form id="unlock-form">
+      <label for="pin-input">PIN</label>
+      <input id="pin-input" inputmode="numeric" autocomplete="off"
+             maxlength="6" required>
+      <button class="primary" type="submit">Unlock</button>
+    </form>
+    <p id="unlock-error" class="error" role="alert" hidden></p>
+  </section>
+
+  <div id="teacher-app" hidden>
+    <div class="teacher-grid">
+      <aside class="side">
+        <div class="side-head">
+          <h2>Sessions</h2>
+          <button id="logout" class="ghost small">Log out</button>
+        </div>
+        <form id="sim-form" class="sim">
+          <label for="sim-profile">Synthetic example profile</label>
+          <select id="sim-profile"></select>
+          <label for="sim-seed">Seed (integer)</label>
+          <input id="sim-seed" inputmode="numeric" value="1">
+          <button id="sim-run" class="primary" type="submit">Run synthetic example</button>
+          <p id="sim-error" class="error small" role="alert" hidden></p>
+          <p class="meta small">A simulated response pattern, not a
+          diagnosis.</p>
+        </form>
+        <ul id="session-list" class="session-list"></ul>
+      </aside>
+      <section class="workspace">
+        <div id="ws-empty" class="card"><p>Select a session.</p></div>
+        <div id="ws-detail" hidden>
+          <div class="ws-head">
+            <h2 id="ws-title"></h2>
+            <div class="ws-actions">
+              <span id="ws-student-link"></span>
+              <a id="ws-export" class="ghost small" download>Export JSON</a>
+            </div>
+          </div>
+          <nav class="tabs" id="ws-tabs">
+            <button data-tab="overview" class="tab active">Overview</button>
+            <button data-tab="evidence" class="tab">Evidence</button>
+            <button data-tab="graph" class="tab">Graph</button>
+            <button data-tab="research" class="tab">Research</button>
+            <button data-tab="feedback" class="tab">Feedback</button>
+            <button data-tab="review" class="tab">Review</button>
+          </nav>
+          <div id="tab-overview" class="tabpane"></div>
+          <div id="tab-evidence" class="tabpane" hidden></div>
+          <div id="tab-graph" class="tabpane" hidden></div>
+          <div id="tab-research" class="tabpane" hidden></div>
+          <div id="tab-feedback" class="tabpane" hidden></div>
+          <div id="tab-review" class="tabpane" hidden></div>
+        </div>
+      </section>
+    </div>
+  </div>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

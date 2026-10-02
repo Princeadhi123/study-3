@@ -1,667 +1,385 @@
-# Phase 3 — end-to-end MCQ feedback prototype
+# Phase 3 — synthetic assessment and educator-review demo
 
-Phase 3 is the integration layer for the 40-question diagnostic test. It uses
-Phase 2's approved private bank and deterministic scorer, then optionally adds
-a cautious frozen variant-D KT estimate. It does **not** retrain or modify the
-model, and it does not copy answer keys or model artifacts into this folder.
+Phase 3 is the integration layer for a fixed 40-question mathematics
+assessment. The current project is an interactive localhost prototype with:
 
-## Boundary
+- a student assessment page;
+- a private teacher dashboard;
+- deterministic scoring and observed evidence;
+- a descriptive assessment graph;
+- optional hosted Jev candidate selection;
+- optional hosted Aitta opening phrasing;
+- private frozen KT and conformal research diagnostics;
+- educator review records and JSON export.
 
-- Phase 1: source data and model training — closed.
-- Phase 2: private inventory, text-only bank construction, approval, scoring,
-  observed feed, and frozen-model loader.
-- Phase 3: test sessions, ordered response capture, private event storage,
-  KT input adaptation, feedback composition, and provenance.
+All sessions are synthetic and all generated feedback is a draft requiring
+educator review. This is not a real student pilot, a validated mastery
+assessment, or an approved learner-delivery system.
 
-Current bank:
+## 1. Current status
+
+Implemented:
+
+- `demo_api.py` localhost HTTP boundary;
+- `web_demo/index.html` student flow;
+- `web_demo/teacher.html` educator dashboard;
+- `demo_service.py` session orchestration, persistence, async provider jobs,
+  diagnostics jobs, review records, and teacher payloads;
+- fixed-order 40-question assessment over the approved Phase 2 bank;
+- midpoint and end checkpoints at responses 20 and 40;
+- deterministic baseline feedback with Jev/Aitta fallback;
+- provider execution provenance, including fresh/cached/local/fallback states;
+- English display labels and prototype question translations;
+- poll-safe dashboard disclosure and review-form state.
+
+Pending:
+
+- a UI for browsing all 54 saved replay scenarios;
+- a blind baseline-vs-provider educator comparison;
+- richer, bounded evidence-grounded feedback composition;
+- a reviewed practice-question/worked-solution bank;
+- calibrated KT/conformal validity for this fixed assessment;
+- production authentication, storage, privacy review, and deployment.
+
+The detailed architecture, retained metrics, verification evidence, and
+prioritized roadmap are in `README_STATUS_ARCHITECTURE_ROADMAP.md`.
+
+## 2. Assessment and evidence model
+
+The assessment uses the approved Phase 2 bank:
 
 ```text
 ../kt_phase2_inference/artifacts/test_question_bank_text_only_approved_v2.json
 ```
 
-That file contains private answer keys. Phase 3 references it; it must not be
-copied into student payloads or committed to a public artifact store.
+The bank contains private answer keys. It is referenced in place and must not
+be copied into student payloads or public artifacts.
 
-## End-to-end flow
+Assessment structure:
+
+- four skills: Arithmetic, Prices, Fractions, Percentages;
+- ten questions per skill in a fixed order;
+- midpoint after 20 answers and end after 40;
+- 15 descriptive subtopics from `assessment_taxonomy_draft.json`.
+
+The taxonomy relation is `is_part_of_not_prerequisite`. It groups questions by
+assessed content; it does not establish prerequisites, mastery,
+misconceptions, fatigue, attention, or future performance.
+
+## 3. Run the interactive demo
+
+Run commands from this repository folder. Do not start a second instance while
+one is already listening on the same port.
+
+Rules-only mode makes no provider calls:
+
+```powershell
+python demo_api.py --host 127.0.0.1 --port 8766 --providers rules
+```
+
+Hosted mode is optional and requires a local Jev key file:
+
+```powershell
+python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
+  --jev-env-file "C:/path/to/jev.env" `
+  --call-budget 12 --provider-timeout 120
+```
+
+Aitta is configured separately through environment variables or the
+workspace-root `.env` file (`AITTA_API_KEY`, `AITTA_BASE_URL`, optional
+`AITTA_MODEL`) — not a Phase 3-local `.env`. Do not print or commit those
+values.
+
+`--teacher-pin` may supply a six-digit local demo PIN. If omitted, the server
+generates one and prints it at startup. Do not commit the PIN.
+
+Pages:
+
+- Student: `http://127.0.0.1:8766/`
+- Teacher: `http://127.0.0.1:8766/teacher`
+
+The server accepts only loopback hosts and rejects non-local Host or Origin
+values. The teacher PIN is local route separation, not production
+authentication.
+
+## 4. Student and educator flow
+
+### Student page
+
+- requires the `synthetic: true` attestation;
+- issues a per-session owner token;
+- serves key-free question payloads;
+- accepts ordered `{question_id, selected_index}` responses;
+- hides scores at midpoint;
+- shows deterministic baseline feedback immediately at the end;
+- updates the end page if provider-backed feedback later becomes ready.
+
+### Teacher dashboard
+
+The teacher page shows six tabs:
+
+1. Overview — session status, answer count, provider/diagnostic job state;
+2. Evidence — observed totals and skill/subtopic counts plus private question
+   records;
+3. Graph — descriptive hierarchy and observed counts;
+4. Research — private frozen KT and conformal diagnostics;
+5. Feedback — baseline versus selected drafts, candidates, provider trace,
+   and the selection-decision panel;
+6. Review — educator review fields, notes, and the saved review ledger.
+
+Teacher actions include synthetic simulation profiles, JSON export, and
+logout. Simulation profiles are response patterns, not learner diagnoses.
+
+The dashboard polls approximately every two seconds. Unchanged payloads skip
+redraws; expanded sections and unsaved review edits are preserved across real
+updates.
+
+## 5. Runtime architecture
 
 ```text
-Approved immutable Phase 2 bank (fixed order, private answer keys)
+browser UI (index.html / teacher.html / app.js)
         |
-        |  student path — localhost only
+        | loopback JSON only
         v
-api.py -> MCQSessionService
-        |   serve questions 1-20, accept ordered responses
-        |     -> midpoint feed at response 20
-        |   serve questions 21-40, accept ordered responses
-        |     -> end feed at response 40
-        v
-Phase 2 observed scorer + bank-matched descriptive taxonomy
+demo_api.py
         |
-        v
-deterministic compose_student_message (bounded style selector; no LLM)
+DemoService (demo_service.py)
         |
-        v
-api.py projects student fields only:
-  message, message_source, per-skill and per-subtopic counts;
-  end also returns total {"correct": ..., "out_of": 40}
-  (midpoint carries no aggregate grade)
-
-private SessionStore -> ignored artifacts/sessions/:
-  selected index/text, key-derived correctness, timestamps,
-  bank sha256, checkpoint feeds
-
-        |  private research branch — never student-facing, no LLM
-        v
-scenario_runner.py
-  synthetic fixed-order baselines over the same approved bank
+        +-- ordered scoring + observed evidence + descriptive graph
         |
-        v
-frozen KT trace -> historical k5/k10 conformal diagnostics
-(not validated for this fixed bank)
--> bank-matched assessment taxonomy -> observed-error practice candidates
--> scenario_report.py / visualize_scenarios.py (ignored artifacts only)
+        +-- feedback branch
+        |       deterministic baseline
+        |       -> optional Jev candidate selection
+        |       -> optional Aitta opening
+        |       -> draft requiring educator review
+        |
+        +-- research branch
+                frozen KT inference
+                -> historical conformal application
+                -> private teacher diagnostics
 ```
 
-The live student API never runs KT, conformal, assessment-graph, or LLM
-code; those exist only in the private research branch and researcher routes.
+Checkpoint behavior:
 
-## Files
+- provider and diagnostics work is queued only at responses 20 and 40;
+- midpoint student feedback is deterministic and neutral;
+- at the end, baseline feedback is available while provider work is pending;
+- diagnostics snapshot the relevant answer prefix so later answers cannot
+  race an already-queued checkpoint job;
+- a restart converts an interrupted provider job to deterministic fallback and
+  interrupted diagnostics to `interrupted_by_restart`;
+- opening a completed session reads its persisted results rather than
+  automatically rerunning providers or inference.
 
-| file | role |
+## 6. Provider boundaries
+
+Jev:
+
+- chooses only among permitted observed-evidence-supported candidates;
+- receives allow-listed aggregate skill/subtopic evidence and candidates;
+- does not receive raw responses, question text, answer keys, session IDs, or
+  research probabilities;
+- is bypassed locally when only one candidate is permitted;
+- failure falls back to the deterministic baseline.
+
+Aitta:
+
+- writes only the opening sentence;
+- does not author factual counts, mathematical explanations, or method-review
+  actions;
+- receives a narrow audience/checkpoint communication context rather than the
+  actual evidence packet;
+- failure preserves the selected candidate with deterministic opening text.
+
+`CaptureCache` reuses a recorded response only when the effective provider
+request matches. Reuse is real captured provider output but is not a fresh or
+independent provider trial. The dashboard distinguishes fresh hosted, cached
+hosted, local resolution, deterministic fallback, and unverified provenance.
+
+The UI's English labels and question translations are display-layer prototype
+text. They do not change answer indices, scoring, provider inputs, stored
+records, or audit JSON, and they still require educator review.
+
+## 7. Data and privacy boundary
+
+Student routes must not expose:
+
+- answer keys;
+- selected-option text beyond the student's own submission;
+- raw response history beyond the public session flow;
+- KT probabilities;
+- conformal intervals or statuses;
+- teacher-only graph detail;
+- provider execution internals.
+
+Teacher routes may show private answer keys, response records, provider
+execution records, and research diagnostics. They require the local teacher
+cookie issued by PIN unlock. `artifacts/` contains private key-derived and
+provider-capture data and must remain local/private.
+
+KT uses the frozen variant-D model (`skill_item_content_option`) and does not
+retrain. Conformal applies existing historical calibration data. Both remain
+`exploratory_only_not_fixed_bank_validated` and are not used for student
+advice.
+
+## 8. Demo API surface
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/sessions` | POST | create a synthetic session |
+| `/api/sessions/{sid}` | GET | student snapshot with owner token |
+| `/api/sessions/{sid}/responses` | POST | submit an ordered answer |
+| `/api/teacher/unlock` | POST | exchange local PIN for teacher cookie |
+| `/api/teacher/logout` | POST | invalidate the teacher cookie |
+| `/api/teacher/config` | GET | provider mode, diagnostics status, call budget |
+| `/api/teacher/sessions` | GET | list sessions |
+| `/api/teacher/simulations` | POST | create a synthetic response-pattern session |
+| `/api/teacher/sessions/{sid}` | GET | private session detail |
+| `/api/teacher/sessions/{sid}/export` | GET | private JSON export |
+| `/api/teacher/sessions/{sid}/reviews` | POST | store educator review |
+
+Student requests use `X-Demo-Session-Token`. Teacher requests use the opaque
+`demo_teacher` HttpOnly cookie. The legacy `api.py` uses a different route set
+and is not the current UI backend.
+
+## 9. Module map
+
+| Area | Files |
 |---|---|
-| `phase3_paths.py` | Phase 2/artifact locations; named to avoid a `paths.py` collision |
-| `schemas.py` | public question and submitted-response contracts |
-| `session_store.py` | private JSON session records under ignored `artifacts/sessions/` |
-| `mcq_service.py` | starts sessions, serves halves, accepts ordered responses, checkpoints at 20/40 |
-| `kt_adapter.py` | validates text coverage and converts submissions to variant-D tensors |
-| `feedback_service.py` | returns observed feed plus optional, separate `model_estimate` |
-| `provenance.py` | records artifact identities/hashes for reproducibility |
-| `api.py` | localhost-only JSON API for sessions and researcher diagnostics |
-| `demo_cli.py` | scripted local end-to-end run |
-| `synthetic_feedback.py` | provider-independent synthetic feedback review seam (input validation, candidates, fallback) |
-| `jev_selector.py` | hosted TypeSafe Jev selector adapter for the synthetic review path; mock-tested and smoke-verified on synthetic fixtures (run1) |
-| `aitta_generator.py` | hosted Aitta OpenAI-compatible phrasing adapter; v1 and v2 smoke-verified on synthetic fixtures; full replay reuses v2 captures |
-| `synthetic_feedback_demo.py` | prints local review packages; optional `--mock` callbacks (not real models), `--jev` hosted selection, `--aitta` hosted phrasing, or `--jev --aitta` combined |
-| `replay_provider_scenarios.py` | replays the frozen 54-scenario snapshot through the Jev/Aitta seam (prepare mode is provider-free) |
-| `render_provider_replay.py` | renders a captured replay report to a local HTML review page (no network, exclusive output) |
-| `scenario_runner.py` | fixed-bank synthetic scenario generator for researcher diagnostics |
-| `scenario_report.py` | compiles scenario runs into a deterministic report (`phase3_scenario_report_v1`) |
-| `visualize_scenarios.py` | optional PNG figures from a scenario report (requires matplotlib) |
-| `tests/` | synthetic-bank unit tests; no private artifacts required |
+| Current web boundary/UI | `demo_api.py`, `web_demo/app.js`, `web_demo/index.html`, `web_demo/teacher.html`, `web_demo/styles.css` |
+| Demo orchestration | `demo_service.py` |
+| Session/scoring/persistence | `mcq_service.py`, `session_store.py`, `schemas.py` |
+| Evidence and graph | `evidence_feedback.py`, `feedback_service.py`, `assessment_taxonomy_draft.json` |
+| Feedback policy/rendering | `evidence_feedback_policy.py`, `render_evidence_feedback.py`, `educator_review_contract.py` |
+| Providers and capture cache | `evidence_providers.py`, `jev_selector.py`, `aitta_generator.py`, `replay_provider_scenarios.py`, `transport_diagnostics.py` |
+| Live diagnostics | `live_diagnostics.py`, `kt_adapter.py` |
+| Batch replay/evaluation | `integrated_synthetic_pipeline.py`, `evaluate_evidence_feedback.py`, `evaluate_scenarios.py`, `compare_scenarios.py`, `scenario_runner.py`, `scenario_report.py`, `render_provider_replay.py`, `visualize_scenarios.py` |
+| Legacy API/demo | `api.py`, `demo_cli.py`, `synthetic_feedback.py`, `synthetic_feedback_demo.py` |
+| Canonical paths/provenance | `phase3_paths.py`, `provenance.py` |
 
-## Public and private data
+## 10. Retained evidence and metrics
 
-Student-facing payloads contain only:
+The most useful retained reports are:
 
-```json
-{"question_id": "...", "skill_id": "...", "text": "...", "options": ["..."]}
+- `artifacts/live_demo_20261002/` — live demo sessions, metadata, provider
+  captures, and verification evidence;
+- `artifacts/integrated_feedback_20261002_hosted_full/` — current
+  evidence-focused hosted replay: 54 saved scenarios, 162 packages, 69/108
+  end selections matching baseline and 39 differing;
+- `artifacts/integrated_feedback_20261002_offline/` — deterministic version of
+  the same integrated report path;
+- `artifacts/provider_replay_20261002/` — older generic-candidate Jev/Aitta
+  replay: Jev matched the rules baseline on all 108 end packages;
+- `artifacts/evidence_feedback_20261002_v2/` — deterministic
+  observed-evidence review: 172 scenarios, 516 packages, and 14,641 checked
+  skill-total vectors;
+- `artifacts/assessment_pipeline_20261001/` — 54-scenario observed/KT summary,
+  conformal checkpoint rows, and research diagnostics;
+- `artifacts/report_fixed40_baselines_20260929/` — earlier ten-scenario
+  baseline report with simulated probability, KT probability, observed
+  accuracy, and conformal summaries;
+- `artifacts/cleanup_result_artifacts_v2.json` — receipt for the approved
+  cleanup of 336 obsolete files.
+
+Interpretation rules:
+
+- provider match/difference counts are software comparisons, not accuracy;
+- simulated `true_probability` values are scenario parameters, not learner
+  truth;
+- KT and conformal metrics are exploratory fixed-bank diagnostics;
+- cached provider captures are not independent calls;
+- no retained metric establishes educational effectiveness, mastery,
+  misconceptions, or learning improvement.
+
+See the metrics table in `README_STATUS_ARCHITECTURE_ROADMAP.md` for exact
+counts and limitations.
+
+## 11. Batch and legacy commands
+
+Scripted session without the web UI:
+
+```powershell
+python demo_cli.py --profile alternating --out artifacts\demo_session_result.json
 ```
 
-Submitted response rows contain only:
+Legacy JSON API (no teacher dashboard or async provider jobs):
 
-```json
-{"question_id": "...", "selected_index": 0}
-```
-
-The private session record additionally stores `selected_text`, `correct`,
-timestamps, and checkpoint feeds. `artifacts/` is ignored because those records
-may contain private answer/scoring data.
-
-The bank-matched `assessment_taxonomy_draft.json` maps each question to one
-**descriptive** subtopic, not a prerequisite. At midpoint and end, student and
-teacher feedback may include `subtopics` with `skill_id`, `skill_name`,
-`subtopic_id`, `subtopic_name`, and observed `correct`/`out_of` counts. There
-are no question IDs, answer keys, KT probabilities, conformal decisions, or
-subtopic mastery claims in these rows. The default service requires this
-bank-matched taxonomy; unrecognized synthetic banks remain taxonomy-free
-unless a validated mapping is supplied explicitly. The feedback text and
-bounded style-selector context still use only skill-level observed evidence.
-
-Checkpoint feedback is split into `student` and `teacher` halves. The
-`student` payload contains the deterministic `message`, `message_source`,
-and observed per-skill and per-subtopic `correct`/`out_of` counts. The
-midpoint checkpoint deliberately carries **no aggregate grade**; only the
-end checkpoint adds `total: {"correct": ..., "out_of": 40}` and an
-observed-results summary that makes no mastery claim. The `teacher`
-half — and KT, conformal, assessment-graph practice candidates, and
-answer-key data — stays private and is never returned on student routes.
-
-## Session lifecycle
-
-```python
-from mcq_service import MCQSessionService
-
-service = MCQSessionService.from_default()
-start = service.start_session()
-session_id = start["session_id"]
-
-# Service can accept one response at a time:
-service.submit_response(session_id, {
-    "question_id": "...",
-    "selected_index": 0,
-})
-
-# Or a trusted caller can submit a whole ordered 20-question half:
-midpoint = service.submit_half(session_id, 1, first_half_rows)
-end = service.submit_half(session_id, 2, second_half_rows)
-```
-
-Rules enforced by `MCQSessionService` and Phase 2's `mcq_test.py`:
-
-- exactly 40 approved-bank questions;
-- 20 responses before midpoint and 40 before end;
-- ordered question IDs;
-- strict integer selected indices;
-- no per-answer correctness returned during the test;
-- checkpoint feed only at 20 or 40 responses;
-- session is bound to the bank hash, so a changed bank cannot score old answers.
-
-## Local JSON API
-
-From this directory:
-
-```bash
+```powershell
 python api.py --host 127.0.0.1 --port 8765
 ```
 
-The server deliberately binds only to localhost. Student routes return public
-question fields and the `student` portion of checkpoint feedback only:
+Its private researcher routes require `X-Phase3-Role: researcher`; that header
+is only local route separation and cannot be used in the new demo API.
 
-```text
-POST /sessions
-GET  /sessions/{session_id}/questions?half=1
-GET  /sessions/{session_id}/questions?half=2
-POST /sessions/{session_id}/responses
-POST /sessions/{session_id}/half-submissions
-GET  /sessions/{session_id}/snapshot
+Offline evidence-feedback replay:
+
+```powershell
+python evaluate_evidence_feedback.py --out-dir artifacts\evidence_feedback_NEW --check-skill-vectors
+python render_evidence_feedback.py artifacts\evidence_feedback_NEW\report.json --out artifacts\evidence_feedback_NEW\review.html
 ```
 
-Research routes are separate and require `X-Phase3-Role: researcher`:
+Offline integrated replay:
 
-```text
-GET  /research/sessions/{session_id}/diagnostics
-POST /research/sessions/{session_id}/kt-estimate   # body: {"device": "cpu"}
+```powershell
+python integrated_synthetic_pipeline.py --mode offline --all-scenarios --out-dir artifacts\integrated_feedback_NEW
 ```
 
-The header keeps the route contracts separate for the local prototype; it is
-**not** production authentication. Do not expose this server beyond localhost
-without a real authentication/authorization layer.
+A hosted batch replay is intentionally explicit and bounded:
 
-## KT adapter contract
-
-`kt_adapter.trace_responses(bank, responses)` accepts the same ordered response
-rows as `score_checkpoint`, then derives private event fields from the bank:
-
-- `skill_id` — must be in the frozen skill vocabulary;
-- `item_id` — unknown IDs map to `__UNK__`;
-- `content_text` — must exist in the frozen embedding table;
-- `selected_text` — derived from `options[selected_index]`; every selectable
-  option must exist in the embedding table;
-- `correct` — derived privately from `answer_index`;
-- `response_time_ms` / `rt_mask` — currently `None`/`0` unless real timing is
-  added;
-- `attempt` — currently 1 for this single-attempt test;
-- `time_bin` — currently 0 until real inter-answer timestamps are captured.
-
-The adapter refuses missing content or option embeddings. The model's selected
-text is part of the previous-step interaction only; it is never used as the
-current-step query.
-
-KT output is returned separately as:
-
-```json
-{
-  "kind": "frozen_variant_d_response_trace",
-  "model_status": "uncalibrated_for_20_40_question_feed",
-  "p_correct_before_each_answer": [0.0]
-}
+```powershell
+python integrated_synthetic_pipeline.py --mode hosted --all-scenarios `
+  --jev-env-file "C:/path/to/jev.env" --provider-timeout 120 `
+  --max-new-calls 101 --out-dir artifacts\integrated_feedback_NEW_HOSTED
 ```
 
-It is not correctness evidence, not calibrated mastery, and not a
-recommendation.
+Output directories and reports are created conservatively; existing report
+files are not overwritten. Provider captures preserve failure and reuse
+provenance.
 
-## Local scripted run
+## 12. Verification
 
-From this directory:
+Narrow local checks:
 
-```bash
-python demo_cli.py --profile alternating --out artifacts/demo_session_result.json
-python demo_cli.py --profile all_correct --kt-device cpu \
-  --out artifacts/demo_all_correct_kt_result.json \
-  --manifest-out artifacts/provenance_manifest.json
+```powershell
+python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics
+node --check web_demo/app.js
 ```
 
-Both commands refuse to overwrite outputs. Session JSON files remain private
-under `artifacts/sessions/`.
+Full local test discovery:
 
-## Fixed-bank scenario diagnostics (researcher only)
-
-`scenario_runner.py` replays synthetic response trajectories over the **fixed
-approved 40-question bank in fixed order**. It is a private diagnostic tool:
-
-- response correctness is sampled from synthetic per-question probabilities —
-  these are simulation inputs, **not** KT-derived estimates;
-- no output is student-facing; scenario results, reports, and figures belong
-  under ignored `artifacts/` paths only.
-
-```bash
-# one fixed-order run per spec/profile + seed
-python scenario_runner.py --profile learning --seed 7 \
-  --out artifacts/scenarios/learning_s7.json
-
-# optional diagnostics: KT trace (--kt-device), conformal gate (--conformal,
-# requires --kt-device), bank-matched assessment taxonomy (--graph)
-python scenario_runner.py --profile learning --seed 7 --kt-device cpu \
-  --conformal --graph --out artifacts/scenarios/learning_s7_kt.json
-```
-
-Custom seeded profiles can be supplied with `--spec path/to/spec.json`:
-
-```json
-{
-  "name": "weak_fractions_seed_42",
-  "seed": 42,
-  "skill_probabilities": {"skill_304b0fda845f": 0.20},
-  "default_probability": 0.75,
-  "distractor_policy": "uniform_wrong"
-}
-```
-
-Deterministic profiles are `all_correct`, `all_incorrect`, `alternating`,
-`first_half_correct_second_half_wrong`, `weak_fractions_only`, and
-`weak_price_only`. Seeded profiles are `stable_strong`, `stable_weak`,
-`learning`, `fatigue`, `weak_fractions`, `guessing`, and custom specs. When an
-outcome is incorrect, the runner samples uniformly among wrong options.
-`--graph` attaches the **bank-matched assessment taxonomy** — the approved
-topic/subtopic map (`relation="is_part_of_not_prerequisite"`), not a global
-prerequisite or question-level graph. The runner accepts only a taxonomy
-dict for `graph` and rejects global graph objects; when a separate taxonomy
-is also supplied, both must describe the same assessment. Item-level
-conformal decisions use each item's warm/cold regime; a per-skill checkpoint
-uses Phase 2's cold-if-any-item-is-cold rule. The default research gate now
-loads the corrected historical `k=10` quantile, and a separate historical
-`k=5` calibration is used for the five-answer midpoint in the CLI. Neither corrected
-historical block calibration validates this fixed synthetic instrument.
-No scenario, report, or student API path makes an LLM call.
-
-When the graph is supplied, the private result contains
-`graph.checkpoints` (`midpoint` and `end`) built by
-`assessment_feedback_graph`: per-skill observed counts, per-subtopic
-correct/incorrect counts, and a `recommendations` map keyed by skill with
-`recommendation_type` (`ASSESSMENT_SUBTOPIC_PRACTICE` when the skill has
-assessed subtopics with observed incorrect answers, else `NONE`), the
-subtopics carrying those errors, and a descriptive message. The graph
-scope is `approved_bank_topics_subtopics_only` — there is no conformal
-gating of practice candidates and no global prerequisite routing. The taxonomy
-and conformal branches are independent; the flow diagram lists both diagnostics,
-not a model-based prerequisite gate for assessment feedback. These
-candidates describe observed errors inside this assessment only, are
-pending educator review, and are private metadata: they are not merged
-into observed feeds, student messages, style-selector context, or any API
-payload, and they make no prerequisite or misconception inference.
-
-Compile one or more scenario JSON files into a deterministic report (same
-`bank_sha256` required; name + seed must be unique):
-
-```bash
-python scenario_report.py artifacts/scenarios/*.json \
-  --out-dir artifacts/scenario_report
-```
-
-This writes `scenario_report.json` (schema `phase3_scenario_report_v1`),
-`scenario_summary.csv`, and `per_skill_trace.csv`, refusing to overwrite.
-
-Optional plotting (requires `matplotlib`, used with the non-interactive `Agg`
-backend; it is an optional dependency and is not needed by the pipeline):
-
-```bash
-python visualize_scenarios.py artifacts/scenario_report/scenario_report.json \
-  --out-dir artifacts/figures
-# alternatively, include per-skill median/IQR figures when there are multiple seeds
-# (choose a fresh directory because existing PNGs are never overwritten):
-python visualize_scenarios.py artifacts/scenario_report/scenario_report.json \
-  --out-dir artifacts/figures_aggregate --aggregate
-```
-
-One figure per scenario + seed + skill shows the simulated response
-probability, the KT pre-answer probability when present, and the observed
-running per-skill accuracy, with correct/incorrect markers and a midpoint line
-at global position 20. Midpoint (approx. k=5) and end (k=10) conformal
-statuses are annotated when present. The simulated P and the KT pre-answer P
-are distinct estimands; the figures make no calibration claim. Filenames are
-sanitized, collisions are detected, and existing images are never overwritten.
-
-Paired order/history/ID sensitivity experiments (the former
-`research_matrix.py` runner and the `--research-matrix` report/figure
-options) have been **removed** — code and saved outputs alike — to keep
-scope on the fixed-40 flow only.
-
-## 2026-09-29 full-bank validation package
-
-All paths below live under ignored `artifacts/`: they are private local
-outputs that may contain key-derived scores, and they must not be committed
-publicly or stored alongside embeddings or answer keys.
-
-- `artifacts/fixed40_checkpoint_feedback_20260929_v3.json` — **current**
-  service replay of the ten saved sessions: midpoint/end student feedback
-  (including the end-only `total`) plus overall observed scores.
-- `artifacts/report_fixed40_baselines_20260929/` — baseline report compiled
-  from the ten saved sessions without rerunning KT: `scenario_report.json`,
-  `scenario_summary.csv`, `per_skill_trace.csv`, `subtopic_summary.csv`.
-- `artifacts/figures_fixed40_baselines_20260929/` — 48 PNGs: 40 per-seed
-  skill traces plus 8 aggregate figures. *(Rendered PNGs cleaned
-  2026-10-02; the retained `scenario_report.json` regenerates them.)*
-
-Regenerate the baseline figures from the retained report (if the output
-path exists it refuses overwrite — use a fresh name). The v3 feedback file
-is not regenerated by this command: it was independently replayed through
-`MCQSessionService` from the saved answer rows.
-
-```bash
-python visualize_scenarios.py artifacts/report_fixed40_baselines_20260929/scenario_report.json \
-  --out-dir artifacts/figures_fixed40_baselines_20260929 --aggregate
-```
-
-Grounded results — ten synthetic fixed-order sessions, five seeds per
-profile, totals across each profile's five sessions:
-
-| profile | first half | second half | final |
-|---|---:|---:|---:|
-| learning | 40/100 | 66/100 | 106/200 |
-| fatigue | 69/100 | 49/100 | 118/200 |
-
-All 64 Phase 3 tests pass, including the optional real-bank contract test
-covering boundary profiles (all correct, all incorrect, first-half-only,
-second-half-only) over the approved 40-question bank. Replaying the ten
-saved answer sequences through the current session service re-validated the
-bank fingerprint, fixed question order, key-derived scoring, student-payload
-privacy, and the end-only `total`.
-
-Example — fatigue seed 11 scored 13/20 at midpoint and 25/40 at end. Its
-midpoint message was `You have completed 20 questions. You are halfway
-through the assessment. Continue when you are ready.` and its end message
-was `You have completed all 40 questions. On Hinta, you answered 8 of 10
-questions correctly. For your next step, practice more questions on
-Peruslaskutoimitukset (5 of 10 correct).`
-
-Limits: these are synthetic trajectories, not a student pilot; the ten runs
-are seeded variations of two profiles, neither distinct exams nor a student
-cohort. KT calibration and conformal coverage on this fixed bank remain
-unvalidated, and graph routing candidates are exploratory pending domain
-review.
-
-## Current validation status
-
-The fixed-bank validation stage is in place and passing all 75 Phase 3 tests.
-Completed checks so far:
-
-- deterministic boundary profiles score as expected on the approved bank;
-- every scenario is a fresh cold-start synthetic session with no prior
-  student history (`attempt=1`, `time_bin=0`, and `rt_mask=0`);
-- seeded learning, fatigue, stable, guessing, and weak-skill profiles are
-  reproducible and record simulated probabilities plus sampled responses;
-- incorrect outcomes uniformly select a wrong option;
-- observed scoring, KT tracing, conformal diagnostics, and assessment-graph
-  candidates remain contractually separate;
-- mixed warm/cold skill checkpoints use Phase 2's cold-if-any-item-is-cold
-  rule while retaining per-item regimes;
-- reports and plots are deterministic and refuse to overwrite outputs;
-- the bank-matched assessment taxonomy produces observed-error practice
-  candidates only — no global routing and no conformal gating;
-- (archived) a real Phase 2 graph query once returned the expected global
-  skill-level candidates and no dangling or duplicate graph edges were
-  found — retained history, not current scope;
-- (archived) private `graph.routing` records once derived from end `k=10`
-  checkpoint statuses and grounded prerequisite edges — retained history,
-  not current scope;
-- no live student pilot has been run and no LLM calls have been made.
-
-The five-seed validation ran `learning` and `fatigue` on seeds
-11, 23, 37, 41, and 53 with KT, conformal, and graph diagnostics. The
-generated responses behaved as intended:
-
-| profile | simulated first half | actual first half | simulated second half | actual second half |
-|---|---:|---:|---:|---:|
-| learning | 47.8% | 40% | 67.2% | 66% |
-| fatigue | 68.3% | 69% | 51.7% | 49% |
-
-The corresponding KT mean moved in the expected direction, but much less
-strongly than the synthetic response parameter:
-
-| profile | mean KT first half | mean KT second half |
-|---|---:|---:|
-| learning | 52.6% | 57.2% |
-| fatigue | 66.4% | 63.5% |
-
-This is an encouraging direction, not a calibration result. All of these runs
-answer a cold-start question: how the fixed test, scorer, KT, conformal gate,
-and graph respond to a fresh sequence with a rising or falling response
-pattern. They do not model warm-start students, prior history, real learning,
-or real fatigue. KT remains question/content-sensitive: the sharp per-item
-changes reflect the specific next question and response history, not merely
-the declared synthetic ability schedule. The end conformal rows are
-exploratory because fixed-bank coverage has not been independently validated;
-midpoint rows remain an approximate `k=5` diagnostic.
-
-Archived (no longer run — global prerequisite routing is out of scope): the
-former graph diagnostic worked as an exploratory global-skill lookup; for the
-current bank only price had grounded prerequisite candidates, and basic
-arithmetic, fractions, and percentages returned none. Empty meant "no
-grounded edge above the evidence threshold", not that no pedagogical
-prerequisite exists.
-
-## 2026-10-01 assessment-pipeline report
-
-The current regenerated report is `artifacts/assessment_pipeline_20261001/`
-— 54 scenario rows with checkpoint/subtopic CSVs, `comparison.png`, and
-`feedback_report.html` using the bank-matched assessment taxonomy for
-practice candidates and the saved conformal diagnostics separately. It was
-produced by replay/rescope of the saved fixed-40 evaluation: frozen
-responses, KT traces, and conformal predictions are preserved as saved, and
-no external calls are made. The earlier `full_pipeline_20261001` outputs
-used the retired global-routing scope; the rendered output directory was
-cleaned 2026-10-02 and only the source JSON is retained as archived
-history.
-
-```bash
-python evaluate_scenarios.py --replay artifacts/full_pipeline_20261001.json \
-  --assessment-only --out artifacts/assessment_pipeline_20261001.json
-python compare_scenarios.py artifacts/assessment_pipeline_20261001.json \
-  --full-pipeline --out-dir artifacts/assessment_pipeline_20261001
-```
-
-Both commands refuse to overwrite existing outputs.
-
-## Reading the scenario figures
-
-For an individual scenario figure:
-
-- blue line: the probability used to generate the synthetic response;
-- orange line: KT's pre-answer probability when KT diagnostics are enabled;
-- gray line: observed running per-skill accuracy;
-- green circle: generated answer was correct;
-- red cross: generated answer was incorrect;
-- black dashed line: global midpoint after question 20.
-
-For an aggregate figure, the blue and orange lines are medians across seeds.
-The blue band may be nearly invisible when all seeds share the same simulated
-probability schedule. Always read aggregate plots alongside the summary CSV;
-neither plot compares ground truth directly to validated mastery.
-
-## Synthetic feedback foundation (review-only)
-
-`synthetic_feedback.py` is a standalone, provider-independent seam for a
-hosted candidate selector plus a hosted phrasing generator. It is
-standard library only, makes no network or credential access, and
-persists nothing. `jev_selector.py` and `aitta_generator.py` add the two real adapters
-on that seam: a TypeSafe Jev HTTP selector and an Aitta
-OpenAI-compatible phrasing generator. Both are implemented and
-mock-tested against fake openers, and were technically verified once in
-a hosted synthetic smoke run (run1, 2026-10-02: 2 Jev + 3 Aitta
-requests on the fixed synthetic fixtures, no real student data; see
-`artifacts/hosted_combined_20261002_run1_review.md` — local, not
-committed). That run used the `synthetic_phrasing_v1` prompt; the
-revised `synthetic_phrasing_v2` instructions (no progress claims,
-third-person teacher wording) were then smoke-verified in a second
-hosted run (2 Jev + 3 Aitta requests, all successful). No
-improved-output claim is made. The deterministic teacher-end fallback
-was also corrected to third-person wording ("The assessment record is
-ready for review.").
-
-A frozen 54-scenario replay (`replay_provider_scenarios.py`) covered
-all saved scenario labels — 162 packages (student midpoint, student
-end, teacher end each) — with 98 fresh Jev calls; ten end selections
-reused identical Jev requests, and all Aitta responses reused the three
-already-captured v2 contexts, so the replay made **zero** additional
-Aitta calls. Reuse is not independent repeated calls: the coverage is
-54 labels / 162 packages, not 270 independent provider runs. All 108
-end selections chose `observed_summary`, matching the rules baseline
-every time — agreement, not demonstrated advantage. Frozen capture and
-review: `artifacts/provider_replay_20261002/` (`inputs.json`,
-`baselines.json`, `report.json`, `provider_captures/`, `review.md`).
-
-```bash
-python synthetic_feedback_demo.py          # deterministic rules baseline
-python synthetic_feedback_demo.py --mock   # local mock callbacks, not real models
-python synthetic_feedback_demo.py --jev    # hosted Jev selection (2 calls; needs TYPESAFE_API_KEY)
-python synthetic_feedback_demo.py --aitta  # hosted Aitta phrasing (3 calls; needs AITTA_API_KEY + AITTA_BASE_URL)
-python synthetic_feedback_demo.py --jev --aitta   # combined (up to 5 calls)
-python -m unittest tests.test_synthetic_feedback tests.test_jev_selector tests.test_aitta_generator -v
-```
-
-Frozen-scenario replay and local render (Windows paths):
-
-```text
-python replay_provider_scenarios.py --mode prepare --out-dir artifacts\NEW_RUN
-python render_provider_replay.py artifacts\provider_replay_20261002\report.json --out artifacts\provider_replay_20261002\review.html
-python replay_provider_scenarios.py --mode hosted --max-new-calls 100 --jev-env-file C:\private\typesafe.env --seed-demo artifacts\hosted_combined_20261002_v2.json --out-dir artifacts\NEW_RUN
-```
-
-`--mode prepare` is provider-free: it writes only the sanitized input
-snapshot and deterministic baselines. `--mode hosted` requires an
-external Jev key file and an explicit `--max-new-calls` budget, reuses
-identical captured requests (including failures), and never retries.
-All output paths are created exclusively — existing captures are never
-overwritten. `render_provider_replay.py` is offline-only: the HTML
-contains no JavaScript or external assets and escapes all dynamic text.
-
-Hosted flags are user opt-in only. Keep credentials out of the
-repository and out of IDE-managed files: a private key file outside the
-project, created or edited with an external editor (for example
-Notepad), reduces the risk of editor metadata recording it. The demo
-never reads a key file itself — it only forwards the path to the
-adapter. `JevSelector.from_env()` reads `TYPESAFE_API_KEY` from the
-environment first, else the Phase 3-local `.env`, or a caller-supplied
-private key file outside the project:
-
-```text
-python synthetic_feedback_demo.py --jev --jev-env-file C:\private\typesafe.env
-```
-
-`AittaGenerator.from_env()` reads `AITTA_API_KEY`, `AITTA_BASE_URL`, and
-optional `AITTA_MODEL` from the environment first, then the
-repository-root `.env` for any value still unset (it never reads the
-Phase 3-local `.env`; unrelated entries in the root file are ignored
-without parsing or logging their values). Set-but-invalid values —
-including an explicitly empty `AITTA_MODEL` — fail rather than silently
-falling back; the model defaults to `openai/gpt-oss-120b` only when
-`AITTA_MODEL` is entirely absent.
-
-The demo prints private review packages (schema
-`phase3_synthetic_feedback_review_v1`) for student midpoint, student
-end, and teacher end from the same literal synthetic fixture counts;
-the fixtures are not measured results, and every draft keeps
-`requires_human_review=True`. Boundaries enforced by the module:
-
-- input must carry the caller-attested `data_origin="synthetic"` label
-  — an attestation, not proof of origin;
-- outbound payloads are built fresh from a fixed allowlist: a student
-  midpoint payload contains only audience, checkpoint, and permitted
-  candidates (privately held midpoint counts are never sent out), and
-  an end payload carries only validated skill rows plus a deterministic
-  total;
-- `JevSelector` revalidates the exact selection payload before any
-  request, sends only the allowlisted `{audience, checkpoint, evidence,
-  candidates}` state plus the fixed `jev_selection_v1` choice question,
-  refuses redirects (the Bearer token cannot leak to another host),
-  caps the response at 1 MiB, and sanitizes every provider failure to
-  `JevSelectionError('Jev request failed')` — never echoing credentials
-  or raw response text. Midpoint resolves locally: a single-candidate
-  choice makes no network call. The adapter stores the key privately
-  and reads it only via `JevSelector.from_env()` (environment variable
-  first, else the Phase 3-local `.env`, or an explicit `--jev-env-file`
-  path — never the repo-root file by default);
-- `AittaGenerator` revalidates the exact generation payload before any
-  request, but wires a *narrower* context than the local payload: only
-  `{audience, checkpoint, selected_candidate: {candidate_id, strategy,
-  review_status}}` reaches the model — no evidence, counts, skill
-  names, skill IDs, or `permitted_evidence`. The model writes a neutral
-  opening; all facts are rendered by application code. The request uses
-  the fixed `synthetic_phrasing_v2` instructions verbatim with
-  `max_tokens=1024`, `reasoning_effort="low"`, and JSON-object response
-  format — no temperature, retries, or extra prompts. Responses must be
-  a single `finish_reason="stop"` choice whose message content is exact
-  `{candidate_id, opening}` JSON; the opening passes the same shape and
-  heuristic checks, the response `model` and token `usage` are
-  validated (consistent prompt + completion = total), and every failure
-  sanitizes to `AittaGenerationError('Aitta request failed')` before
-  the runner sees it (recorded as `generator_error`, distinct from a
-  returned-but-invalid `invalid_generation`);
-- selector exceptions or malformed/unknown selections fall back to the
-  rules baseline and skip the generator; generator exceptions or
-  invalid openings fall back to fixed wording for the same candidate;
-  no retries;
-- injected callbacks are arbitrary synchronous callables and cannot be
-  forcibly timed out inside the module — provider adapters must enforce
-  their own transport timeouts (`JevSelector` and `AittaGenerator` both
-  forward a configurable `timeout`, default 30 s, with zero retries);
-- the review trace's `provider_metadata` holds only placeholders
-  (`model_version`/`cost` stay None); under `--jev`/`--aitta` the real
-  model strings, token usage, and prompt versions are recorded in each
-  package's adjacent `selector_metadata`/`generator_metadata` — and
-  when a selector failure makes the runner skip the generator, that
-  package's `generator_metadata` reports
-  `status: "skipped_selector_failure"` with null model/usage instead
-  of stale metadata from an earlier package;
-- generated prose passes shape and heuristic checks only — not a
-  semantic-grounding guarantee — and no draft claims to be approved for
-  learners.
-
-## Tests
-
-```bash
+```powershell
 python -m unittest discover -s tests -v
 ```
 
-Most tests use a synthetic approved-shaped bank. They do not load the private
-40-question artifact or the 2 GB embedding table. `test_real_bank_contract.py`
-is an optional local integration test: when the approved v2 bank exists it
-verifies the public payload and private scoring path, and it skips otherwise.
+Most tests use synthetic or fake banks/providers. The optional real-bank test
+runs only when the approved Phase 2 bank is available. Browser verification
+scripts under `artifacts/live_demo_20261002/verification/` prove UI behavior
+or validate captured data; they do not rerun provider calls or establish
+educational validity.
 
-## Remaining work
+Caution: a running demo keeps the native KT model resident in memory. Stop or
+coordinate the server before a memory-heavy full test run.
 
-1. Consolidate the validation package further: the paired sensitivity
-   tooling was removed to keep scope on the fixed-40 flow (see the
-   2026-09-29 package above); remaining consolidation is folding
-   human-readable skill names, regime counts, conformal status counts, and
-   graph artifact provenance into the report/manifest.
-2. Evaluate the model against held-out historical sessions where their
-   questions match the current data requirements. This is stronger than
-   synthetic-only evidence but still does not validate the fixed instrument if
-   the historical sessions differ from its order/content.
-3. Ask a domain expert to review graph candidates — and any private
-   `graph.routing` recommendation built on them — as acceptable,
-   questionable, or rejected. Empty graph output means no grounded edge passed
-   the evidence threshold; it is not a claim that no prerequisite exists.
-4. If a future pilot becomes available, capture timestamps/response durations
-   and cold-start versus prior-history state. Until real fixed-test sessions
-   are evaluated, keep midpoint `k=5` approximate and end `k=10` exploratory.
-5. Keep observed feedback, KT, conformal, graph, and private routing outputs
-   separate. A future LLM composer should only use verified observed counts
-   and explicitly reviewed diagnostic context; it must not receive private
-   answer keys, raw synthetic ability, unvalidated conformal status,
-   unreviewed graph candidates, or private routing records as authoritative
-   facts.
-6. Student deployment still needs authentication/authorization, production
-   data handling, a frontend or framework route layer, and a decision about
-   which diagnostics are safe to expose.
+## 13. Safety limits
+
+- No real student data may be entered.
+- Feedback is not approved for learner delivery.
+- A Jev selection differing from the baseline is not automatically better.
+- Aitta does not currently generate individualized mathematical advice.
+- KT/conformal do not control Jev selection or student feedback.
+- Sparse subtopic counts cannot establish mastery or misconceptions.
+- The bank is assessment content, not an approved practice-activity bank.
+- The local PIN/cookie model is demo separation only; production requires
+  real authentication, authorization, TLS, durable storage, privacy review,
+  monitoring, and a job queue.
+
+## 14. Next work
+
+1. Build the 54-case Scenario Library UI from the retained replay report.
+2. Add blinded educator comparison for baseline versus provider outputs.
+3. Expand feedback carefully with bounded, evidence-grounded composition.
+4. Create a reviewed practice-activity bank and worked explanations.
+5. Validate KT/conformal behavior for this fixed assessment before any use in
+   advice.
+6. Only after educator and privacy review, consider a supervised pilot and
+   production hardening.
