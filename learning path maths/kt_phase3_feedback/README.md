@@ -1,4 +1,4 @@
-# Phase 3 — synthetic assessment and educator-review demo
+# Evidence Lab — Phase 3 synthetic assessment and educator review
 
 Phase 3 is the integration layer for a fixed 40-question mathematics
 assessment. The current project is an interactive localhost prototype with:
@@ -30,12 +30,20 @@ Implemented:
 - deterministic baseline feedback with Jev/Aitta fallback;
 - provider execution provenance, including fresh/cached/local/fallback states;
 - English display labels and prototype question translations;
-- poll-safe dashboard disclosure and review-form state.
+- poll-safe dashboard disclosure and review-form state;
+- responsive Evidence Lab assessment and educator workspace, keyboard-accessible
+  session controls, session search, and explicit synthetic-response consent;
+- a searchable 54-case Scenario Library with plain-language names and shared
+  live/session detail views;
+- asynchronous selected, filtered, or full-set replay of original answers through
+  the current pipeline, with run history, cancellation, version selection, and
+  original-versus-replay changes;
+- a source-masked A/B educator-review protocol with persisted randomization,
+  immutable judgments, resume, and provenance-bound JSON export.
 
 Pending:
 
-- a UI for browsing all 54 saved replay scenarios;
-- a blind baseline-vs-provider educator comparison;
+- independent educator recruitment, protocol review, and preference evaluation;
 - richer, bounded evidence-grounded feedback composition;
 - a reviewed practice-question/worked-solution bank;
 - calibrated KT/conformal validity for this fixed assessment;
@@ -116,16 +124,23 @@ authentication.
 
 ### Teacher dashboard
 
-The teacher page shows six tabs:
+The teacher page has three workspaces: **Live sessions**, **Scenario library**,
+and **Blind comparison**. Live sessions and scenarios share the same six-tab
+renderer (including separate review-draft and disclosure state):
 
-1. Overview — session status, answer count, provider/diagnostic job state;
-2. Evidence — observed totals and skill/subtopic counts plus private question
-   records;
-3. Graph — descriptive hierarchy and observed counts;
-4. Research — private frozen KT and conformal diagnostics;
-5. Feedback — baseline versus selected drafts, candidates, provider trace,
-   and the selection-decision panel;
-6. Review — educator review fields, notes, and the saved review ledger.
+1. Summary — session status, counts, job state, provenance, and replay changes;
+2. Answers & scores — observed skill/subtopic totals and private question records;
+3. Skill map — descriptive hierarchy and observed counts;
+4. Model diagnostics — KT probability charts and conformal checkpoint tables;
+5. Feedback drafts — baseline versus selected drafts, candidate selection,
+   execution provenance, and halfway student feedback;
+6. Educator review — version-bound review fields, notes, and saved review ledger.
+
+Names describe the answer pattern, for example “Errors in Fractions only” or
+“High correct-answer probability · Example 1”. Seeds and technical identifiers
+remain in audit records rather than primary labels. Repeated live sessions are
+distinguished by their creation timestamps. The random seed control is under
+Reproducibility settings.
 
 Teacher actions include synthetic simulation profiles, JSON export, and
 logout. Simulation profiles are response patterns, not learner diagnoses.
@@ -133,6 +148,96 @@ logout. Simulation profiles are response patterns, not learner diagnoses.
 The dashboard polls approximately every two seconds. Unchanged payloads skip
 redraws; expanded sections and unsaved review edits are preserved across real
 updates.
+
+### Scenario Library
+
+The library reads `artifacts/integrated_feedback_20261002_hosted_full/report.json`
+by default. Override it with `--replay-report PATH`. It loads the report lazily
+and pins that snapshot for the server process; restart to use a different file
+revision. Missing or malformed reports show an unavailable state without
+blocking live sessions. Opening the library makes **no provider or model calls**.
+
+Search by case/skill; filter by scenario group or selection agreement; sort by
+name or observed score. Each case exposes checkpoint/audience packages,
+observed skill/subtopic counts, baseline and selected text, execution provenance,
+and private frozen graph/diagnostics. Summary counts are derived from packages,
+not copied from the report summary. Selection differences are not quality scores.
+Original results are read-only. Individual answers are joined from the matching
+private source and bank; if those inputs are unavailable or incompatible, the UI
+says so instead of inventing answers. Historical diagnostics stay labelled as saved
+inference, not newly computed results.
+
+### Replay scenarios after a change
+
+1. Restart the server after changing Python pipeline code. Replay refuses admission
+   if tracked Phase 3/Phase 2 source files differ from their startup fingerprints.
+   Refresh the page after UI changes; Python is not hot-reloaded.
+2. In Scenario Library, choose **Replay this scenario**, **Replay filtered scenarios**,
+   or **Replay all 54 scenarios**. Selected-case replay preserves the active detail
+   tab, so you can watch the same view on the new result.
+3. Confirm execution mode. **Rules only** makes no hosted calls, even when the server
+   is configured for hosted providers. Hosted replay requires explicit consent,
+   shares the server's existing call budget and serialized provider worker, and
+   retains effective-request cache reuse. It does not force fresh independent calls.
+4. Follow Replay history. One batch runs at a time, one case at a time. Each case
+   resubmits its exact original 40 question/option-index pairs through `DemoService`,
+   recomputing scores, observed evidence, maps, feedback, and requesting fresh
+   frozen-model/conformal diagnostics at 20 and 40 answers. No retraining occurs.
+   Fallbacks, unavailable diagnostics, and failed cases remain visibly labelled.
+5. Select **Result version** to switch between the retained original and new runs.
+   Summary shows score changes, changed candidate/text per audience, before/after
+   wording, and maximum KT probability difference where both traces are available.
+   These comparisons are against the original report, not evidence of improvement.
+6. Add reviews to a replayed result through Educator review. Export an individual
+   result or the complete batch record. **Stop after current scenario** lets admitted
+   provider/model work finish and prevents further cases from starting.
+
+Original answers default to `artifacts/assessment_pipeline_20261001.json`; override
+with `--replay-source PATH`. Its raw-file hash must match the selected report's
+source hash, and its bank, question order, indices, and observed totals must agree.
+A different bank requires a newly validated compatible source/report, not reinterpretation
+of old option indices.
+
+Runs are stored under `--root/replay_runs/`, with full completed-result snapshots in
+`replay_runs/results/`; their sessions/metadata reuse the normal private store but
+are excluded from the Live sessions list. Run records include code/source fingerprints,
+status, session links, and changes. Exact start-request retries are idempotent. Server
+restarts mark unfinished batches interrupted; they never automatically repeat provider
+calls. Completed snapshots and saved review notes remain readable if a later policy,
+taxonomy, or bank makes the live metadata incompatible; those older snapshots become
+read-only. Nothing rewrites retained reports or retargets existing blind comparisons.
+
+### Source-masked educator comparison
+
+For less-biased review, complete **Blind comparison before browsing drafts**.
+Use a pseudonymous reviewer code, select one audience, and declare prior exposure.
+The server shuffles all cases for that audience and balances baseline placement
+between A and B (within one for odd case counts). The actual allocation is stored,
+not reconstructed from a browser seed. Identical-text pairs remain in the review.
+
+Only the current task's observed evidence and A/B text reach the blind-review
+response. Case names, candidate IDs, source mapping, execution records, and hashes
+remain withheld until **all judgments are saved**. Record preference (A/B/tie/neither),
+evidence support for each draft, confidence, and optional rationale. Judgments are
+immutable; identical retries are idempotent. Leave and resume through All reviews.
+
+Completed reviews expose descriptive preference counts and a private JSON export
+with exact draft text, assignments, judgments, timestamps, report/message/evidence/
+package hashes, policy identity, and provider provenance. Records live under
+`--root/comparisons/`, separate from live-session reviews and historical reports.
+In-progress reviews from a different report revision cannot accept new judgments;
+restore the original report and restart, or start a separate review. Completed
+records remain exportable even when the original report is unavailable.
+
+This is **pilot review tooling, not a completed or validated benchmark**. Exposure
+is self-reported at review start (the UI also remembers opened drafts in the browser
+tab); other tabs, local files, later browsing, or writing style can defeat blinding.
+The teacher role can access unblinded library routes. Use separate reviewer sessions
+and a supervised protocol for a real study. Do not treat correlated scenarios,
+duplicate response patterns, cached captures, or repeated reviewer sessions as
+independent trials. No inferential significance or provider-superiority claim is
+computed. File persistence is single-process local storage, not a production or
+tamper-proof research database. A completed review never approves learner delivery.
 
 ## 5. Runtime architecture
 
@@ -237,6 +342,19 @@ advice.
 | `/api/teacher/sessions/{sid}` | GET | private session detail |
 | `/api/teacher/sessions/{sid}/export` | GET | private JSON export |
 | `/api/teacher/sessions/{sid}/reviews` | POST | store educator review |
+| `/api/teacher/scenarios` | GET | derived summary and saved case index |
+| `/api/teacher/scenarios/{id}` | GET | private original case plus shared detail view |
+| `/api/teacher/scenarios/{id}/export` | GET | original case export |
+| `/api/teacher/replays` | GET / POST | list / enqueue replay batches |
+| `/api/teacher/replays/{id}` | GET | progress, case statuses, and changes |
+| `/api/teacher/replays/{id}/cancel` | POST | stop after the current case |
+| `/api/teacher/replays/{id}/export` | GET | batch provenance and changes |
+| `/api/teacher/replays/{id}/cases/{case_id}` | GET | current or preserved result detail |
+| `/api/teacher/replays/{id}/cases/{case_id}/export` | GET | individual replay result export |
+| `/api/teacher/comparisons` | GET / POST | list / start source-masked reviews |
+| `/api/teacher/comparisons/{id}` | GET | resume current blinded task |
+| `/api/teacher/comparisons/{id}/reviews` | POST | save immutable task judgment |
+| `/api/teacher/comparisons/{id}/export` | GET | reveal/export a completed review |
 
 Student requests use `X-Demo-Session-Token`. Teacher requests use the opaque
 `demo_teacher` HttpOnly cookie. The legacy `api.py` uses a different route set
@@ -248,6 +366,8 @@ and is not the current UI backend.
 |---|---|
 | Current web boundary/UI | `demo_api.py`, `web_demo/app.js`, `web_demo/index.html`, `web_demo/teacher.html`, `web_demo/styles.css` |
 | Demo orchestration | `demo_service.py` |
+| Retained report, labels + source-masked review | `research_workspace.py`, `web_demo/research.js` |
+| New replay orchestration + result snapshots | `scenario_replays.py`, `DemoService` |
 | Session/scoring/persistence | `mcq_service.py`, `session_store.py`, `schemas.py` |
 | Evidence and graph | `evidence_feedback.py`, `feedback_service.py`, `assessment_taxonomy_draft.json` |
 | Feedback policy/rendering | `evidence_feedback_policy.py`, `render_evidence_feedback.py`, `educator_review_contract.py` |
@@ -341,8 +461,9 @@ provenance.
 Narrow local checks:
 
 ```powershell
-python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics
+python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics tests.test_research_workspace tests.test_scenario_replays
 node --check web_demo/app.js
+node --check web_demo/research.js
 ```
 
 Full local test discovery:
@@ -350,6 +471,27 @@ Full local test discovery:
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+Opt-in browser verification using installed Microsoft Edge and the existing
+`websocket-client` Python package (no new browser dependency):
+
+```powershell
+$env:RUN_BROWSER_TESTS = "1"
+python -m unittest tests.test_research_browser -v
+Remove-Item Env:RUN_BROWSER_TESTS
+```
+
+Optionally set `BROWSER_SCREENSHOTS` to an existing local output directory, or
+`EDGE_BINARY` to the installed Edge executable. The browser test uses an isolated
+temporary server, fake model/providers, and synthetic review judgments. When the
+retained report exists, it also browses its actual 54-case library. It checks
+source reveal timing, filtering, 390px/1440px layout, preserved review drafts,
+synthetic consent, selected/filtered/all replay, result-version switching, replay
+review submission, and the full 40-answer flow. The optional real-source unit test
+replays all 54 retained answer sequences with fake diagnostics and no providers;
+it proves orchestration/score preservation, not fresh real-model validity. This verifies software behavior,
+not educator preference or educational validity. Browser tests skip during normal
+unit discovery unless explicitly enabled.
 
 Most tests use synthetic or fake banks/providers. The optional real-bank test
 runs only when the approved Phase 2 bank is available. Browser verification
@@ -375,8 +517,10 @@ coordinate the server before a memory-heavy full test run.
 
 ## 14. Next work
 
-1. Build the 54-case Scenario Library UI from the retained replay report.
-2. Add blinded educator comparison for baseline versus provider outputs.
+1. Review the implemented comparison protocol with educators; preregister the
+   evaluation questions, sampling, duplicate handling, and analysis before data collection.
+2. Run independent educator reviews using the source-masked workflow; inspect
+   evidence-support judgments as well as preferences, stratified by exposure and execution provenance.
 3. Expand feedback carefully with bounded, evidence-grounded composition.
 4. Create a reviewed practice-activity bank and worked explanations.
 5. Validate KT/conformal behavior for this fixed assessment before any use in

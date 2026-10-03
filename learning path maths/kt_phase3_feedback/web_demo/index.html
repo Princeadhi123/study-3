@@ -3,44 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Synthetic Assessment Demo — Student</title>
+<meta name="color-scheme" content="light">
+<title>Evidence Lab — Synthetic Assessment</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-page="student">
+<a class="skip-link" href="#student-root">Skip to assessment</a>
 <header class="masthead">
   <div class="masthead-inner">
-    <div>
-      <h1>Synthetic Assessment Demo</h1>
-      <p class="banner">Synthetic-only session — drafts require educator
-      review. This is a local research demo, not a live learner service.</p>
-      <p class="meta small">English display labels and draft question
-      translations; source JSON retains original wording.</p>
-    </div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">el</span><div><span class="eyebrow">MATHEMATICS / RESEARCH PROTOTYPE</span><h1>Evidence Lab<span class="phase-tag">Phase 03</span></h1></div></div>
     <nav class="topnav" aria-label="Demo pages">
-      <a href="/" aria-current="page">Student</a>
-      <a href="/teacher">Teacher</a>
+      <a href="/" aria-current="page">Assessment</a>
+      <a href="/teacher">Educator workspace</a>
     </nav>
   </div>
 </header>
-<main id="student-root">
+<main id="student-root" tabindex="-1">
+  <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Feedback is a draft requiring educator review, not approved learner advice.</p>
   <p id="student-error" class="error" role="alert" hidden></p>
 
-  <section id="start-panel" class="card" hidden>
-    <h2>Start a synthetic session</h2>
-    <p>Every answer in this demo is synthetic and private to this
-    machine. No personal details are collected. The 40 questions are
-    answered in a fixed order; results shown at the end are drafts that
-    a human reviewer has not approved.</p>
-    <button id="start-button" class="primary">Start synthetic session</button>
+  <section id="start-panel" class="card assessment-intro" hidden>
+    <p class="eyebrow">EXPLORE THE ASSESSMENT EXPERIENCE</p>
+    <h2>A small assessment.<br>A closer look at the evidence.</h2>
+    <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then explore the observed results and draft feedback at the end.</p>
+    <div class="assessment-facts"><div><strong>40</strong><span>Ordered questions</span></div><div><strong>4</strong><span>Mathematics skills</span></div><div><strong>2</strong><span>Checkpoints</span></div></div>
+    <p class="meta">Arithmetic · Prices · Fractions · Percentages</p>
+    <label class="attestation"><input id="synthetic-consent" type="checkbox"><span>I will use synthetic responses only, not real student information. I understand that this is a research prototype.</span></label>
+    <button id="start-button" class="primary" disabled>Start synthetic session</button>
+    <p class="meta small">Progress is saved in this browser. English question wording is a prototype translation pending educator review.</p>
   </section>
 
   <section id="question-panel" class="card" hidden aria-live="polite">
     <div class="rail">
       <p class="meta">Question <span id="q-pos" class="num"></span> of
       <span class="num">40</span></p>
-      <progress id="q-progress" max="40" value="0"></progress>
+      <progress id="q-progress" max="40" value="0" aria-label="Answered questions"></progress>
     </div>
-    <h2 id="q-text"></h2>
+    <h2 id="q-text" tabindex="-1"></h2>
     <fieldset id="q-options" class="options">
       <legend class="visually-hidden">Choose one answer</legend>
     </fieldset>
@@ -68,8 +67,9 @@
   <section id="load-error" class="card" hidden>
     <h2>Session unavailable</h2>
     <p>The saved session is unavailable. Start a new synthetic session.</p>
-    <button id="fresh-start" class="primary">Start synthetic session</button>
+    <button id="fresh-start" class="primary">Return to session setup</button>
   </section>
+  <footer class="page-footer"><span>Evidence Lab / Phase 03</span><span>Synthetic only · Observed scores are not mastery estimates</span></footer>
 </main>
 <script src="/app.js"></script>
 </body>

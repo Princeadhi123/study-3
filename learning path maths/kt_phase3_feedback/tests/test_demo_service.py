@@ -118,6 +118,7 @@ class BudgetAtGeneratorGenerator:
 class DemoServiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.bank = make_bank()
         self.taxonomy = make_taxonomy(self.bank)
         self.service = self._service()
@@ -127,9 +128,11 @@ class DemoServiceTests(unittest.TestCase):
 
     def _service(self, **kwargs):
         kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
-        return DemoService(root=Path(self.tmp.name),
-                           bank=self.bank, taxonomy=self.taxonomy,
-                           **kwargs)
+        service = DemoService(root=Path(self.tmp.name),
+                              bank=self.bank, taxonomy=self.taxonomy,
+                              **kwargs)
+        self.addCleanup(service.close, wait=True)
+        return service
 
     def create(self):
         return self.service.create_session()

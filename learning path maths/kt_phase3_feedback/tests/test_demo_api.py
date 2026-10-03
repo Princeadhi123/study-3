@@ -20,6 +20,10 @@ from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_live_diagnostics import FakeGate
 from tests.test_kt_adapter import FakeKT
 from live_diagnostics import LiveDiagnostics
+from tests.test_research_workspace import make_report, judgment
+from tests.test_scenario_replays import replay_fixture
+from research_workspace import ResearchWorkspace
+import secrets
 
 PIN = "246810"
 
@@ -37,9 +41,11 @@ class DemoAPITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.bank = make_bank()
+        report_path = Path(self.tmp.name) / "report.json"
+        report_path.write_text(json.dumps(make_report(2)), encoding="utf-8")
         self.service = DemoService(
             root=Path(self.tmp.name), bank=self.bank,
-            taxonomy=make_taxonomy(self.bank),
+            taxonomy=make_taxonomy(self.bank), replay_report=report_path,
             diagnostics=LiveDiagnostics(
                 model_loader=lambda: FakeKT(self.bank),
                 gate_loader=lambda: {"midpoint": FakeGate(5),
@@ -56,7 +62,7 @@ class DemoAPITests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        self.service.close()
+        self.service.close(wait=True)
         self.tmp.cleanup()
 
     def request(self, method, path, body=None, headers=None,
@@ -404,6 +410,112 @@ class DemoAPITests(unittest.TestCase):
                       meta.get("Content-Disposition", ""))
         self.assertNotIn("demo_teacher", json.dumps(exported))
         self.assertNotIn(cookie, json.dumps(exported))
+
+    def test_research_routes_require_teacher_cookie(self):
+        for method, path, body in (
+                ("GET", "/api/teacher/replays", None),
+                ("POST", "/api/teacher/replays", {}),
+                ("GET", "/api/teacher/replays/" + "a" * 32, None),
+                ("GET", "/api/teacher/replays/" + "a" * 32 + "/export", None),
+                ("GET", "/api/teacher/replays/" + "a" * 32 + "/cases/" + "b" * 32, None),
+                ("GET", "/api/teacher/replays/" + "a" * 32 + "/cases/" + "b" * 32 + "/export", None),
+                ("POST", "/api/teacher/replays/" + "a" * 32 + "/cancel", {}),
+                ("GET", "/api/teacher/scenarios", None),
+                ("GET", "/api/teacher/scenarios/" + "a" * 32, None),
+                ("GET", "/api/teacher/comparisons", None),
+                ("POST", "/api/teacher/comparisons", {}),
+                ("GET", "/api/teacher/comparisons/" + "a" * 32, None),
+                ("GET", "/api/teacher/comparisons/" + "a" * 32 + "/export", None),
+                ("POST", "/api/teacher/comparisons/" + "a" * 32 + "/reviews", {})):
+            status, _, _ = self.request(method, path, body,
+                                        headers={"X-Phase3-Role": "researcher"})
+            self.assertEqual(status, 403, path)
+
+    def test_research_library_and_blind_review_over_http(self):
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        headers = {"Cookie": f"demo_teacher={cookie}"}
+        status, library, meta = self.teacher_get("/api/teacher/scenarios", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(library["summary"]["scenarios"], 2)
+        self.assertEqual(meta["Cache-Control"], "no-store")
+        status, case, _ = self.teacher_get(
+            "/api/teacher/scenarios/" + library["scenarios"][0]["id"], cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(case["name"], "case_0")
+        status, view, _ = self.request("POST", "/api/teacher/comparisons", {
+            "reviewer_label": "fixture", "audience": "student", "prior_exposure": False}, headers)
+        self.assertEqual(status, 201)
+        path = "/api/teacher/comparisons/" + view["id"]
+        self.assertNotIn("mapping", json.dumps(view))
+        status, _, _ = self.teacher_get(path + "/export", cookie)
+        self.assertEqual(status, 409)
+        body = judgment(view["task"])
+        status, next_view, _ = self.request("POST", path + "/reviews", body, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(next_view["completed"], 1)
+        status, repeated, _ = self.request("POST", path + "/reviews", body, headers)
+        self.assertEqual(repeated, next_view)
+        status, _, _ = self.request("POST", path + "/reviews", dict(body, preference="B"), headers)
+        self.assertEqual(status, 409)
+        status, final, _ = self.request("POST", path + "/reviews", judgment(next_view["task"]), headers)
+        self.assertEqual(final["status"], "complete")
+        status, exported, meta = self.teacher_get(path + "/export", cookie)
+        self.assertEqual(status, 200)
+        self.assertIn("attachment", meta["Content-Disposition"])
+        self.assertEqual(len(exported["tasks"]), 2)
+        self.assertFalse(exported["approves_learner_delivery"])
+        self.assertNotIn(cookie, json.dumps(exported))
+        status, _, _ = self.request("GET", "/comparisons/" + view["id"] + ".json")
+        self.assertEqual(status, 404)
+
+    def test_replay_api_submission_export_and_archived_detail(self):
+        source, report, _ = replay_fixture(Path(self.tmp.name), self.bank, self.service.taxonomy)
+        self.service.research = ResearchWorkspace(self.service.root, report)
+        self.service.replays.source_path = source
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        headers = {"Cookie": f"demo_teacher={cookie}"}
+        _, library, _ = self.teacher_get("/api/teacher/scenarios", cookie)
+        body = {"request_id": secrets.token_hex(16), "report_sha256": library["report_sha256"],
+                "scenario_ids": [library["scenarios"][0]["id"]], "provider_mode": "rules",
+                "allow_provider_calls": False}
+        status, run, _ = self.request("POST", "/api/teacher/replays", body, headers)
+        self.assertEqual(status, 202)
+        path = "/api/teacher/replays/" + run["id"]
+        self.assertTrue(wait_for(lambda: self.teacher_get(path, cookie)[1]["status"] == "complete"))
+        status, result, meta = self.teacher_get(path + "/export", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(meta["Cache-Control"], "no-store")
+        self.assertIn("attachment", meta["Content-Disposition"])
+        self.assertNotIn("student_token", json.dumps(result))
+        self.assertNotIn("selected_index", json.dumps(result))
+        status, retry, _ = self.request("POST", "/api/teacher/replays", body, headers)
+        self.assertEqual(retry["id"], result["id"])
+        status, _, _ = self.request("POST", "/api/teacher/replays", dict(body, provider_mode="hosted"), headers)
+        self.assertEqual(status, 400)
+        sid = result["cases"][0]["session_id"]
+        status, replay_case, meta = self.teacher_get(path + "/cases/" + body["scenario_ids"][0] + "/export", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(replay_case["session_id"], sid)
+        self.assertEqual(len(replay_case["question_responses"]), 40)
+        self.assertIn("attachment", meta["Content-Disposition"])
+        status, _, _ = self.request("GET", "/api/sessions/" + sid)
+        self.assertEqual(status, 403)
+        status, case, _ = self.teacher_get("/api/teacher/scenarios/" + body["scenario_ids"][0] + "/export", cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(case["detail"]["read_only"])
+        self.assertEqual(len(case["detail"]["question_responses"]), 40)
+        status, _, _ = self.request("POST", path + "/cancel", {}, headers)
+        self.assertEqual(status, 200)
+
+    def test_research_script_has_same_strict_csp(self):
+        status, body, meta = self.request("GET", "/research.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"initResearchWorkspace", body)
+        self.assertIn("script-src 'self'", meta["Content-Security-Policy"])
+        self.assertNotIn("unsafe-inline", meta["Content-Security-Policy"])
 
     def test_simulation_endpoint_creates_session(self):
         status, _, meta = self.unlock()

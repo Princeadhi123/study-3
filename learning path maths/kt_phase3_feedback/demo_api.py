@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 from demo_service import (
     DEFAULT_ROOT, ConflictError, DemoService)
+from research_workspace import DEFAULT_REPORT, ResearchConflict
+from scenario_replays import DEFAULT_SOURCE
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 MAX_BODY_BYTES = 1_048_576
@@ -30,6 +32,7 @@ STATIC_FILES = {
     "/teacher": "teacher.html",
     "/teacher.html": "teacher.html",
     "/app.js": "app.js",
+    "/research.js": "research.js",
     "/styles.css": "styles.css",
 }
 CONTENT_TYPES = {
@@ -136,6 +139,10 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             status, payload, extra = 404, {"error": "not_found"}, {}
         except PermissionError:
             status, payload, extra = 403, {"error": "forbidden"}, {}
+        except ResearchConflict as exc:
+            status, payload, extra = 409, {"error": "comparison_conflict"}, {}
+            if self.path.startswith("/api/teacher/replays"):
+                payload = {"error": "replay_conflict", "reason": str(exc)}
         except ConflictError as exc:
             status, payload, extra = 409, {
                 "error": "stale_feedback_revision",
@@ -200,6 +207,54 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/teacher/sessions" and method == "GET":
             self._require_teacher()
             return 200, {"sessions": self.service.list_sessions()}, {}
+
+        if path.startswith("/api/teacher/replays"):
+            self._require_teacher()
+            if path == "/api/teacher/replays":
+                if method == "GET":
+                    return 200, self.service.replays.list(), {}
+                return 202, self.service.replays.start(self._json_body()), {}
+            result = re.fullmatch(r"/api/teacher/replays/([a-f0-9]{32})/cases/([a-f0-9]{32})(/export)?", path)
+            if result and method == "GET":
+                extra = {"Content-Disposition": f'attachment; filename="replay_case_{result[2]}.json"'} if result[3] else {}
+                return 200, self.service.replays.result(result[1], result[2]), extra
+            replay = re.fullmatch(r"/api/teacher/replays/([a-f0-9]{32})(?:/(cancel|export))?", path)
+            if replay:
+                rid, action = replay.groups()
+                if method == "POST" and action == "cancel":
+                    if self._json_body() != {}:
+                        raise ValueError("cancel expects an empty object")
+                    return 200, self.service.replays.cancel(rid), {}
+                if method == "GET" and action in (None, "export"):
+                    extra = {"Content-Disposition": f'attachment; filename="replay_{rid}.json"'} if action else {}
+                    return 200, self.service.replays.get(rid), extra
+            raise FileNotFoundError("route not found")
+
+        if path.startswith(("/api/teacher/scenarios", "/api/teacher/comparisons")):
+            self._require_teacher()
+            research = self.service.research
+            if path == "/api/teacher/scenarios" and method == "GET":
+                return 200, research.library(), {}
+            case = re.fullmatch(r"/api/teacher/scenarios/([a-f0-9]{32})(/export)?", path)
+            if case and method == "GET":
+                extra = {"Content-Disposition": f'attachment; filename="scenario_{case[1]}.json"'} if case[2] else {}
+                return 200, self.service.scenario_detail(case[1]), extra
+            if path == "/api/teacher/comparisons":
+                if method == "GET":
+                    return 200, research.comparisons(), {}
+                return 201, research.create_comparison(self._json_body()), {}
+            comparison = re.fullmatch(
+                r"/api/teacher/comparisons/([a-f0-9]{32})(?:/(reviews|export))?", path)
+            if comparison:
+                cid, action = comparison.groups()
+                if method == "GET" and action is None:
+                    return 200, research.comparison(cid), {}
+                if method == "POST" and action == "reviews":
+                    return 201, research.add_judgment(cid, self._json_body()), {}
+                if method == "GET" and action == "export":
+                    return 200, research.export_comparison(cid), {
+                        "Content-Disposition": f'attachment; filename="comparison_{cid}.json"'}
+            raise FileNotFoundError("route not found")
 
         match = TEACHER_SESSION_RE.fullmatch(path)
         if match:
@@ -425,12 +480,15 @@ def main(argv=None):
     parser.add_argument("--call-budget", type=int, default=12)
     parser.add_argument("--provider-timeout", type=float, default=120.0)
     parser.add_argument("--teacher-pin")
+    parser.add_argument("--replay-report", type=Path, default=DEFAULT_REPORT)
+    parser.add_argument("--replay-source", type=Path, default=DEFAULT_SOURCE)
     args = parser.parse_args(argv)
     pin = args.teacher_pin or f"{secrets.randbelow(1_000_000):06d}"
     service = DemoService(
         root=args.root, provider_mode=args.providers,
         jev_env_file=args.jev_env_file, call_budget=args.call_budget,
-        provider_timeout=args.provider_timeout)
+        provider_timeout=args.provider_timeout, replay_report=args.replay_report,
+        replay_source=args.replay_source)
     server = make_server(service, pin, host=args.host, port=args.port)
     host, port = server.server_address[:2]
     print(f"Synthetic demo listening at http://{host}:{port}", flush=True)

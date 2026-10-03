@@ -121,6 +121,11 @@ const PAGE = document.body.dataset.page;
 const POLL_MS = 2000;
 const MAX_BACKOFF_MS = 15000;
 const SVGNS = "http://www.w3.org/2000/svg";
+const statusLabel = (value) => ({not_requested: "Not started", pending: "Processing",
+  ready: "Ready", fallback: "Baseline fallback", unavailable: "Unavailable",
+  in_progress: "In progress", complete: "Complete", queued: "Queued", running: "Running",
+  cancelling: "Finishing current case", cancelled: "Stopped", interrupted: "Interrupted",
+  failed: "Failed", complete_with_errors: "Finished with errors"}[value] || String(value || "Unknown").replaceAll("_", " "));
 
 function el(tag, text, className) {
   const node = document.createElement(tag);
@@ -418,7 +423,7 @@ function studentPage() {
     $("#q-progress").value = answered;
     $("#q-text").textContent = englishQuestionText(question);
     const box = $("#q-options");
-    box.replaceChildren();
+    box.replaceChildren(el("legend", "Choose one answer", "visually-hidden"));
     question.options.forEach((option, index) => {
       const label = el("label", null, "option");
       const radio = document.createElement("input");
@@ -433,6 +438,7 @@ function studentPage() {
     $("#submit-answer").disabled = true;
     $("#q-error").hidden = true;
     showPanel(PANELS, "#question-panel");
+    $("#q-text").focus({preventScroll: true});
   }
 
   function renderEnd(snapshot) {
@@ -459,7 +465,7 @@ function studentPage() {
   }
 
   async function startSession() {
-    if (starting) return;
+    if (starting || !$("#synthetic-consent").checked) return;
     starting = true;
     $("#start-button").disabled = true;
     $("#fresh-start").disabled = true;
@@ -479,15 +485,19 @@ function studentPage() {
     }
   }
 
+  $("#synthetic-consent").addEventListener("change", () => {
+    $("#start-button").disabled = starting || !$("#synthetic-consent").checked;
+  });
   $("#start-button").addEventListener("click", startSession);
-  $("#fresh-start").addEventListener("click", () => {
+  function returnToSetup() {
     saveCreds(null);
-    startSession();
-  });
-  $("#new-session").addEventListener("click", () => {
-    saveCreds(null);
-    startSession();
-  });
+    $("#synthetic-consent").checked = false;
+    $("#start-button").disabled = true;
+    render(null);
+    $("#synthetic-consent").focus();
+  }
+  $("#fresh-start").addEventListener("click", returnToSetup);
+  $("#new-session").addEventListener("click", returnToSetup);
   $("#q-options").addEventListener("change", () => {
     $("#submit-answer").disabled = submitting;
   });
@@ -532,28 +542,31 @@ function studentPage() {
 /* ============================ TEACHER ============================ */
 
 function teacherPage() {
-  const TABS = ["overview", "evidence", "graph", "research",
-                "feedback", "review"];
-  const STALE_NOTE =
-    "The feedback draft changed. Re-read it before reviewing the new version.";
   let config = null;
-  let contract = null;
   let sessions = [];
   let detail = null;
   let selected = null;
-  let tab = "overview";
-  let researchCp = "end";
-  let lastAudience = "student";
   let unlocked = false;
   let pollInFlight = false;
   let simRunning = false;
-  const drafts = new Map();   // "sid:audience" -> draft state
   const simLinks = new Map(); // sid -> student URL with token
-  let reviewRenderKey = null; // rebuild review form only when this changes
-  // scopeKey -> Map(disclosureKey -> open). Scope is derived from the
-  // pane's last rendered scope so a session/checkpoint switch never
-  // transfers another context's expand/collapse choices.
-  const disclosureScopes = new Map();
+  const detailTemplate = $("#ws-detail").cloneNode(true);
+  const liveView = createDetailView($("#ws-detail"), {
+    refresh: pollOnce, onShow: () => { $("#ws-empty").hidden = true; },
+    studentLink: (sid) => simLinks.get(sid)});
+
+  function mountDetail(container, options) {
+    const root = detailTemplate.cloneNode(true);
+    const prefix = "scenario-";
+    root.id = prefix + root.id;
+    root.querySelectorAll("[id]").forEach((node) => { node.id = prefix + node.id; });
+    container.append(root);
+    return createDetailView(root, {...options, prefix});
+  }
+
+  function renderDetail() {
+    if (detail) liveView.update(detail);
+  }
 
   function teacherError(message) {
     const box = $("#teacher-error");
@@ -578,16 +591,21 @@ function teacherPage() {
   }
 
   function enterApp() {
-    contract = config.review_contract;
     unlocked = true;
     $("#unlock-panel").hidden = true;
     $("#teacher-app").hidden = false;
     renderConfigStrip();
+    initResearchWorkspace({mountDetail, getConfig: () => config});
+    $("#pin-input").value = "";
+    renderList();
     const select = $("#sim-profile");
     select.replaceChildren();
-    ["all_correct", "all_incorrect", "weak_fractions_only",
-     "first_half_correct_second_half_wrong", "alternating"]
-      .forEach((p) => select.appendChild(el("option", p)));
+    config.simulation_profiles.forEach((p) => {
+        const option = el("option", p.display_name);
+        option.value = p.id;
+        select.appendChild(option);
+      });
+    pollOnce();
     pollLoop();
   }
 
@@ -641,8 +659,11 @@ function teacherPage() {
     pollInFlight = true;
     try {
       const payload = await api("/api/teacher/sessions");
-      sessions = payload.sessions || [];
-      renderList();
+      const incoming = payload.sessions || [];
+      if (JSON.stringify(incoming) !== JSON.stringify(sessions)) {
+        sessions = incoming;
+        renderList();
+      }
       teacherError(null);
       const sid = selected; // capture: user may switch mid-fetch
       if (sid) {
@@ -664,6 +685,7 @@ function teacherPage() {
       if (err.status === 403) {
         unlocked = false;
         $("#teacher-app").hidden = true;
+        $("#config-strip").hidden = true;
         $("#unlock-panel").hidden = false;
         return;
       }
@@ -678,28 +700,94 @@ function teacherPage() {
   function renderList() {
     const list = $("#session-list");
     list.replaceChildren();
-    sessions.forEach((s) => {
-      const li = el("li", null,
+    const query = $("#session-search").value.trim().toLowerCase();
+    const visible = sessions.filter((s) => `${s.display_name} ${s.label} ${s.status}`.toLowerCase().includes(query));
+    if (!visible.length) list.appendChild(el("li", "No matching sessions. Create a synthetic example above.", "meta small"));
+    visible.forEach((s) => {
+      const wrapper = el("li");
+      const li = el("button", null,
         "session-row" + (s.session_id === selected ? " active" : ""));
-      li.appendChild(el("span", s.label, "label"));
+      li.type = "button";
+      li.setAttribute("aria-pressed", String(s.session_id === selected));
+      li.appendChild(el("span", s.display_name || s.label, "label"));
+      li.appendChild(el("span", new Date(s.created_at).toLocaleString(), "meta"));
       li.appendChild(el("span",
-        `${s.answered_count}/40 · ${s.status} · ` +
-        `providers ${s.provider_job.status}`, "meta"));
+        `${s.answered_count}/40 answered · ${statusLabel(s.status)} · ` +
+        `Feedback: ${statusLabel(s.provider_job.status)}`, "meta"));
       const diag = s.diagnostics || {};
       li.appendChild(el("span",
-        `mid ${diag.midpoint || "—"} · end ${diag.end || "—"} · ` +
-        `reviews ${s.review_count}`, "meta"));
+        `Diagnostics: ${statusLabel(diag.end)} · ${s.review_count} review notes`, "meta"));
       li.addEventListener("click", () => {
         if (selected === s.session_id) return;
         selected = s.session_id;
         detail = null;
-        reviewRenderKey = null;
+        $("#ws-detail").hidden = true;
+        $("#ws-empty").hidden = false;
         renderList();
         pollOnce(); // immediate fetch for the newly selected session
       });
-      list.appendChild(li);
+      wrapper.appendChild(li);
+      list.appendChild(wrapper);
     });
   }
+
+  /* ---------- events ---------- */
+
+  $("#session-search").addEventListener("input", renderList);
+  $("#unlock-form").addEventListener("submit", unlock);
+  $("#logout").addEventListener("click", async () => {
+    try { await api("/api/teacher/logout", {body: {}}); } catch (e) {}
+    unlocked = false;
+    location.reload();
+  });
+  $("#sim-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (simRunning) return;
+    const seed = Number($("#sim-seed").value);
+    if (!Number.isInteger(seed)) {
+      const err = $("#sim-error");
+      err.textContent = "Seed must be an integer.";
+      err.hidden = false;
+      return;
+    }
+    simRunning = true;
+    $("#sim-run").disabled = true;
+    $("#sim-error").hidden = true;
+    try {
+      const result = await api("/api/teacher/simulations", {
+        body: {profile: $("#sim-profile").value, seed}});
+      simLinks.set(result.session_id, result.student_url);
+      selected = result.session_id;
+      detail = null;
+      renderList();
+      await pollOnce();
+      if (selected === result.session_id) renderDetail();
+    } catch (err) {
+      const box = $("#sim-error");
+      box.textContent = "Synthetic example could not be created.";
+      box.hidden = false;
+    } finally {
+      simRunning = false;
+      $("#sim-run").disabled = false;
+    }
+  });
+  boot();
+}
+
+function createDetailView(root, options = {}) {
+  const prefix = options.prefix || "";
+  const $ = (selector) => root.querySelector(selector.replace(/#([\w-]+)/g, (_, id) => `#${prefix}${id}`));
+  const TABS = ["overview", "evidence", "graph", "research", "feedback", "review"];
+  const STALE_NOTE = "The feedback draft changed. Re-read it before reviewing the new version.";
+  let detail = null, selected = null, tab = "overview", researchCp = "end", lastAudience = "student";
+  let contract = null;
+  const drafts = new Map();   // "sid:audience" -> draft state
+  let reviewRenderKey = null; // rebuild review form only when this changes
+  // scopeKey -> Map(disclosureKey -> open). Scope is derived from the
+  // pane's last rendered scope so a session/checkpoint switch never
+  // transfers another context's expand/collapse choices.
+  const disclosureScopes = new Map();
+  const pollOnce = () => options.refresh?.();
 
   /* ---------- shared render helpers ---------- */
 
@@ -756,14 +844,14 @@ function teacherPage() {
 
   function renderDetail() {
     if (!detail) return;
-    $("#ws-empty").hidden = true;
-    $("#ws-detail").hidden = false;
+    options.onShow?.();
+    root.hidden = false;
     $("#ws-title").textContent =
-      `${detail.label} — ${detail.status} (${detail.answered_count}/40)`;
-    $("#ws-export").href = `/api/teacher/sessions/${selected}/export`;
+      `${detail.display_name || detail.label} — ${detail.answered_count}/40 answered`;
+    $("#ws-export").href = detail.export_url || (detail.read_only ? `/api/teacher/scenarios/${selected}/export` : `/api/teacher/sessions/${selected}/export`);
     const linkBox = $("#ws-student-link");
     linkBox.replaceChildren();
-    const link = simLinks.get(selected);
+    const link = options.studentLink?.(selected);
     if (link) {
       const a = el("a", "Open student view", "ghost small");
       a.href = link;
@@ -785,7 +873,10 @@ function teacherPage() {
     const pane = $("#tab-overview");
     pane.replaceChildren();
     const card = el("div", null, "card-inner");
-    card.appendChild(kv("Status", detail.status));
+    card.appendChild(el("p", detail.read_only ? detail.read_only_reason || "Retained original results — no computation was run when opening this case." :
+      detail.replay ? "New replay — the original answers were resubmitted through the running pipeline." :
+      "Live synthetic session.", "boundary-note"));
+    card.appendChild(kv("Status", statusLabel(detail.status)));
     card.appendChild(kv("Answered", `${detail.answered_count}/40`));
     card.appendChild(kv("Observed total",
       `${detail.observed_total.correct} / ${detail.observed_total.out_of}`));
@@ -796,12 +887,29 @@ function teacherPage() {
       card.appendChild(kv(`${cp} diagnostics`,
         (block.diagnostics_job || {}).status || "not_requested"));
     });
-    if (detail.simulated) {
-      card.appendChild(el("p",
-        `Simulated response pattern (${detail.simulated.profile}, ` +
-        `seed ${detail.simulated.seed}) — not a diagnosis.`, "meta"));
+    if (detail.description) card.appendChild(el("p", detail.description, "meta"));
+    if (detail.replay_changes) {
+      const changes = detail.replay_changes;
+      card.appendChild(el("h3", "What changed from the retained original?"));
+      card.appendChild(kv("Observed correct-answer change", changes.observed_correct_delta));
+      card.appendChild(kv("Largest KT probability change", changes.kt_max_absolute_delta ?? "Not comparable / unavailable"));
+      changes.feedback.forEach((row) => {
+        card.appendChild(kv(`${row.audience === "student" ? "Student" : "Educator"} draft`,
+          `${row.text_changed ? "Text changed" : "Same text"}; ${row.candidate_changed ? "different focus" : "same focus"}`));
+        const disclosure = el("details", null, "raw");
+        disclosure.dataset.disclosureKey = `replay-diff:${row.audience}`;
+        disclosure.append(el("summary", `Compare ${row.audience} wording with the original`));
+        const pair = el("div", null, "compare");
+        [["Retained original", row.previous_text], ["This replay", row.current_text]].forEach(([title, text]) => {
+          const col = el("div", null, "col");
+          col.append(el("h4", title), el("p", text, "draft-text")); pair.append(col);
+        });
+        disclosure.append(pair); card.append(disclosure);
+      });
+      card.appendChild(el("p", changes.interpretation, "meta"));
     }
-    card.appendChild(jsonDetails("Provenance", detail.provenance,
+    card.appendChild(jsonDetails("Technical identity and provenance", {...detail.provenance,
+      technical_label: detail.label, session_id: detail.session_id, simulation: detail.simulated, replay: detail.replay},
       "provenance"));
     pane.appendChild(card);
   }
@@ -833,6 +941,7 @@ function teacherPage() {
       card.appendChild(el("p",
         "End evidence appears once all 40 answers are in."));
     }
+    if (detail.response_notice) card.appendChild(el("p", detail.response_notice, "meta"));
     if (detail.question_responses.length) {
       card.appendChild(el("h3", "Per-question record (private)"));
       detail.question_responses.forEach((row) => {
@@ -840,7 +949,7 @@ function teacherPage() {
         d.dataset.disclosureKey = `q:${row.question_id}`;
         d.appendChild(el("summary",
           `#${row.position} · ${skillNameForId(row.skill_id)} · ` +
-          `${row.correct ? "correct" : "incorrect"} · ${row.question_id}`));
+          `${row.correct ? "Correct" : "Incorrect"} · ${row.subtopic_name}`));
         const inner = el("div", null, "qrow-body");
         inner.appendChild(kv("Question", englishQuestionText(row)));
         inner.appendChild(kv("Subtopic",
@@ -849,7 +958,8 @@ function teacherPage() {
           englishOptionText(row.options[row.selected_index])));
         inner.appendChild(kv("Correct option",
           englishOptionText(row.options[row.answer_index])));
-        inner.appendChild(kv("Answered at", row.answered_at));
+        inner.appendChild(kv("Answered at", row.answered_at || "Not recorded in the original scenario"));
+        inner.appendChild(kv("Question reference", row.question_id));
         d.appendChild(inner);
         card.appendChild(d);
       });
@@ -919,6 +1029,8 @@ function teacherPage() {
     const svg = document.createElementNS(SVGNS, "svg");
     svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
     svg.setAttribute("class", "ktchart");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Research-only predicted probability before each answer, from zero to one.");
     const xFor = (i) =>
       padX + i * (w - 2 * padX) / Math.max(probs.length - 1, 1);
     const yFor = (p) => h - padY - p * (h - 2 * padY);
@@ -965,7 +1077,7 @@ function teacherPage() {
       dot.setAttribute("r", "4");
       const observed = detail.question_responses[i];
       dot.setAttribute("fill",
-        observed && observed.correct ? "#21615B" : "#C5603F");
+        !observed ? "#566973" : observed.correct ? "#21615B" : "#C5603F");
       svg.appendChild(dot);
     });
     return svg;
@@ -1001,12 +1113,14 @@ function teacherPage() {
       pane.appendChild(card);
       return;
     }
+    card.appendChild(el("p", diag.mode === "frozen_replay_no_model_or_calibration_rerun" ?
+      "Saved historical inference — not recomputed." : "Fresh inference using the frozen model; the model was not retrained.", "boundary-note"));
     card.appendChild(el("h3",
-      `${researchCp} checkpoint · ${diag.answer_count} answers`));
+      `${researchCp === "end" ? "Final" : "Halfway"} checkpoint · ${diag.answer_count} answers`));
     card.appendChild(el("p",
       "Frozen KT pre-answer probability per response position " +
       "(axis 0–1); dots mark observed correctness " +
-      "(teal=correct, rust=incorrect).", "meta"));
+      "(teal=correct, rust=incorrect, grey=answer record unavailable).", "meta"));
     const chart = ktChart(diag);
     if (chart) card.appendChild(chart);
     const conformal = diag.conformal || {};
@@ -1072,6 +1186,7 @@ function teacherPage() {
             `candidate: ${r.selected_candidate_id}`, "mono small"));
           (r.message.sections || []).forEach((s) =>
             col.appendChild(el("p", s.text, "sec")));
+          if (!r.message.sections?.length) col.appendChild(el("p", r.message.text, "draft-text"));
           col.appendChild(jsonDetails("Trace", r.trace,
             `${audience}:${which}:trace`));
           const cand = el("details", null, "raw");
@@ -1089,6 +1204,13 @@ function teacherPage() {
       });
       card.appendChild(wrap);
     });
+    const halfway = detail.checkpoints.midpoint?.baseline_student;
+    if (halfway) {
+      const saved = el("details", null, "raw");
+      saved.dataset.disclosureKey = "halfway-feedback";
+      saved.append(el("summary", "Halfway student feedback in this result"), el("p", halfway.message.text, "draft-text"));
+      card.append(saved);
+    }
     if (detail.provider_job.executions) {
       card.appendChild(jsonDetails(
         "Provider executions (provenance, metadata, latency)",
@@ -1118,9 +1240,14 @@ function teacherPage() {
 
   function renderReviewContent() {
     const pane = $("#tab-review");
+    if (detail.read_only) {
+      pane.replaceChildren(el("h3", "Saved result — read-only"), el("p",
+        detail.read_only_reason || "Replay this scenario, then select the new result to record an educator review against its exact feedback version. Original reports and existing blind comparisons are never overwritten.", "boundary-note"));
+      renderLedger(pane);
+      return;
+    }
     const hashes = detail.review_hashes || {};
-    const audienceEl = document.querySelector(
-      "#tab-review select[data-audience]");
+    const audienceEl = $("#tab-review select[data-audience]");
     const audience = (audienceEl && audienceEl.value) ||
       lastAudience || "student";
     lastAudience = audience;
@@ -1139,7 +1266,7 @@ function teacherPage() {
 
     const audSel = el("select");
     audSel.dataset.audience = "1";
-    audSel.id = "rev-audience";
+    audSel.id = `${prefix}rev-audience`;
     audSel.setAttribute("aria-label", "Review audience");
     ["student", "teacher"].forEach((a) => {
       const o = el("option", a);
@@ -1153,7 +1280,7 @@ function teacherPage() {
       renderPane("review", renderReviewContent);
     });
     const audLabel = el("label", "Audience draft");
-    audLabel.htmlFor = "rev-audience";
+    audLabel.htmlFor = audSel.id;
     card.appendChild(audLabel);
     card.appendChild(audSel);
 
@@ -1190,7 +1317,7 @@ function teacherPage() {
     (contract.fields || []).forEach((field) => {
       const wrap = el("div", null, "field");
       const sel = el("select");
-      sel.id = `rev-field-${field.id}`;
+      sel.id = `${prefix}rev-field-${field.id}`;
       const fieldLabel = el("label", field.question);
       fieldLabel.htmlFor = sel.id;
       wrap.appendChild(fieldLabel);
@@ -1210,19 +1337,19 @@ function teacherPage() {
       form.appendChild(wrap);
     });
     const note = document.createElement("textarea");
-    note.id = "rev-note";
+    note.id = `${prefix}rev-note`;
     note.maxLength = 3000;
     note.value = draft.note;
     note.addEventListener("input", () => { draft.note = note.value; });
     const label = document.createElement("input");
-    label.id = "rev-reviewer";
+    label.id = `${prefix}rev-reviewer`;
     label.maxLength = 80;
     label.value = draft.label;
     label.addEventListener("input", () => { draft.label = label.value; });
     const noteLabel = el("label", "Note (≤3000 chars, plain text)");
-    noteLabel.htmlFor = "rev-note";
+    noteLabel.htmlFor = note.id;
     const reviewerLabel = el("label", "Reviewer label (optional)");
-    reviewerLabel.htmlFor = "rev-reviewer";
+    reviewerLabel.htmlFor = label.id;
     form.appendChild(noteLabel);
     form.appendChild(note);
     form.appendChild(reviewerLabel);
@@ -1296,57 +1423,25 @@ function teacherPage() {
     card.appendChild(ledger);
   }
 
-  /* ---------- events ---------- */
-
-  $("#unlock-form").addEventListener("submit", unlock);
-  $("#logout").addEventListener("click", async () => {
-    try { await api("/api/teacher/logout", {body: {}}); } catch (e) {}
-    unlocked = false;
-    location.reload();
-  });
-  $("#sim-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (simRunning) return;
-    const seed = Number($("#sim-seed").value);
-    if (!Number.isInteger(seed)) {
-      const err = $("#sim-error");
-      err.textContent = "Seed must be an integer.";
-      err.hidden = false;
-      return;
-    }
-    simRunning = true;
-    $("#sim-run").disabled = true;
-    $("#sim-error").hidden = true;
-    try {
-      const result = await api("/api/teacher/simulations", {
-        body: {profile: $("#sim-profile").value, seed}});
-      simLinks.set(result.session_id, result.student_url);
-      selected = result.session_id;
-      reviewRenderKey = null;
-      renderList();
-      await pollOnce();
-      if (selected === result.session_id) renderDetail();
-    } catch (err) {
-      const box = $("#sim-error");
-      box.textContent = "Synthetic example could not be created.";
-      box.hidden = false;
-    } finally {
-      simRunning = false;
-      $("#sim-run").disabled = false;
-    }
-  });
   $("#ws-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-tab]");
     if (!button) return;
     tab = button.dataset.tab;
-    document.querySelectorAll(".tab").forEach((b) =>
-      b.classList.toggle("active", b === button));
-    TABS.forEach((name) => {
-      $(`#tab-${name}`).hidden = name !== tab;
+    root.querySelectorAll(".tab").forEach((b) => {
+      b.classList.toggle("active", b === button);
+      b.setAttribute("aria-pressed", String(b === button));
     });
+    TABS.forEach((name) => { $(`#tab-${name}`).hidden = name !== tab; });
   });
 
-  boot();
+  return {update(view) {
+    if (JSON.stringify(view) === JSON.stringify(detail)) return;
+    if (selected !== view.session_id) reviewRenderKey = null;
+    detail = view;
+    selected = view.session_id;
+    contract = view.review_contract;
+    renderDetail();
+  }};
 }
 
 if (PAGE === "student") studentPage();

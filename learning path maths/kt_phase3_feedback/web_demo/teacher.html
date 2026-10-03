@@ -3,79 +3,77 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Synthetic Assessment Demo — Teacher Review</title>
+<meta name="color-scheme" content="light">
+<title>Evidence Lab — Educator Workspace</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-page="teacher">
+<a class="skip-link" href="#teacher-root">Skip to workspace</a>
 <header class="masthead">
   <div class="masthead-inner">
-    <div>
-      <h1>Synthetic Demo — Teacher Review</h1>
-      <p class="banner">Private local research view. Diagnostic values are
-      frozen-model research signals, not mastery evidence. All feedback is
-      a draft requiring educator review.</p>
-      <p class="meta small">English display labels and draft question
-      translations; source JSON retains original wording.</p>
-    </div>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">el</span><div><span class="eyebrow">MATHEMATICS / RESEARCH PROTOTYPE</span><h1>Evidence Lab<span class="phase-tag">Phase 03</span></h1></div></div>
     <nav class="topnav" aria-label="Demo pages">
-      <a href="/">Student</a>
-      <a href="/teacher" aria-current="page">Teacher</a>
+      <a href="/">Assessment</a>
+      <a href="/teacher" aria-current="page">Educator workspace</a>
     </nav>
   </div>
 </header>
-<main id="teacher-root">
+<main id="teacher-root" tabindex="-1">
+  <div class="page-heading"><div><p class="eyebrow">OBSERVE. COMPARE. REVIEW.</p><h2>Better questions. Clearer evidence.</h2><p class="meta">Explore synthetic assessments and evaluate feedback with the evidence in view.</p></div><span class="environment-badge">Local research environment</span></div>
+  <p class="boundary-note"><strong>Synthetic data only.</strong> Feedback is an educator-review draft, not approved learner advice. KT and conformal values do not establish mastery.</p>
   <p id="teacher-error" class="error" role="alert" hidden></p>
   <div id="config-strip" class="strip" hidden></div>
-
   <section id="unlock-panel" class="card narrow">
-    <h2>Unlock teacher view</h2>
-    <p class="meta">Enter the six-digit local PIN printed when the demo
-    server started.</p>
-    <form id="unlock-form">
-      <label for="pin-input">PIN</label>
-      <input id="pin-input" inputmode="numeric" autocomplete="off"
-             maxlength="6" required>
-      <button class="primary" type="submit">Unlock</button>
+    <p class="eyebrow">PRIVATE WORKSPACE</p>
+    <h2>Welcome, reviewer.</h2>
+    <p class="meta">Enter the six-digit PIN printed in the server terminal to access private evidence and review tools.</p>
+    <form id="unlock-form" class="review-form">
+      <label for="pin-input">Local access PIN</label>
+      <input id="pin-input" type="password" inputmode="numeric" autocomplete="off" pattern="[0-9]{6}" minlength="6" maxlength="6" required>
+      <button class="primary" type="submit">Open workspace</button>
     </form>
+    <p class="meta small">Local route separation only. Not production authentication.</p>
     <p id="unlock-error" class="error" role="alert" hidden></p>
   </section>
-
   <div id="teacher-app" hidden>
-    <div class="teacher-grid">
+    <nav class="workspace-nav" aria-label="Research workspace">
+      <button data-workspace="live" aria-pressed="true" class="active"><span class="nav-number">01</span> Live sessions</button>
+      <button data-workspace="library" aria-pressed="false"><span class="nav-number">02</span> Scenario library</button>
+      <button data-workspace="comparison" aria-pressed="false"><span class="nav-number">03</span> Blind comparison</button>
+      <button id="logout" class="ghost small">Log out</button>
+    </nav>
+    <div id="live-pane" class="teacher-grid">
       <aside class="side">
-        <div class="side-head">
-          <h2>Sessions</h2>
-          <button id="logout" class="ghost small">Log out</button>
-        </div>
-        <form id="sim-form" class="sim">
-          <label for="sim-profile">Synthetic example profile</label>
-          <select id="sim-profile"></select>
-          <label for="sim-seed">Seed (integer)</label>
-          <input id="sim-seed" inputmode="numeric" value="1">
-          <button id="sim-run" class="primary" type="submit">Run synthetic example</button>
-          <p id="sim-error" class="error small" role="alert" hidden></p>
-          <p class="meta small">A simulated response pattern, not a
-          diagnosis.</p>
-        </form>
+        <div class="side-head"><h2>Sessions</h2><span class="chip">Live</span></div>
+        <details class="simulation-disclosure" open>
+          <summary>Create a synthetic example</summary>
+          <form id="sim-form" class="sim">
+            <label for="sim-profile">Response pattern</label>
+            <select id="sim-profile"></select>
+            <details class="raw"><summary>Reproducibility settings</summary>
+              <label for="sim-seed">Random seed (same seed repeats the answer choices)</label>
+              <input id="sim-seed" type="number" step="1" value="1" required>
+            </details>
+            <button id="sim-run" class="primary" type="submit">Run synthetic example</button>
+            <p id="sim-error" class="error small" role="alert" hidden></p>
+            <p class="meta small">A response pattern, not a learner diagnosis.</p>
+          </form>
+        </details>
+        <label for="session-search" class="visually-hidden">Search sessions</label>
+        <input id="session-search" type="search" placeholder="Search sessions…">
         <ul id="session-list" class="session-list"></ul>
       </aside>
       <section class="workspace">
-        <div id="ws-empty" class="card"><p>Select a session.</p></div>
+        <div id="ws-empty" class="card empty-state"><span class="eyebrow">YOUR EVIDENCE WORKBENCH</span><h2>Start with a session.</h2><p>Select a saved session or run a synthetic example to inspect its evidence, diagnostics, and feedback.</p><div class="workflow-steps"><span><b>01</b> Observe counts</span><span><b>02</b> Inspect drafts</span><span><b>03</b> Record a review</span></div><p class="meta small">Looking for retained experiments? Open the Scenario Library. To reduce prior-exposure bias, complete Blind Comparison before browsing drafts.</p></div>
         <div id="ws-detail" hidden>
-          <div class="ws-head">
-            <h2 id="ws-title"></h2>
-            <div class="ws-actions">
-              <span id="ws-student-link"></span>
-              <a id="ws-export" class="ghost small" download>Export JSON</a>
-            </div>
-          </div>
-          <nav class="tabs" id="ws-tabs">
-            <button data-tab="overview" class="tab active">Overview</button>
-            <button data-tab="evidence" class="tab">Evidence</button>
-            <button data-tab="graph" class="tab">Graph</button>
-            <button data-tab="research" class="tab">Research</button>
-            <button data-tab="feedback" class="tab">Feedback</button>
-            <button data-tab="review" class="tab">Review</button>
+          <div class="ws-head"><h2 id="ws-title"></h2><div class="ws-actions"><span id="ws-student-link"></span><a id="ws-export" class="ghost small" download>Export JSON</a></div></div>
+          <nav class="tabs" id="ws-tabs" aria-label="Session views">
+            <button data-tab="overview" class="tab active" aria-pressed="true">Summary</button>
+            <button data-tab="evidence" class="tab" aria-pressed="false">Answers &amp; scores</button>
+            <button data-tab="graph" class="tab" aria-pressed="false">Skill map</button>
+            <button data-tab="research" class="tab" aria-pressed="false">Model diagnostics</button>
+            <button data-tab="feedback" class="tab" aria-pressed="false">Feedback drafts</button>
+            <button data-tab="review" class="tab" aria-pressed="false">Educator review</button>
           </nav>
           <div id="tab-overview" class="tabpane"></div>
           <div id="tab-evidence" class="tabpane" hidden></div>
@@ -86,8 +84,12 @@
         </div>
       </section>
     </div>
+    <section id="library-pane" hidden aria-label="Saved scenario library"></section>
+    <section id="comparison-pane" hidden aria-label="Blind educator comparison"></section>
   </div>
+  <footer class="page-footer"><span>Evidence Lab / Phase 03</span><span>Observed evidence ≠ validated mastery · English wording is a draft translation.</span></footer>
 </main>
+<script src="/research.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

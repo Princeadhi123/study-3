@@ -1,6 +1,6 @@
 # Status, Architecture, and Roadmap
 
-Snapshot date: 2026-10-03. This file is the current handoff for the local
+Snapshot date: 2026-10-04. This file is the current handoff for the local
 synthetic demo in this repository. It describes working software for private
 research review — not a validated educational product.
 
@@ -31,8 +31,11 @@ research review — not a validated educational product.
 | Async provider jobs (Jev selection + Aitta opening) | Implemented |
 | Frozen KT + conformal research diagnostics | Implemented |
 | Assessment graph, reviews ledger, English display layer, poll/disclosure persistence | Implemented |
-| 54-case Scenario Library browser UI | **Pending** |
-| Blind baseline-vs-provider comparison | **Pending** |
+| 54-case Scenario Library browser UI | Implemented: readable names, search/filters, shared six-tab live detail renderer |
+| Selected / filtered / all-scenario replay | Implemented: original-answer resubmission, progress/cancel, saved versions and original-result comparison |
+| Historical result preservation | Original report remains immutable; completed replay snapshots remain readable after policy/taxonomy/bank changes |
+| Blind baseline-vs-selected comparison | Implemented pilot tooling: balanced A/B, persisted shuffled order, immutable judgments, completion-only reveal |
+| Evidence Lab responsive UI | Implemented: three workspaces, session search, keyboard controls, synthetic consent |
 | Richer Aitta evidence explanation | **Pending** |
 | Reviewed practice questions / worked solutions / practice loop | **Pending** |
 | Independent educator preference benchmark | **Pending** |
@@ -86,8 +89,11 @@ DemoService (demo_service.py)
   token; question payloads are key-free; resume via localStorage; answers are
   index-only ordered responses (last identical retry is idempotent); scores
   are hidden at midpoint; the end shows total + per-skill observed counts.
-- **Teacher**: six tabs — Overview, Evidence, Graph, Research, Feedback,
-  Review — plus a private JSON export. Five simulation profiles exist:
+- **Teacher**: three workspaces — Live sessions, Scenario library, Blind
+  comparison. Live and scenario results share six tabs — Summary, Answers & scores,
+  Skill map, Model diagnostics, Feedback drafts, Educator review — plus private
+  JSON export. Primary labels describe patterns, while seeds and technical IDs stay
+  in provenance/settings. Five simulation profiles exist:
   `all_correct`, `all_incorrect`, `weak_fractions_only`,
   `first_half_correct_second_half_wrong`, `alternating` — these are response
   patterns, not diagnoses.
@@ -109,6 +115,59 @@ DemoService (demo_service.py)
   and "EUR" while indices and wire values are unchanged; raw JSON and exports
   keep original Finnish wording; these are prototype translations, not
   independently educator-checked.
+
+### Retained replay and comparison protocol
+
+`research_workspace.py` loads the retained integrated report lazily, validates its
+package coverage and observed counts, and pins its raw-file SHA-256 for the
+process. `--replay-report PATH` selects another report. Library summaries are
+recomputed from the packages; the current retained report yields 54 cases,
+108 end packages, 69 baseline matches and 39 differences. Browsing does not
+run providers or inference, and no historical artifact is rewritten.
+
+`scenario_replays.py` adds explicit asynchronous selected/filtered/all replay. It
+checks the original response-source hash, bank/order/index bindings, and current
+code fingerprints before admission. Each case is a fresh `DemoService` session
+using the same 40 saved answers and the same scoring/graph/feedback/diagnostics
+workers as live sessions. Rules-only mode is the default even on a hosted server;
+hosted calls require confirmation and share the existing budget/cache. There is one
+active batch and sequential case admission; cancellation stops after the current
+case, and interrupted batches never resume automatically.
+
+Batch records live in `replay_runs/`; completed full detail snapshots are preserved
+in `replay_runs/results/`. Replay sessions are hidden from the live session list.
+Result-version selection preserves the current detail tab and separates original
+saved outputs from fresh replay jobs. Summary compares score, feedback selection/text,
+and compatible KT traces with the original report, not with an assumed ground truth.
+Older replay snapshots and their review notes remain read-only if current policy,
+taxonomy, or bank validation rejects their live metadata. New replays can be reviewed
+through the same hash-bound educator form as live sessions. The original report and
+blind-comparison cohort are never silently replaced by replay results.
+
+`--replay-source PATH` defaults to `artifacts/assessment_pipeline_20261001.json`.
+Restart after Python changes; tracked Phase 2/3 source changes produce a replay
+conflict rather than silently running stale loaded code. No model retraining or
+fixed-bank calibration claim is introduced.
+
+A comparison includes every end case for one audience. Server-side cryptographic
+randomization shuffles case order and balances A/B placement. Assignments, exact
+text, provenance, and canonical JSON hashes are persisted under the demo root's
+`comparisons/` directory, independently from live hash-bound review notes.
+The current task returns only observed evidence and source-masked draft text.
+Judgments record A/B/tie/neither preference, each draft's evidence support,
+confidence, and optional rationale. Identical resubmissions are idempotent;
+changes to a saved judgment, out-of-order tasks, incomplete exports, and source
+revision conflicts return 409. All task judgments must be saved before source
+mapping and execution provenance can be exported. Resume survives server restart.
+
+This is not an independent educator benchmark yet. Initial exposure is self-reported;
+style, other tabs/files, and later browsing can compromise masking. Teacher access
+still permits unblinded library inspection. Review all cases before opening drafts,
+use pseudonymous codes and a supervised protocol, and plan analysis before collecting
+judgments. Identical texts are retained, while correlated cases, duplicate sequences,
+cache reuse, and repeated reviewers prevent naive independent-trial interpretation.
+Only descriptive preferences are shown; no p-values or educational-effectiveness
+claims are generated. Completed reviews are not learner-delivery approval.
 
 ## 5. What is dynamic, and provenance rules
 
@@ -175,6 +234,19 @@ python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
 | `/api/teacher/sessions/{sid}` | GET | private detail (incl. answer keys) |
 | `/api/teacher/sessions/{sid}/export` | GET | JSON export |
 | `/api/teacher/sessions/{sid}/reviews` | POST | record educator review |
+| `/api/teacher/scenarios` | GET | retained case index and derived metrics |
+| `/api/teacher/scenarios/{id}` | GET | original packages and shared detail payload |
+| `/api/teacher/scenarios/{id}/export` | GET | original case export |
+| `/api/teacher/replays` | GET / POST | list / enqueue batches |
+| `/api/teacher/replays/{id}` | GET | progress and original-result differences |
+| `/api/teacher/replays/{id}/cancel` | POST | stop after current case |
+| `/api/teacher/replays/{id}/export` | GET | batch provenance export |
+| `/api/teacher/replays/{id}/cases/{case_id}` | GET | new or preserved case detail |
+| `/api/teacher/replays/{id}/cases/{case_id}/export` | GET | individual result export |
+| `/api/teacher/comparisons` | GET / POST | list / create review runs |
+| `/api/teacher/comparisons/{id}` | GET | current source-masked task |
+| `/api/teacher/comparisons/{id}/reviews` | POST | immutable judgment, idempotent retry |
+| `/api/teacher/comparisons/{id}/export` | GET | completed source mapping and provenance |
 
 Teacher JSON endpoints contain private answer keys and are never exposed to
 student routes.
@@ -183,6 +255,9 @@ student routes.
 
 - Boundary/UI: `demo_api.py`, `web_demo/` (`app.js`, `index.html`,
   `teacher.html`, `styles.css`)
+- Replay library/comparison/labels: `research_workspace.py`, `web_demo/research.js`
+- Replay queue, original response binding, snapshots: `scenario_replays.py`
+- Shared live/scenario detail renderer: `createDetailView` in `web_demo/app.js`
 - Session core: `demo_service.py` (DemoService orchestration),
   `mcq_service.py` (MCQSessionService, ordered responses),
   `session_store.py` (SessionStore persistence)
@@ -267,8 +342,9 @@ repository folder.
 Narrow commands:
 
 ```powershell
-python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics
+python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics tests.test_research_workspace tests.test_scenario_replays
 node --check web_demo/app.js
+node --check web_demo/research.js
 ```
 
 Caution: a running demo keeps the native KT model resident — an idle server
@@ -277,19 +353,32 @@ full-suite run hit `MemoryError` under contention; an isolated retry
 passed). Coordinate stopping/restarting your own demo server, or ensure
 sufficient memory, before a full-suite run.
 
-This document update was verified with CLI and path checks only — no full
-test suite or provider calls. Archiving historical artifacts has been
-proposed but not performed.
+The workspace implementation has dedicated offline service/API tests and an
+opt-in installed-Edge browser journey in `tests/test_research_browser.py`.
+See README for invocation. Browser fixtures use fake diagnostics/providers and
+synthetic judgments, not educator data; the retained library is read-only.
+Screenshots from local verification are under `artifacts/ui_verification_20261004/`.
+No hosted provider calls were made for this implementation. Historical reports,
+assessment content, model weights, calibration, and provider policies are unchanged.
+
+Verification on 2026-10-04: full discovery ran 341 tests successfully (340 passed,
+1 opt-in browser test skipped); that browser journey was separately enabled and
+passed in installed Edge at 1440px and 390px viewport widths. The 64 targeted
+service/API/diagnostics/research tests passed, as did both JavaScript syntax checks
+and `git diff --check`. These are software checks, not research-validity results.
 
 ## 10. Prioritised roadmap
 
-1. **Scenario Library UI** — browse the stored 54-case results (separate from
-   live hash-bound reviews).
+1. **Educator protocol and evaluation** — review the implemented source-masked
+   comparison protocol, preregister sampling/analysis and duplicate handling,
+   then collect independent educator judgments. Tool availability is not evidence
+   of provider advantage.
 2. **Richer feedback scope** — bounded expansion of observed-evidence review
    (e.g. individualized Aitta context), plus a reviewed practice-activity
    bank (new content; the current assessment bank is not practice-approved).
-3. **Blinded educator comparison** — baseline vs provider outputs with hidden
-   provenance for preference labels.
+3. **Research analysis** — examine preference and evidence-support judgments
+   with exposure, source reuse, scenario dependence, and inter-rater agreement
+   accounted for. Validate the rubric before drawing comparative conclusions.
 4. **Supervised pilot** — only after privacy review and educator approval.
 5. **Production hardening** — real auth, TLS, RBAC, durable store, job queue.
 6. **Research calibration** — validity work on the fixed assessment, in

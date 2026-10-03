@@ -36,6 +36,8 @@ from jev_selector import _read_env_file
 from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
 from replay_provider_scenarios import CaptureCache
+from research_workspace import DEFAULT_REPORT, ResearchWorkspace, case_display
+from scenario_replays import DEFAULT_SOURCE, ScenarioReplays
 from scenario_runner import generate_responses
 from schemas import SESSION_SCHEMA
 from session_store import SessionStore, bank_fingerprint, utc_now
@@ -83,10 +85,12 @@ class DemoService:
     def __init__(self, root=DEFAULT_ROOT, bank=None, taxonomy=None,
                  provider_mode="rules", jev_env_file=None, call_budget=12,
                  provider_timeout=120.0, diagnostics=None,
-                 selector=None, generator=None, max_pending_jobs=16):
+                 selector=None, generator=None, max_pending_jobs=16,
+                 replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.research = ResearchWorkspace(self.root, replay_report)
         if bank is None:
             bank = json.loads(phase3_paths.require(
                 phase3_paths.APPROVED_BANK).read_text(encoding="utf-8"))
@@ -122,6 +126,7 @@ class DemoService:
         else:
             self.selector, self.generator = None, None
         self._recover_interrupted()
+        self.replays = ScenarioReplays(self, replay_source)
         # Lazy frozen-model prewarm; serialized on the diagnostics worker.
         self.diag_pool.submit(self.diagnostics.warmup)
 
@@ -194,6 +199,7 @@ class DemoService:
                     self._save_meta(meta)
 
     def close(self, wait=False):
+        self.replays.close(wait=True)
         self.provider_pool.shutdown(wait=wait)
         self.diag_pool.shutdown(wait=wait)
 
@@ -275,13 +281,17 @@ class DemoService:
                     "diagnostics_job": {"status": "not_requested"}}},
             "reviews": []}
 
-    def create_session(self, label=None, simulated=None):
+    def create_session(self, label=None, simulated=None, replay=None, provider_mode=None):
+        if provider_mode not in (None, "rules", self.provider_mode):
+            raise ValueError("provider mode is not configured")
         token = secrets.token_urlsafe(32)
         with self.lock:
             started = self.mcqs.start_session()
             session_id = started["session_id"]
             meta = self._new_meta(
                 session_id, token, label=label, simulated=simulated)
+            meta["replay"] = copy.deepcopy(replay)
+            meta["provider_job"]["provider_mode"] = provider_mode or self.provider_mode
             self._save_meta(meta)
             snapshot = self._public_snapshot(session_id, meta)
         return {"session_id": session_id, "student_token": token,
@@ -292,7 +302,7 @@ class DemoService:
         with self.lock:
             for path in sorted(self.meta_dir.glob("*.json")):
                 meta = self._try_load_meta(path.stem)
-                if meta is None:
+                if meta is None or meta.get("replay"):
                     continue
                 try:
                     session = self.mcqs.private_record(meta["session_id"])
@@ -301,6 +311,7 @@ class DemoService:
                 sessions.append({
                     "session_id": meta["session_id"],
                     "label": meta["label"],
+                    "display_name": self._session_display(meta),
                     "created_at": meta["created_at"],
                     "status": session["status"],
                     "answered_count": len(session["responses"]),
@@ -434,10 +445,11 @@ class DemoService:
             evidence, "teacher", "end")
         end["graph"] = assessment_feedback_graph(
             self.bank, self.taxonomy, rows)
+        mode = meta["provider_job"]["provider_mode"]
         if self._pending_provider >= self.max_pending_jobs:
             meta["provider_job"] = {
                 "status": "fallback",
-                "provider_mode": self.provider_mode,
+                "provider_mode": mode,
                 "queued_at": utc_now(), "finished_at": utc_now(),
                 "reason": "demo_provider_queue_capacity"}
             for audience in ("student", "teacher"):
@@ -446,7 +458,7 @@ class DemoService:
         else:
             self._pending_provider += 1
             meta["provider_job"] = {
-                "status": "pending", "provider_mode": self.provider_mode,
+                "status": "pending", "provider_mode": mode,
                 "queued_at": utc_now()}
             self.provider_pool.submit(self._run_provider_job, session_id)
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
@@ -516,10 +528,10 @@ class DemoService:
         review["trace"]["fallback_reason"] = reason
         return review
 
-    def _audience_result(self, evidence, audience):
+    def _audience_result(self, evidence, audience, provider_mode=None):
         """One audience through providers; isolated failures per audience."""
         executions = {"selector": None, "generator": None}
-        if self.provider_mode == "rules":
+        if (provider_mode or self.provider_mode) == "rules":
             review = self._baseline_review(
                 evidence, audience, None)
             review["trace"]["fallback_reason"] = None
@@ -579,12 +591,13 @@ class DemoService:
             try:
                 with self.lock:
                     rows = self._rows(session_id)
+                    mode = self._load_meta(session_id)["provider_job"]["provider_mode"]
                 evidence = build_evidence(
                     self.bank, self.taxonomy, rows)
                 results = {}
                 for audience in ("student", "teacher"):
                     review, executions = self._audience_result(
-                        evidence, audience)
+                        evidence, audience, mode)
                     results[audience] = {"review": review,
                                          "executions": executions}
                 any_fallback = any(
@@ -672,6 +685,7 @@ class DemoService:
     def teacher_config(self):
         return {
             "synthetic": True,
+            "simulation_profiles": [{"id": name, **case_display(name)} for name in SIMULATION_PROFILES],
             "provider_mode": self.provider_mode,
             "call_budget": {"limit": self.call_budget,
                             "used": self.cache.new_calls
@@ -693,33 +707,97 @@ class DemoService:
                 "notice": educator_review_contract.REVIEW_NOTICE},
             "disclaimer": "local synthetic demo; not production auth"}
 
+    def _session_display(self, meta):
+        if meta.get("replay"):
+            return meta["label"]
+        simulated = meta.get("simulated")
+        return case_display(simulated["profile"])["display_name"] if simulated else "Manual synthetic assessment"
+
+    def _question_records(self, responses, include_subtopics=True):
+        questions = {q["question_id"]: q for q in self.bank["questions"]}
+        subtopics = {qid: (sub["id"], sub["name"]) for topic in self.taxonomy["topics"]
+                     for sub in topic["subtopics"] for qid in sub["question_ids"]}
+        rows = []
+        for position, event in enumerate(responses, 1):
+            question = questions[event["question_id"]]
+            sub_id, sub_name = subtopics[event["question_id"]] if include_subtopics else (None, "Historical label unavailable")
+            rows.append({"position": position, "question_id": event["question_id"],
+                         "skill_id": question["skill_id"], "text": question["text"],
+                         "options": question["options"], "selected_index": event["selected_index"],
+                         "answer_index": question["answer_index"],
+                         "correct": event["selected_index"] == question["answer_index"],
+                         "answered_at": event.get("answered_at"),
+                         "subtopic_id": sub_id, "subtopic_name": sub_name})
+        return rows
+
+    def scenario_detail(self, case_id):
+        case = self.research.scenario(case_id)
+        library = self.research.library()
+        end_packages = {p["audience"]: p for p in case["packages"] if p["checkpoint"] == "end"}
+        evidence = end_packages["student"]["review"]["sanitized_evidence"]
+        identity = case_display(case["name"], evidence)
+        try:
+            responses = self.replays.source_cases()[case_id]
+            rows = self._question_records(responses, library["source"].get("taxonomy_sha256") == canonical_digest(self.taxonomy))
+            response_notice = "Original saved answer sequence joined to the matching private bank."
+        except (OSError, ValueError, KeyError, TypeError):
+            rows = []
+            response_notice = "Original response source is unavailable or does not match the current bank; individual answers cannot be shown."
+        stored_diag = case.get("research_diagnostics", {})
+        checkpoints = {}
+        for checkpoint, count in (("midpoint", 20), ("end", 40)):
+            graph = case.get("assessment_graph", {}).get("checkpoints", {}).get(checkpoint)
+            kt = copy.deepcopy(stored_diag.get("kt", {}))
+            probs = kt.get("p_correct_before_each_answer", [])
+            conformal = stored_diag.get("conformal", {})
+            skills = conformal.get("checkpoints", {}).get(checkpoint, {})
+            available = len(probs) == 40 and bool(skills)
+            kt["p_correct_before_each_answer"] = probs[:count]
+            kt["coverage_scope"] = "original_full_40_question_trace"
+            kt["provenance"] = copy.deepcopy(library.get("diagnostic_provenance", {}))
+            diag = {"status": "ready" if available else "unavailable",
+                    "mode": "frozen_replay_no_model_or_calibration_rerun",
+                    "checkpoint": checkpoint, "answer_count": count,
+                    "used_for_student_advice": False, "kt": kt,
+                    "conformal": {"skills": skills, "calibrated_k": 5 if count == 20 else 10,
+                                  "status": "exploratory_only_not_fixed_bank_validated"},
+                    "scope_warning": "Historical saved model outputs; not recomputed and not validated mastery evidence."}
+            checkpoints[checkpoint] = {"graph": graph, "diagnostics": diag,
+                                       "diagnostics_job": {"status": diag["status"]}}
+        midpoint = next((p["review"] for p in case["packages"] if p["checkpoint"] == "midpoint"), None)
+        checkpoints["midpoint"]["baseline_student"] = copy.deepcopy(midpoint)
+        end = checkpoints["end"]
+        end["evidence"] = copy.deepcopy(evidence)
+        executions = {}
+        for audience, package in end_packages.items():
+            review = package["review"]
+            baseline = copy.deepcopy(review)
+            baseline["message"] = copy.deepcopy(review["template_baseline"])
+            baseline["selected_candidate_id"] = review["baseline_candidate_id"]
+            baseline["trace"].update({"selection_source": "rules_baseline", "fallback_reason": None})
+            end[f"baseline_{audience}"] = baseline
+            end[f"{audience}_review"] = copy.deepcopy(review)
+            executions[audience] = {"selector": package.get("selector_execution"),
+                                   "generator": package.get("generator_execution")}
+        case.update(identity)
+        case["detail"] = {"session_id": case_id, "label": case["name"], **identity,
+                          "status": "complete", "answered_count": 40,
+                          "read_only": True, "source_mode": "retained_original",
+                          "observed_total": copy.deepcopy(evidence["total"]),
+                          "question_responses": rows, "response_notice": response_notice,
+                          "checkpoints": checkpoints, "review_hashes": {}, "reviews": [],
+                          "review_contract": self.teacher_config()["review_contract"],
+                          "provider_job": {"status": "ready", "provider_mode": library["policy"].get("provider_mode", "recorded"),
+                                           "executions": executions},
+                          "provenance": {"report_sha256": library["report_sha256"], "source": library["source"],
+                                         "policy": library["policy"], "mode": "retained_original_not_recomputed"}}
+        return case
+
     def teacher_session(self, session_id):
         with self.lock:
             meta = self._load_meta(session_id)
             session = self.mcqs.private_record(session_id)
-            questions = {q["question_id"]: q
-                         for q in self.bank["questions"]}
-            subtopics = {}
-            for topic in self.taxonomy["topics"]:
-                for sub in topic["subtopics"]:
-                    for qid in sub["question_ids"]:
-                        subtopics[qid] = (sub["id"], sub["name"])
-            rows = []
-            for event in session["responses"]:
-                question = questions[event["question_id"]]
-                sub_id, sub_name = subtopics[event["question_id"]]
-                rows.append({
-                    "position": event["position"],
-                    "question_id": event["question_id"],
-                    "skill_id": event["skill_id"],
-                    "text": question["text"],
-                    "options": question["options"],
-                    "selected_index": event["selected_index"],
-                    "answer_index": question["answer_index"],
-                    "correct": event["correct"],
-                    "answered_at": event["answered_at"],
-                    "subtopic_id": sub_id,
-                    "subtopic_name": sub_name})
+            rows = self._question_records(session["responses"])
             checkpoints = copy.deepcopy(meta["checkpoints"])
             end = checkpoints.get("end", {})
             review_hashes = {}
@@ -743,6 +821,9 @@ class DemoService:
             return {
                 "session_id": session_id,
                 "label": meta["label"],
+                "display_name": self._session_display(meta),
+                "created_at": meta["created_at"],
+                "replay": copy.deepcopy(meta.get("replay")),
                 "simulated": meta["simulated"],
                 "status": session["status"],
                 "answered_count": len(session["responses"]),
@@ -814,6 +895,8 @@ class DemoService:
                 "approves_learner_delivery": False}
             meta["reviews"].append(entry)
             self._save_meta(meta)
+            if meta.get("replay"):
+                self.replays.sync_reviews(session_id, meta["reviews"])
             return {"recorded": True, "review": copy.deepcopy(entry)}
 
     # ---------------- simulation ----------------
