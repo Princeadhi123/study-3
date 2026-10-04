@@ -183,6 +183,19 @@ table.grid th { background: #f0f5f5; font-weight: 600; }
 .metric-label { font-size: .75rem; font-weight: 600; color: var(--muted); }
 .metric-value { font-size: 2.15rem; font-weight: 600; letter-spacing: -.06em; font-variant-numeric: tabular-nums; line-height: 1.4; }
 .metric-card .meta { font-size: .65rem; }
+.readiness-guide { border: 1px solid var(--line); background: #fff; border-radius: 10px; margin: .6rem 0 1rem; min-width: 0; }
+.readiness-guide > summary { cursor: pointer; color: var(--verdigris); font-size: .85rem; font-weight: 600; padding: .8rem 1rem; }
+.readiness-body { padding: 0 1.2rem 1.2rem; }
+.readiness-body > .meta { margin-top: .2rem; }
+.readiness-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 1rem; margin: .6rem 0 1rem; }
+.readiness-card { border: 1px solid var(--line); border-top: 3px solid #739c94; border-radius: 9px; padding: 1rem 1.2rem; background: #f8fafa; min-width: 0; }
+.readiness-card h4 { margin: 0 0 .6rem; font-size: .9rem; }
+.readiness-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .4rem .8rem; margin: 0; font-size: .8rem; }
+.readiness-fields dt { color: var(--muted); font-weight: 600; }
+.readiness-fields dd { margin: 0; overflow-wrap: anywhere; }
+.readiness-close { border-top: 1px solid var(--line); padding-top: .6rem; }
+.readiness-close h4 { margin: 0 0 .3rem; }
+.readiness-close p { margin: 0; }
 .library-controls { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: .8rem; padding: 1rem; border: 1px solid var(--line); background: #fff; border-radius: 10px; margin-bottom: 1.2rem; }
 .control-field { display: flex; flex-direction: column; gap: .4rem; font-size: .74rem; min-width: 0; }
 .control-field > span { color: var(--muted); }

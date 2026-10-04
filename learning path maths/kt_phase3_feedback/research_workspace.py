@@ -48,7 +48,7 @@ PROFILE_LABELS = {
     "weak_fractions": "Lower correct-answer probability in Fractions",
     "learning": "Correct-answer probability increases over time",
     "fatigue": "Correct-answer probability decreases over time",
-    "guessing": "Answers sampled at chance level",
+    "guessing": "Random guessing",
     "wrong_option_1": "Every answer incorrect — wrong-option set A",
     "wrong_option_2": "Every answer incorrect — wrong-option set B"}
 

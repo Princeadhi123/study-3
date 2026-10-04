@@ -207,12 +207,61 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#scenario-search')")
         expected = 54 if DEFAULT_REPORT.is_file() else 4
         self.assertEqual(b.js("document.querySelectorAll('.scenario-row').length"), expected)
+        guide = "document.querySelector('#research-readiness')"
+        self.assertTrue(b.js(f"Boolean({guide})"))
+        self.assertFalse(b.js(f"{guide}.open"))
+        library_text = "document.querySelector('#library-pane').textContent"
+        self.assertTrue(b.js(f"{library_text}.includes('Observed answer counts describe this assessment')"))
+        self.assertTrue(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
+        b.js(f"{guide}.querySelector('summary').click()")
+        self.assertTrue(b.js(f"{guide}.open"))
+        for heading in ["Knowledge tracing", "Conformal prediction",
+                        "Feedback focus and draft wording", "Skill map and subtopics",
+                        "Synthetic scenarios and replay", "Blind educator comparison"]:
+            self.assertTrue(b.js(f"{guide}.textContent.includes({json.dumps(heading)})"), heading)
+        self.assertEqual(b.js(f"{guide}.querySelectorAll('.readiness-card').length"), 6)
+        self.assertTrue(b.js(f"{guide}.textContent.includes('Why research-only')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('Next step')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('Recorded predictive evaluation on ViLLE data already exists')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('fixed 40-question session setting')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('selected partly using cold-item evaluation scores')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('not a diagnosis or a readiness score')"))
+        self.assertTrue(b.js(f"{guide}.textContent.includes('Before real learner use')"))
+        self.assertFalse(b.js(f"Boolean({guide}.querySelector('svg'))"))
+        self.assertFalse(b.js("Boolean(document.querySelector('.scenario-row.active'))"))
+        try:
+            exposure_before = b.js("sessionStorage.getItem('replay-exposure')")
+        except AssertionError:
+            exposure_before = None
+        self.assertNotEqual(exposure_before, "yes")
+        self.assert_no_overflow()
+        b.js(f"{guide}.scrollIntoView({{block:'start'}})")
+        b.screenshot("research-readiness-open-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js(f"{guide}.scrollIntoView({{block:'start'}})")
+        b.screenshot("research-readiness-open-mobile.png")
+        b.js("[...document.querySelectorAll('#research-readiness .readiness-card')].find(c => c.textContent.includes('Conformal')).scrollIntoView({block:'center'})")
+        b.screenshot("research-readiness-conformal-mobile.png")
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('[data-workspace=live]').click()")
+        b.wait("document.querySelector('#live-pane') && !document.querySelector('#live-pane').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait(f"Boolean({guide})")
+        self.assertTrue(b.js(f"{guide}.open"))
+        b.js(f"{guide}.querySelector('summary').click()")
+        self.assertFalse(b.js(f"{guide}.open"))
         b.js("document.querySelector('.scenario-row').click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
         self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 6)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         self.assertEqual(b.js("document.querySelectorAll('#scenario-tab-feedback .compare .col').length"), 4)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=research]').click()")
+        research_text = "document.querySelector('#scenario-tab-research').textContent"
+        self.assertTrue(b.js(f"{research_text}.includes('predictively evaluated on real ViLLE data')"))
+        self.assertTrue(b.js(f"{research_text}.includes('not mastery')"))
+        self.assertTrue(b.js(f"{research_text}.includes('simulated sessions are not additional real-learner validation')"))
+        self.assertTrue(b.js(f"{research_text}.includes('Why still research-only')"))
         if DEFAULT_REPORT.is_file():
             self.assertTrue(b.js("Boolean(document.querySelector('#scenario-tab-research svg'))"))
         self.assert_no_overflow()

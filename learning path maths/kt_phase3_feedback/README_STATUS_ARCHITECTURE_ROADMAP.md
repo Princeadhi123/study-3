@@ -149,6 +149,35 @@ Restart after Python changes; tracked Phase 2/3 source changes produce a replay
 conflict rather than silently running stale loaded code. No model retraining or
 fixed-bank calibration claim is introduced.
 
+### Research status guide
+
+The scenario library renders two always-visible boundary notes (observed counts
+describe this assessment; all scenarios are synthetic test cases, not learners)
+plus a collapsed static `#research-readiness` disclosure of project-wide
+guidance — explicitly not a per-scenario diagnosis or readiness score. Six cards
+(KT, conformal prediction, feedback focus/wording, skill map, synthetic replay,
+blind educator comparison) each state what the component does, why it remains
+research-only, and the next validation step. For KT, recorded predictive
+evaluation on real ViLLE interactions already exists and the 40-question bank is
+source-derived, but those results do not establish mastery or calibration in
+this fixed session setting, and the deployed checkpoint was selected partly
+using cold-item evaluation scores — not an untouched final test. The stated
+next step audits existing ViLLE sessions for suitable held-out answers (only
+preceding history per prediction) and evaluates fixed-assessment prediction and
+calibration on a set unused for training or model selection, collecting new
+learner data only if existing data cannot support the claim. Remaining steps:
+empirical coverage validation, independent educator review plus a reviewed
+practice-activity bank, educator taxonomy/prerequisite review, a consented
+privacy-reviewed learner study, and a preregistered comparison protocol with a
+validated rubric. A closing note lists educator approval, privacy review, real
+access controls, TLS, and durable storage as prerequisites for real learner use.
+The research diagnostics tab adds the parallel caveat that KT was trained and
+predictively evaluated on real ViLLE data, estimates correctness rather than
+mastery, that simulated sessions are not additional real-learner validation,
+and that conformal ranges are not guarantees for this assessment. Opening the
+guide reveals no drafts, candidate IDs, or scenario mappings and sets no
+exposure flag.
+
 A comparison includes every end case for one audience. Server-side cryptographic
 randomization shuffles case order and balances A/B placement. Assignments, exact
 text, provenance, and canonical JSON hashes are persisted under the demo root's
@@ -277,20 +306,26 @@ student routes.
 
 Current protected artifacts under `artifacts/`:
 
-- `live_demo_20261002/` — sessions, metadata, provider captures,
-  `verification/` (rework + final drivers, logs, screenshots)
-- `integrated_feedback_20261002_hosted_full/` — `report.json`, `review.html`,
-  `contract.json`, `inputs.json`, captures (54 cases, 162 packages in the
-  stored report); `integrated_feedback_20261002_offline/` offline equivalent
+- `live_demo_20261002/` — runtime stores: sessions, metadata, provider
+  captures
+- `integrated_feedback_20261002_hosted_full/` — retained `report.json`,
+  `review.md`/`review.html`, `contract.json`, `inputs.json`, captures and
+  reviews (54 cases, 162 packages in the stored report)
 - `assessment_pipeline_20261001.json` — default source input for the
-  integrated runner (not its output);
-  `evidence_feedback_20261002_v2/inputs.json`
-- `cleanup_result_artifacts_v2.json` — receipt for the approved cleanup:
-  336 files / 7,013,843 bytes plus 2 empty package folders removed;
-  consolidated reports retained byte-identical. Individual `packages/`
-  folders no longer exist — do not link them.
-- Historical reports, smoke runs, and repair artifacts are preserved for
-  provenance; they record past runs, not current runtime state.
+  integrated runner (not its output)
+- `evidence_feedback_20261002_v2/` — retained inputs plus small docs
+  (`review.md`, coverage/verification summaries)
+- `sessions/` — legacy session store
+
+An approved later cleanup removed the historical smoke/offline/repair
+artifacts, cleanup receipts, and old verification screenshots previously
+listed here (including `integrated_feedback_20261002_offline/`,
+`provider_replay_20261002/`, `assessment_pipeline_20261001/`,
+`report_fixed40_baselines_20260929/`, `live_demo_20261002/verification/`,
+`ui_verification_20261004/`, `hosted_combined_20261002_run1_review.md`, and
+`cleanup_result_artifacts_v2.json`). These files and directories no longer
+exist on disk — do not link them. Reports and metrics quoted below from those sources
+are past verification results, citable as history but not re-inspectable.
 
 Frozen measured figures (from
 `artifacts/integrated_feedback_20261002_hosted_full/review.md`, not
@@ -301,6 +336,9 @@ report replays frozen predictions. Coverage was 54 chosen cases, not all
 sequences.
 
 ### Earlier metrics and what they validate
+
+Rows citing directories marked as removed above describe past results from
+deleted artifacts; they are retained as history, not on-disk evidence.
 
 | Evidence source | Metrics / findings | Interpretation boundary |
 |---|---|---|
@@ -320,24 +358,20 @@ or that provider decisions outperform deterministic review heuristics.
 
 ## 9. Verification (what each check proves)
 
-Browser verification paths below are relative to
-`artifacts/live_demo_20261002/`; unit-test paths are relative to this
-repository folder.
+Unit-test paths are relative to this repository folder.
 
 - `tests/test_demo_api.py`, `tests/test_demo_service.py`,
   `tests/test_live_diagnostics.py` — unit/software tests with offline fakes.
-- `verification/final/decision_drive.py` — software fixtures + rules page;
-  not provider proof. `disclosure_drive.py` — rules/fake disclosure state.
-  `english_drive.py` — real 40-question bank display + fake diagnostics.
-  `verify_diagnostics.py` — checks captured live math; does not rerun
-  inference.
-- `verification/rework/browser_drive.py` — shared headless-Edge CDP helper;
-  retained.
-- Passing logs on record: `verification/final/english_v2_log.txt`,
-  `verification/final/decision_english_log.txt`,
-  `verification/final/disclosure_log.txt`,
-  `verification/final/diagnostic_verification.json`. Screenshots are UI
-  captures, not fresh provider proof.
+- Earlier browser verification drivers, logs, and screenshots under
+  `artifacts/live_demo_20261002/verification/` were removed by the approved
+  cleanup described in section 8. They remain past verification results:
+  `decision_drive.py` exercised software fixtures on a rules page (not
+  provider proof), `disclosure_drive.py` checked rules/fake disclosure state,
+  `english_drive.py` rendered the real 40-question bank with fake
+  diagnostics, and `verify_diagnostics.py` checked captured live math without
+  rerunning inference. Passing logs on record included
+  `english_v2_log.txt`, `decision_english_log.txt`, `disclosure_log.txt`,
+  and `diagnostic_verification.json`.
 
 Narrow commands:
 
@@ -357,9 +391,14 @@ The workspace implementation has dedicated offline service/API tests and an
 opt-in installed-Edge browser journey in `tests/test_research_browser.py`.
 See README for invocation. Browser fixtures use fake diagnostics/providers and
 synthetic judgments, not educator data; the retained library is read-only.
-Screenshots from local verification are under `artifacts/ui_verification_20261004/`.
-No hosted provider calls were made for this implementation. Historical reports,
-assessment content, model weights, calibration, and provider policies are unchanged.
+Earlier screenshots under `artifacts/ui_verification_20261004/` were removed by
+the approved cleanup. New screenshots under
+`artifacts/research_guidance_ui_20261004/` verify only the research-status guide
+(closed/open states at desktop and mobile widths); they are new UI captures, not
+fresh provider or research-validity proof.
+No hosted provider calls were made for this implementation. Retained historical
+report contents, assessment content, model weights, calibration, and provider
+policies are unchanged by this UI update.
 
 Verification on 2026-10-04: full discovery ran 341 tests successfully (340 passed,
 1 opt-in browser test skipped); that browser journey was separately enabled and

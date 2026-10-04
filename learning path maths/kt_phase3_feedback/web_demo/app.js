@@ -1090,6 +1090,18 @@ function createDetailView(root, options = {}) {
     card.appendChild(el("p",
       "Private research diagnostics — frozen-model outputs, not mastery " +
       "evidence and not shown to students.", "warn"));
+    card.appendChild(el("p",
+      "KT was trained and predictively evaluated on real ViLLE data. It " +
+      "estimates answer correctness, not mastery. The 40-question bank is " +
+      "source-derived, but the simulated sessions are not additional " +
+      "real-learner validation."));
+    card.appendChild(el("p",
+      "Why still research-only: predictive performance and probability " +
+      "calibration need assessment-specific evaluation for this fixed " +
+      "session setting. Existing held-out ViLLE answers may support that " +
+      "work after a split and history audit. Conformal ranges are not " +
+      "guaranteed for this assessment, and neither diagnostic determines " +
+      "the feedback focus."));
     const picker = el("div", null, "cp-picker");
     [["midpoint", "Midpoint — first 20 answers (k=5)"],
      ["end", "End — all 40 answers (k=10)"]].forEach(([cp, label]) => {

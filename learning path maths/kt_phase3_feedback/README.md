@@ -167,6 +167,36 @@ private source and bank; if those inputs are unavailable or incompatible, the UI
 says so instead of inventing answers. Historical diagnostics stay labelled as saved
 inference, not newly computed results.
 
+### Research status guide
+
+The library shows two always-visible boundary notes — observed counts describe
+this assessment only, and all scenarios are synthetic test cases — followed by a
+collapsed **Research status & next steps** disclosure (`#research-readiness`).
+It is static project-wide guidance, not a per-scenario diagnosis or readiness
+score, and opening it reveals no drafts, candidate IDs, or scenario mappings.
+Six cards summarize, for each component — knowledge tracing, conformal
+prediction, feedback focus/wording, the skill map, synthetic replay, and the
+blind educator comparison — what it does, why it remains research-only, and the
+validation still needed. KT already has recorded predictive evaluation on real
+ViLLE interactions and the 40-question bank is source-derived, but existing
+results do not establish mastery or calibration in this fixed session setting,
+and the deployed checkpoint was selected partly using cold-item evaluation
+scores — so that split is not an untouched final test. The stated next step is
+to audit existing ViLLE sessions for suitable held-out answers (with only
+preceding history per prediction) and evaluate fixed-assessment prediction and
+calibration on a set not used for training or model selection, collecting new
+learner data only if existing data cannot support the intended claim. Remaining
+steps: empirical coverage checks for the intended population, independent
+educator review, a reviewed practice-activity bank, taxonomy/prerequisite
+review, a consented privacy-reviewed learner study, and a preregistered
+comparison protocol. A closing note restates that educator approval, privacy
+review, real access controls, TLS, and durable storage are required before any
+real learner use. The research diagnostics tab similarly states that KT was
+trained and predictively evaluated on real ViLLE data, that it estimates
+correctness rather than mastery, that simulated sessions are not additional
+real-learner validation, and that conformal ranges are not guarantees for this
+assessment.
+
 ### Replay scenarios after a change
 
 1. Restart the server after changing Python pipeline code. Replay refuses admission
@@ -386,20 +416,20 @@ The most useful retained reports are:
 - `artifacts/integrated_feedback_20261002_hosted_full/` — current
   evidence-focused hosted replay: 54 saved scenarios, 162 packages, 69/108
   end selections matching baseline and 39 differing;
-- `artifacts/integrated_feedback_20261002_offline/` — deterministic version of
-  the same integrated report path;
-- `artifacts/provider_replay_20261002/` — older generic-candidate Jev/Aitta
-  replay: Jev matched the rules baseline on all 108 end packages;
 - `artifacts/evidence_feedback_20261002_v2/` — deterministic
   observed-evidence review: 172 scenarios, 516 packages, and 14,641 checked
-  skill-total vectors;
-- `artifacts/assessment_pipeline_20261001/` — 54-scenario observed/KT summary,
-  conformal checkpoint rows, and research diagnostics;
-- `artifacts/report_fixed40_baselines_20260929/` — earlier ten-scenario
-  baseline report with simulated probability, KT probability, observed
-  accuracy, and conformal summaries;
-- `artifacts/cleanup_result_artifacts_v2.json` — receipt for the approved
-  cleanup of 336 obsolete files.
+  skill-total vectors (inputs plus retained summary docs);
+- `artifacts/assessment_pipeline_20261001.json` — 54-scenario answer source
+  used by replay.
+
+Past reports now deleted by an approved cleanup (no longer on disk; quoted
+metrics remain past results): `integrated_feedback_20261002_offline/`
+(deterministic equivalent of the hosted report), `provider_replay_20261002/`
+(older generic-candidate replay where Jev matched the rules baseline on all
+108 end packages), `assessment_pipeline_20261001/` (54-scenario observed/KT
+summary and conformal rows), `report_fixed40_baselines_20260929/` (earlier
+ten-scenario baselines), old verification logs/screenshots, and cleanup
+receipts.
 
 Interpretation rules:
 
@@ -494,10 +524,14 @@ not educator preference or educational validity. Browser tests skip during norma
 unit discovery unless explicitly enabled.
 
 Most tests use synthetic or fake banks/providers. The optional real-bank test
-runs only when the approved Phase 2 bank is available. Browser verification
-scripts under `artifacts/live_demo_20261002/verification/` prove UI behavior
-or validate captured data; they do not rerun provider calls or establish
-educational validity.
+runs only when the approved Phase 2 bank is available. Earlier browser
+verification scripts and screenshots under
+`artifacts/live_demo_20261002/verification/` and
+`artifacts/ui_verification_20261004/` were removed by the approved cleanup;
+they proved UI behavior or validated captured data, never provider calls or
+educational validity. New screenshots under
+`artifacts/research_guidance_ui_20261004/` verify only the research-status
+guide UI.
 
 Caution: a running demo keeps the native KT model resident in memory. Stop or
 coordinate the server before a memory-heavy full test run.
