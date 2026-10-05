@@ -303,6 +303,171 @@ work: every question content string and every selectable option resolves in
 the frozen embedding table. The v1 bank and approved copy are retained only
 as audit artifacts and should not be used for live KT input.
 
+#### Bank historical availability audit
+
+`audit_bank_coverage.py` scans the frozen prepared windows and counts how
+often the approved bank's source items and exact renderings already appear as
+stored labelled targets:
+
+```bash
+python audit_bank_coverage.py --out-dir artifacts/bank_coverage_audit
+```
+
+It writes `coverage.json` (full report: per-item and per-question counts by
+split, heldout/test groups, history summaries, scope notes and input
+provenance hashes) and `coverage.csv` (per-question, per-split summary rows).
+The output directory must not already exist — the script refuses to overwrite
+it. No model is loaded and no training or inference runs; it is a read-only
+scan of the bank, vocabulary, sequences and split report.
+
+Counts are reported at two levels: **item level** (source item matched with
+the bank's skill label) and **exact rendering** (source item + skill +
+byte-exact rendered content including ordered options). Events where the same
+source item carries a *different* skill label than the bank assigns are not
+treated as bank-skill coverage: they are excluded from the item/exact totals
+and counted separately per item and split, while still remaining available in
+preceding history. `context`-split events are never counted as heldout/test
+targets. All outputs are aggregate-only — no student identifiers are written.
+
+History columns count preceding events *within the retained window* only;
+position zero does not mean a new student. `val` informed checkpoint
+selection, `test` is not necessarily untouched, and conformal calibration
+students must be excluded from evaluation of conformal prediction coverage.
+This is an availability audit, **not** a performance evaluation — no accuracy, coverage
+guarantee, or fixed-assessment validity is measured.
+
+#### Evaluation candidate inventory
+
+`inventory_evaluation_candidates.py` inventories how much scored MCQ material
+exists for the four bank skills inside the frozen prepared windows:
+
+```bash
+python inventory_evaluation_candidates.py --out-dir artifacts/evaluation_candidate_inventory
+```
+
+The output directory must not already exist. Before counting, the script
+reproduces the **active k10 conformal calibration partition** exactly from the
+prediction dump's student metadata — first-seen base student IDs and active
+label counts must match or the run fails. Calibration students are then
+excluded from candidate counts. Only `test_warm` and `test_cold_item`
+stored targets are counted, using
+each event's *actual* skill label rather than the bank's label. Because the
+script reads only the bank's four skill names (ignoring its item IDs and answer keys), the
+scan covers **all** items on those skills, not just catalogued renderings.
+
+Outputs, all aggregate-only and ignored by Git under `artifacts/`:
+
+- `warm_candidates.csv` / `cold_candidates.csv` — ranked distinct MCQ
+  renderings (warm = in item vocabulary, cold = unknown item index), ordered
+  by stored-target count, then distinct students, then stable IDs; history
+  columns are window-local preceding events.
+- `item_coverage.csv` — per-item, per-skill, per-regime availability across the four
+  skills.
+- `availability.json` — full report with provenance, partition confirmation,
+  and scope notes.
+
+Candidate rows include prompts/options, class-support counts and review flags —
+**no answer keys and no student identifiers**. This is a private research inventory: it
+produces *candidates*, not an approved bank, makes no claim about model
+quality, conformal coverage, or embedding validity, and the counted windows
+are **not** student-training-disjoint.
+
+Passing `--all-skills` widens the same scan from the four bank skills to every
+skill in the model catalogue, writing to a fresh `--out-dir` (the default
+four-skill behaviour is unchanged):
+
+```bash
+python inventory_evaluation_candidates.py --all-skills --out-dir artifacts/evaluation_candidate_inventory_all_skills
+```
+
+In this mode the script first validates that the skill catalogue is complete
+and vocabulary-aligned — every model-vocabulary skill present, no extras — and
+reconciles its all-skill target counts against the active k10 checkpoint
+counts (counts, not rates); any mismatch fails the run. Skill summaries include
+`skill_ranking.csv`: an **availability-only** ordering of skills, descending
+by min(warm, cold) rendering counts within each pool, requiring more than one
+student and no existing `BLOCKING_FLAGS`, then min catalogue students across regimes,
+then total repeated-unblocked renderings, then total catalogue answers, then
+skill ID. Blocking flags are review leads, not approval, and no model output,
+correctness, or outcome signal participates in the ranking. The report's
+`checkpoint_support` per window/skill distinguishes `warm_only`, `cold_only`
+and `mixed` non-overlapping blocks of the active checkpoint size, preserving
+the existing k-grouping within each window — windows are never regrouped.
+`fully_catalogued` requires every member of an already formed block to match
+the MCQ catalogue; a separate count reports blocks with k distinct renderings.
+Neither count guarantees that a fixed assessment could be assembled.
+`prompt_support.csv` additionally collapses option variants by normalized
+visible prompt, counting only variants individually supported by multiple
+students and without blocking flags. Singleton variants are not pooled to
+invent repeated-question support. No bank files are modified.
+
+#### Global support-optimal warm/cold research banks (2026-10-05)
+
+The current final research selection is
+`artifacts/evaluation_banks_support_optimal_20261005/`, research version
+`3_support_optimal_under_declared_rules_20261005`:
+
+- [Warm bank](artifacts/evaluation_banks_support_optimal_20261005/warm_bank_private.json)
+- [Cold bank](artifacts/evaluation_banks_support_optimal_20261005/cold_bank_private.json)
+- [Selection and optimality report](artifacts/evaluation_banks_support_optimal_20261005/review.md)
+- [Optimality certificate and bank hashes](artifacts/evaluation_banks_support_optimal_20261005/optimality_certificate.json)
+- [Independent output checks](artifacts/evaluation_banks_support_optimal_20261005/independent_optimality_checks.json)
+
+**Precise claim:** globally support-optimal warm/cold MCQ research banks
+within the eligible frozen dataset, the shared four-source-topic design,
+and the documented content/format rules. This is not a universal
+educational-quality optimum, a limitation-free assessment, or KT/conformal
+validation.
+
+Each bank has 40 distinct question IDs and normalized visible prompts,
+ten per topic and five per topic in each half. Topics are percentage
+calculations, divisibility/prime identification, combining like terms,
+and fraction multiplication/quantities. Source skill IDs are preserved.
+
+Eligibility requires at least three distinct substantive options, at least
+two eligible evaluation students per exact rendering, stand-alone
+source-topic-aligned content, independently checked answers, exact frozen
+embedding membership and the correct warm/cold item-ID regime. Missing
+media, malformed worked chains, supplied target answers, off-topic tasks
+and ambiguous mixed-number exports are not silently repaired. Cold item
+IDs do not establish content novelty or equal difficulty across regimes.
+
+The objective first maximizes the minimum per-rendering student count
+across both banks, then the sum of per-rendering student counts, with
+deterministic tie-breaking. The optimum is **2** for the minimum and
+**917** for the sum. The sum is not 917 unique students or an independent
+sample size; repeated attempts and overlapping students remain.
+
+All 560 model source skills were capacity-checked. Availability upper
+bounds prune 554 skills; all 3,570 relevant exact renderings in the six
+remaining skills have closed review decisions, with no unresolved cases.
+The compatible pool has 2,782 renderings. Five topics remain feasible,
+so every one of the five four-topic combinations was examined. Two
+combinations are feasible, with maximum support sums 910 and 917; the
+other three fail prompt-uniqueness capacity. The independent checks verify
+these bounds, the selected banks, mathematical answers and hashes.
+
+Content/selection checks are complete under these rules; historical KT
+inference, its evaluation protocol, matching conformal evaluation and
+learner-delivery approval are not. Genuine selected-bank ten-question or
+sequential 40-question sessions have not been established. Keep these
+banks private and research-only; the approved demo bank and serving
+defaults are unchanged.
+
+The retained `global_bank_closed_review_20261005/` directory contains the
+full relevant decision ledger and all-source capacity bounds. The frozen
+all-skill availability capture, MCQ catalogue, vocabulary, embedding table
+and `stronger_bank_audit_20261005/manifest.json` remain necessary inputs.
+The [cleanup receipt](artifacts/evaluation_banks_support_optimal_20261005/cleanup_receipt_20261005.json)
+records removal of superseded bank/audit folders and preparation outputs;
+removed historical bank reports are not current on-disk evidence.
+
+Next: bind the retained selection/support evidence into the evaluation
+protocol, resolve eligible target events and genuine score-block support,
+then run historical KT evaluation. Define conformal's target separately
+before writing its evaluation code. No fresh selection or inference was
+performed for this documentation update.
+
 #### Callable MCQ test path (backend API surface)
 
 `mcq_test.py` is the deterministic, callable counterpart to the scripted

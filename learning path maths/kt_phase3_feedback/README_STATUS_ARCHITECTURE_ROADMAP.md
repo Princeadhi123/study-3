@@ -1,6 +1,6 @@
 # Status, Architecture, and Roadmap
 
-Snapshot date: 2026-10-04. This file is the current handoff for the local
+Snapshot date: 2026-10-05. This file is the current handoff for the local
 synthetic demo in this repository. It describes working software for private
 research review — not a validated educational product.
 
@@ -425,3 +425,103 @@ and `git diff --check`. These are software checks, not research-validity results
 
 All of the above are planned work — nothing here implies automatic approval
 for learner delivery.
+
+## 11. KT and warm/cold bank next steps (2026-10-05)
+
+### Decision and scope
+
+Keep the current frozen KT model; do not retrain it or add a mastery layer
+for this next study. The live demo already runs KT and conformal prediction
+as private research diagnostics, but neither controls student advice.
+Scoring and feedback remain grounded in observed answers; Jev selects a
+permitted observed-evidence feedback focus, not a mastery diagnosis.
+
+KT predicts next-response correctness conditional on preceding history and
+the target question. Its probabilities may inform a research proficiency
+signal, but neither a hidden state nor `p_correct = 0.85` means 85% mastery.
+Temporal features do not by themselves validate learning or forgetting.
+An explicit mastery estimate is not required for the current feedback pipeline.
+
+The warm/cold banks are separate research inputs, not replacements for the
+demo bank or validated student assessments. Historical responses can support
+next-response evaluation without a complete 40-question session; they do not
+establish validity for the designed fixed, sequential assessment. The final
+selection and its support/optimality evidence now exist; the evaluation
+protocol, predictive results and learner approval remain pending.
+
+### Current global bank selection
+
+As of 2026-10-05, use the private research pair in
+`../kt_phase2_inference/artifacts/evaluation_banks_support_optimal_20261005/`
+for the next planned historical study, not the removed original/v2 proposals.
+The research version is `3_support_optimal_under_declared_rules_20261005`.
+
+The accurate claim is **globally support-optimal within the frozen eligible
+dataset and declared four-topic, 40-question bank rules**, not universally
+best MCQs or validated mastery/coverage. The objective maximizes the weakest
+question's student support, then total per-rendering support. Its optimum is
+a minimum of 2 and a sum of 917; that sum does not count unique students.
+The selected topics are algebra (combining like terms), percentages,
+divisibility/primes, and fraction multiplication/quantities.
+
+Bank hashes, all-combination results and independent checks are retained in
+`optimality_certificate.json` and `independent_optimality_checks.json` in that
+folder. Its `review.md` explains the exhaustive capacity/content review and
+remaining data constraints; `cleanup_receipt_20261005.json` records the
+approved removal of superseded artifacts. Required source evidence and
+runtime dependencies remain. The demo assessment and student-advice branch
+are unchanged; no inference or bank switch accompanies this documentation.
+
+### Immediate deliverables, before inference
+
+1. **Selection provenance and freeze.** Use the retained final version and
+   certificate hashes; do not rebuild the deleted original proposal or call
+   this selection version 1. Bind the current banks, eligibility rules and
+   input provenance to the evaluation protocol without changing the bank
+   contents. Document overlap and content limitations, keep approval pending,
+   and give any later content/selection revision a new version and reason.
+2. **Eligible targets and score-block support.** Reuse the saved selected
+   historical support in `selected_review_private.json`; do not repeat the
+   availability scan without a specific reason. Resolve eligible target-event
+   locators, calibration-student exclusion and preceding-history construction
+   for replay. Check genuine usable blocks separately; available counts do
+   not establish fixed-assessment sessions. Never combine unrelated responses
+   into invented ten-question or 40-question assessment sessions.
+3. **Written KT evaluation protocol.** Specify warm/cold item IDs crossed with
+   history/no-history. Within each regime, use identical target responses for
+   both history conditions and never expose the target answer before prediction.
+   Define eligibility, history construction, baselines, AUC, log loss, Brier
+   score, calibration checks, and student-level uncertainty before inference.
+   Account for repeated student observations, limited samples and prior
+   checkpoint selection; do not describe reused model-selection data as an
+   untouched final test. Warm versus cold is descriptive, not a
+   difficulty-controlled comparison. This roadmap is not the completed protocol.
+
+### Evaluation and later decision use
+
+After the three deliverables, run the frozen KT study and report whether
+history helps, whether KT improves on the specified baselines, and whether
+probabilities are reasonably calibrated under the evaluated conditions.
+Report inconclusive findings rather than forcing a success claim. Historical
+predictive performance alone does not establish mastery, fixed-assessment
+validity, or improved student learning.
+
+Specify conformal evaluation separately, before writing its evaluation code:
+choose individual correctness or a ten-question realized score/rate as the
+target, and check that calibration and evaluation construction match it.
+Do not transfer historical-block coverage claims to the selected fixed bank.
+If genuine selected-bank score support is insufficient, document that limit;
+do not invent blocks or reuse a mismatched guarantee.
+
+Only after predictive evaluation, and once suitable practice content exists,
+consider one bounded KT-assisted decision: selecting the next practice
+question. Keep the observed-evidence approach as the baseline and first log
+KT's proposed choice in research/shadow mode without changing student advice.
+Write the selection policy and comparison criteria before collecting results.
+Shadow checks can expose decision behavior but cannot establish learning gains
+or outcomes for unchosen questions. A later appropriately approved prospective
+comparison is needed to test whether KT-assisted choices help students.
+
+No bank switch, automatic progression, student-facing KT/conformal authority,
+or mastery claim is authorized by this plan. Feedback development can proceed
+independently while the research study is prepared.
