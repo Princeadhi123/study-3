@@ -638,6 +638,63 @@ class PracticeActionCoverageTests(unittest.TestCase):
                          PRACTICE_ACTIONS["percentage_amount"])
 
 
+class MessageSectionOrderTests(unittest.TestCase):
+    """Exact section-kind order; guards the render_message refactor."""
+
+    def kinds(self, review):
+        return [s["kind"] for s in review["message"]["sections"]]
+
+    def test_teacher_isolated_single_item_order(self):
+        bank = make_bank()
+        sA_ids = [q["question_id"] for q in bank["questions"]
+                  if q["skill_id"] == "sA"]
+        taxonomy = split_taxonomy(bank, {sA_ids[0]})
+        pos = {q["question_id"]: i
+               for i, q in enumerate(bank["questions"])}
+        evidence = build_evidence(
+            bank, taxonomy, submissions(bank, {pos[sA_ids[0]]}))
+        review = run_feedback(evidence, "teacher", "end")
+        self.assertEqual(self.kinds(review), [
+            "completion", "observed_result", "observed_highlight",
+            "review_focus", "limited_evidence", "parent_observation",
+            "next_action", "half_observations", "teacher_follow_up",
+            "scope"])
+
+    def test_student_tied_errors_order(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sA")[:2])
+                 | set(positions(bank, "sB")[:2]))
+        review = run_feedback(build_evidence(bank, taxonomy,
+                                             submissions(bank, wrong)),
+                              "student", "end")
+        self.assertEqual(self.kinds(review), [
+            "completion", "observed_result", "observed_highlight",
+            "review_focus", "limited_evidence", "tie", "next_action",
+            "scope"])
+
+    def test_student_all_correct_order(self):
+        review = run_feedback(end_evidence(), "student", "end")
+        self.assertEqual(self.kinds(review), [
+            "completion", "observed_result", "observed_highlight",
+            "optional_review", "scope"])
+
+    def test_teacher_all_wrong_order(self):
+        review = run_feedback(end_evidence(set(range(40))),
+                              "teacher", "end")
+        self.assertEqual(self.kinds(review), [
+            "completion", "observed_result", "support",
+            "review_focus", "limited_evidence", "parent_observation",
+            "tie", "next_action", "half_observations",
+            "teacher_follow_up", "scope"])
+
+    def test_midpoint_order(self):
+        bank, taxonomy = fixture()
+        evidence = build_evidence(bank, taxonomy,
+                                  submissions(bank, count=20))
+        review = run_feedback(evidence, "student", "midpoint")
+        self.assertEqual(self.kinds(review), ["encouragement"])
+
+
 class MidpointTests(unittest.TestCase):
     def test_midpoint_sanitizes_everything(self):
         bank, taxonomy = fixture()

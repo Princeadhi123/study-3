@@ -265,6 +265,107 @@ def _skill_label(row):
     }.get(row["skill_name"], row["skill_name"])
 
 
+def _result_highlight(evidence, teacher):
+    total = evidence["total"]
+    skills = evidence["skills"]
+    values = [s["correct"] for s in skills]
+    if total["correct"] == 0:
+        return _section("support", (
+            "No correct answers were recorded. Check the student's reasoning "
+            "on one example before choosing instruction." if teacher else
+            "No correct answers were recorded on this assessment. "
+            "A useful next step is to work through one example with support."
+        ))
+    if total["incorrect"] == 0:
+        return _section("observed_highlight", (
+            "All four assessed areas had 10 of 10 answers correct."
+        ))
+    if len(set(values)) == 1:
+        return _section("balanced_result", (
+            f"The same number of answers was correct in each assessed area: "
+            f"{values[0]} of 10. This does not establish equal understanding."
+        ))
+    best = max(values)
+    names = ", ".join(_skill_label(s) for s in skills if s["correct"] == best)
+    return _section("observed_highlight", (
+        f"The highest observed skill count was {best} of 10 in {names}. "
+        "This comparison is limited to the questions answered."
+    ))
+
+
+def _focus_limitation(focus):
+    if focus["out_of"] == 1:
+        return _section("limited_evidence", (
+            "Only one question assessed this content. Check a new example "
+            "before treating it as a consistent difficulty."
+        ))
+    if focus["incorrect"] == 1:
+        return _section("limited_evidence", (
+            "Only one incorrect answer was observed on this content. "
+            "Check a new example before treating it as a consistent difficulty."
+        ))
+    return _section("limited_evidence", (
+        "These answers suggest content to revisit, not the cause "
+        "of an error or a confirmed misconception."
+    ))
+
+
+def _review_sections(evidence, candidate, teacher):
+    if evidence["total"]["incorrect"] == 0:
+        return [_section("optional_review", (
+            "No incorrect answers were observed. There is no error-based "
+            "review priority from this assessment. " + candidate["action"]
+        ))]
+    focus = candidate["focus"]
+    sections = [_section("review_focus", (
+        f"One possible review starting point is {focus['subtopic_name']}: "
+        f"{focus['incorrect']} of {focus['out_of']} answers were incorrect "
+        "on this assessed content."
+    )), _focus_limitation(focus)]
+    if teacher:
+        parent = candidate["planning"]["parent_counts"]
+        sections.append(_section("parent_observation", (
+            f"Within {_skill_label(focus)}, {parent['correct']} of "
+            f"{parent['out_of']} answers were correct and "
+            f"{parent['incorrect']} were incorrect. The selected focus "
+            "is one assessed part of that topic, not an explanation "
+            "of the topic's incorrect answers."
+        )))
+    tied = [s for s in evidence["subtopics"]
+            if s["incorrect"] and candidate_priority(s) == candidate_priority(focus)]
+    if len(tied) > 1:
+        sections.append(_section("tie", (
+            f"{len(tied)} review areas share these error-count and "
+            "error-fraction values. This is one option, not a uniquely "
+            "weakest area."
+        )))
+    elif sum(s["incorrect"] > 0 for s in evidence["subtopics"]) > 1:
+        sections.append(_section("other_options", (
+            "Other assessed areas also had incorrect answers. "
+            "Start with one area rather than trying to review everything at once."
+        )))
+    sections.append(_section("next_action", candidate["action"]))
+    return sections
+
+
+def _teacher_sections(evidence, candidate):
+    halves = evidence["halves"]
+    sections = [_section("half_observations", (
+        f"First half: {halves[0]['correct']} of 20 correct. "
+        f"Second half: {halves[1]['correct']} of 20 correct. " + HALF_LIMITATION
+    ))]
+    follow_up = (
+        "Ask the student to explain a new example in an assessed topic. "
+        "Use that explanation to decide what further work is appropriate."
+        if candidate["focus"] is None else
+        "Ask the student to explain a new example in the proposed review "
+        "area. Use that explanation to decide whether the issue concerns "
+        "the method, interpretation, calculation, or something else; "
+        "the assessment counts alone do not decide this.")
+    sections.append(_section("teacher_follow_up", follow_up))
+    return sections
+
+
 def render_message(evidence, audience, checkpoint, candidate, opening=None):
     if checkpoint == "midpoint":
         text = opening or MIDPOINT_TEXT
@@ -279,95 +380,9 @@ def render_message(evidence, audience, checkpoint, candidate, opening=None):
         if teacher else
         f"You answered {total['correct']} of {total['out_of']} questions correctly."
     )))
-    skills = evidence["skills"]
-    values = [s["correct"] for s in skills]
-    if total["correct"] == 0:
-        sections.append(_section("support", (
-            "No correct answers were recorded. Check the student's reasoning "
-            "on one example before choosing instruction." if teacher else
-            "No correct answers were recorded on this assessment. "
-            "A useful next step is to work through one example with support."
-        )))
-    elif total["incorrect"] == 0:
-        sections.append(_section("observed_highlight", (
-            "All four assessed areas had 10 of 10 answers correct."
-        )))
-    elif len(set(values)) == 1:
-        sections.append(_section("balanced_result", (
-            f"The same number of answers was correct in each assessed area: "
-            f"{values[0]} of 10. This does not establish equal understanding."
-        )))
-    else:
-        best = max(values)
-        names = ", ".join(_skill_label(s) for s in skills if s["correct"] == best)
-        sections.append(_section("observed_highlight", (
-            f"The highest observed skill count was {best} of 10 in {names}. "
-            "This comparison is limited to the questions answered."
-        )))
-    if total["incorrect"] == 0:
-        sections.append(_section("optional_review", (
-            "No incorrect answers were observed. There is no error-based "
-            "review priority from this assessment. " + candidate["action"]
-        )))
-    else:
-        focus = candidate["focus"]
-        sections.append(_section("review_focus", (
-            f"One possible review starting point is {focus['subtopic_name']}: "
-            f"{focus['incorrect']} of {focus['out_of']} answers were incorrect "
-            "on this assessed content."
-        )))
-        if focus["out_of"] == 1:
-            sections.append(_section("limited_evidence", (
-                "Only one question assessed this content. Check a new example "
-                "before treating it as a consistent difficulty."
-            )))
-        elif focus["incorrect"] == 1:
-            sections.append(_section("limited_evidence", (
-                "Only one incorrect answer was observed on this content. "
-                "Check a new example before treating it as a consistent difficulty."
-            )))
-        else:
-            sections.append(_section("limited_evidence", (
-                "These answers suggest content to revisit, not the cause "
-                "of an error or a confirmed misconception."
-            )))
-        if teacher:
-            parent = candidate["planning"]["parent_counts"]
-            sections.append(_section("parent_observation", (
-                f"Within {_skill_label(focus)}, {parent['correct']} of "
-                f"{parent['out_of']} answers were correct and "
-                f"{parent['incorrect']} were incorrect. The selected focus "
-                "is one assessed part of that topic, not an explanation "
-                "of the topic's incorrect answers."
-            )))
-        tied = [s for s in evidence["subtopics"]
-                if s["incorrect"] and candidate_priority(s) == candidate_priority(focus)]
-        if len(tied) > 1:
-            sections.append(_section("tie", (
-                f"{len(tied)} review areas share these error-count and "
-                "error-fraction values. This is one option, not a uniquely "
-                "weakest area."
-            )))
-        elif sum(s["incorrect"] > 0 for s in evidence["subtopics"]) > 1:
-            sections.append(_section("other_options", (
-                "Other assessed areas also had incorrect answers. "
-                "Start with one area rather than trying to review everything at once."
-            )))
-        sections.append(_section("next_action", candidate["action"]))
+    sections.append(_result_highlight(evidence, teacher))
+    sections.extend(_review_sections(evidence, candidate, teacher))
     if teacher:
-        halves = evidence["halves"]
-        sections.append(_section("half_observations", (
-            f"First half: {halves[0]['correct']} of 20 correct. "
-            f"Second half: {halves[1]['correct']} of 20 correct. " + HALF_LIMITATION
-        )))
-        follow_up = (
-            "Ask the student to explain a new example in an assessed topic. "
-            "Use that explanation to decide what further work is appropriate."
-            if candidate["focus"] is None else
-            "Ask the student to explain a new example in the proposed review "
-            "area. Use that explanation to decide whether the issue concerns "
-            "the method, interpretation, calculation, or something else; "
-            "the assessment counts alone do not decide this.")
-        sections.append(_section("teacher_follow_up", follow_up))
+        sections.extend(_teacher_sections(evidence, candidate))
     sections.append(_section("scope", SCOPE))
     return {"sections": sections, "text": "\n\n".join(s["text"] for s in sections)}
