@@ -27,6 +27,8 @@ class Browser:
         self.command("Runtime.enable")
         self.command("Page.enable")
         self.command("Log.enable")
+        # Headless Edge can become hidden and suspend the UI's visibility-gated polling.
+        self.command("Emulation.setFocusEmulationEnabled", {"enabled": True})
 
     def command(self, method, params=None):
         self.sequence += 1
@@ -53,8 +55,8 @@ class Browser:
             raise AssertionError(result["exceptionDetails"])
         return result.get("result", {}).get("value")
 
-    def wait(self, expression):
-        end = time.monotonic() + 20
+    def wait(self, expression, timeout=20):
+        end = time.monotonic() + timeout
         while time.monotonic() < end:
             try:
                 if self.js(f"Boolean({expression})"):
@@ -62,7 +64,8 @@ class Browser:
             except (AssertionError, RuntimeError):
                 pass
             time.sleep(.1)
-        raise AssertionError(f"Browser condition timed out: {expression}")
+        state = self.js("JSON.stringify({history: document.querySelector('.run-history > summary')?.textContent, visible: !document.hidden, dialogs: [...document.querySelectorAll('dialog')].map(n => n.textContent)})")
+        raise AssertionError(f"Browser condition timed out: {expression}\nState: {state}")
 
     def viewport(self, width, height):
         self.command("Emulation.setDeviceMetricsOverride", {
@@ -182,10 +185,15 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertIn("2 scenarios", b.js("document.querySelector('dialog h2').textContent"))
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("document.querySelector('#replay-history').textContent.includes('2/2')")
+        # The counter can reach its total before the worker closes the batch.
+        # A subsequent replay must wait for the terminal status, not just counts.
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete')")
         b.js("document.querySelector('#replay-all').click()")
         b.wait("document.querySelector('dialog[open]')")
         b.js("document.querySelector('#confirm-replay').click()")
-        b.wait("document.querySelector('#replay-history').textContent.includes('4/4')")
+        b.wait("!document.querySelector('dialog[open]')")
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete') && document.querySelector('.run-history > summary').textContent.includes('4/4')",
+               timeout=60)
         self.assertEqual(len(self.service.replays.list()["runs"]), 3)
         self.assertEqual(len(self.service.list_sessions()), 0)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=overview]').click()")
@@ -215,11 +223,12 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
         b.js(f"{guide}.querySelector('summary').click()")
         self.assertTrue(b.js(f"{guide}.open"))
-        for heading in ["Knowledge tracing", "Conformal prediction",
+        for heading in ["Knowledge tracing",
                         "Feedback focus and draft wording", "Skill map and subtopics",
                         "Synthetic scenarios and replay", "Blind educator comparison"]:
             self.assertTrue(b.js(f"{guide}.textContent.includes({json.dumps(heading)})"), heading)
-        self.assertEqual(b.js(f"{guide}.querySelectorAll('.readiness-card').length"), 6)
+        self.assertEqual(b.js(f"{guide}.querySelectorAll('.readiness-card').length"), 5)
+        self.assertFalse(b.js(f"{guide}.textContent.toLowerCase().includes('conformal')"))
         self.assertTrue(b.js(f"{guide}.textContent.includes('Why research-only')"))
         self.assertTrue(b.js(f"{guide}.textContent.includes('Next step')"))
         self.assertTrue(b.js(f"{guide}.textContent.includes('Recorded predictive evaluation on ViLLE data already exists')"))
@@ -241,8 +250,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         b.js(f"{guide}.scrollIntoView({{block:'start'}})")
         b.screenshot("research-readiness-open-mobile.png")
-        b.js("[...document.querySelectorAll('#research-readiness .readiness-card')].find(c => c.textContent.includes('Conformal')).scrollIntoView({block:'center'})")
-        b.screenshot("research-readiness-conformal-mobile.png")
+        b.js("[...document.querySelectorAll('#research-readiness .readiness-card')].find(c => c.textContent.includes('Skill map')).scrollIntoView({block:'center'})")
+        b.screenshot("research-readiness-skill-map-mobile.png")
         b.viewport(1440, 1100)
         b.js("document.querySelector('[data-workspace=live]').click()")
         b.wait("document.querySelector('#live-pane') && !document.querySelector('#live-pane').hidden")
@@ -322,6 +331,48 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(390, 844)
         self.assert_no_overflow()
         self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('40')"))
+        self.assertEqual(b.errors, [])
+
+    def test_warm_cold_bank_ui_tokens_translation_and_teacher_context(self):
+        from research_runtime import load_research_bank
+        b = self.browser
+        self.navigate("/")
+        b.wait("!document.querySelector('#start-panel').hidden")
+        for mode in ("warm", "cold"):
+            bank, _, _ = load_research_bank(mode)
+            b.js(f"document.querySelector('#bank-mode').value={json.dumps(mode)}")
+            b.js("document.querySelector('#synthetic-consent').click(); document.querySelector('#start-button').click()")
+            b.wait("!document.querySelector('#question-panel').hidden")
+            self.assertIn(mode.title(), b.js("document.querySelector('#session-bank').textContent"))
+            self.assertEqual(b.js("document.querySelector('#q-text').textContent"),
+                             b.js(f"englishQuestionText({json.dumps({'text': bank['questions'][0]['text']})})"))
+            b.js("document.querySelector('#display-language').value='fi'; document.querySelector('#display-language').dispatchEvent(new Event('change'))")
+            b.wait(f"document.querySelector('#q-text').textContent === {json.dumps(bank['questions'][0]['text'])}")
+            b.viewport(390, 844)
+            self.assert_no_overflow()
+            for index, question in enumerate(bank["questions"]):
+                if index == 20:
+                    b.wait("!document.querySelector('#pause-panel').hidden")
+                    b.js("document.querySelector('#continue-button').click()")
+                b.wait(f"document.querySelector('#q-pos').textContent === '{index + 1}'")
+                chosen = (question["answer_index"] if index % 2 == 0
+                          else (question["answer_index"] + 1) % len(question["options"]))
+                b.js(f"document.querySelector('#q-options input[value=\"{chosen}\"]').click(); document.querySelector('#submit-answer').click()")
+            b.wait("!document.querySelector('#end-panel').hidden")
+            self.assertIn("20 of 40", b.js("document.querySelector('#end-summary').textContent"))
+            b.js("document.querySelector('#new-session').click(); document.querySelector('#display-language').value='en'")
+            b.wait("!document.querySelector('#start-panel').hidden")
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
+        b.wait("document.querySelector('#tab-graph').textContent.includes('Practice drafts (24)')")
+        self.assertIn("pending formal educator review", b.js("document.querySelector('#tab-graph').textContent"))
+        self.assertNotIn("conformal", b.js("document.body.textContent").lower())
+        self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
 

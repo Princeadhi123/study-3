@@ -13,89 +13,95 @@ const ENGLISH_SKILL_NAMES = Object.freeze({
   Hinta: "Prices",
   Murtoluvut: "Fractions",
   Prosenttilaskenta: "Percentages",
+  Prosenttilaskuja: "Percentages",
+  "Jaollisuus, tekijät, alkuluvut": "Divisibility, factors and primes",
+  "Jaollisuus, tekij�t, alkuluvut": "Divisibility, factors and primes",
+  "Samanmuotoisten termien yhdistäminen": "Combining like terms",
+  "Samanmuotoisten termien yhdist�minen": "Combining like terms",
+  "Murtolukujen kerto- ja jakolasku": "Fraction multiplication and division",
 });
 
 const ENGLISH_QUESTION_TEXT = Object.freeze({
-  // Draft translations bound to the exact approved question IDs.
-  "23127__p10__q07e4b362538179c3__o24d3b21657c80f9c":
+  // Draft translations keyed by public prompt text, never private item IDs.
+  "6-0\u22c5(0+9)":
     "Calculate: 6 - 0 \u00d7 (0 + 9).",
-  "19062__p10__q6698d8d0febd22aa__o24cda435d536d718":
+  "10 \u20ac - 2,5 \u20ac":
     "Calculate: EUR 10 - EUR 2.50.",
-  "17639__p10__q1d8b22fe6257bc98__o04524bc505f1027b":
+  "Suurin murtoluku?":
     "Which fraction is the largest?",
-  "459786__p10__q13bf7029212b1aae__oadc720eb9a0c17de":
+  "20 % luvusta 65":
     "What is 20% of 65?",
-  "23127__p10__q1c40f6abd4a51d34__o07d44b0b4e2e0d9b":
+  "8*(7+1*1)":
     "Calculate: 8 \u00d7 (7 + 1 \u00d7 1).",
-  "79717__p1__qeffb016560021712__o01bae8ffd3d81fd4":
+  "10 litraa mansikoita maksaa 25 euroa. Kuinka paljon yksi litra mansikoita maksaa?":
     "Ten litres of strawberries cost EUR 25. How much does one litre cost?",
-  "39338__p10__q4bd6280b64454754__oa8ca4de49d22cf1c":
+  "3\u20446 \u00b7 6\u20445":
     "Calculate: 3/6 \u00d7 6/5.",
-  "460002__p10__q05d66fa42a773bc2__o6b51258a178861dd":
+  "Kuinka paljon on 25 % luvusta 100?":
     "What is 25% of 100?",
-  "23127__p10__q26b7391305bb53e7__o0ec5d00e5175138a":
+  "7+3\u22c5(6+7)":
     "Calculate: 7 + 3 \u00d7 (6 + 7).",
-  "653713__p4__q946d45957a2746a1__o7c1aa4ef2077bb15":
+  "250 gramman suklaapatukka maksaa 2,20 euroa. Mik\u00e4 on suklaapatukan kilohinta?":
     "A 250-gram chocolate bar costs EUR 2.20. What is its price per kilogram?",
-  "47506__p1__q09d1d120642811bf__o34a62e883346940a":
+  "1/7 * 11":
     "Calculate: 1/7 \u00d7 11.",
-  "459972__p10__qbf74fc2d62d61d6f__oeaee88efbc731632":
+  "Mist\u00e4 raham\u00e4\u00e4r\u00e4st\u00e4 140 % on 42 \u20ac?":
     "140% of what amount of money is EUR 42?",
-  "23127__p10__q29bb7de2f2bd739b__o1136761f07186ead":
+  "7*13+1*3":
     "Calculate: 7 \u00d7 13 + 1 \u00d7 3.",
-  "79720__p2__qe840d7df5041cfb2__ocaf00104d3b8bea8":
+  "Maria ostaa kolme litraa j\u00e4\u00e4tel\u00f6\u00e4. Kymmenen litraa j\u00e4\u00e4tel\u00f6\u00e4 maksaa 25 euroa. Kuinka monta euroa Marian ostama j\u00e4\u00e4tel\u00f6 maksaa?":
     "Maria buys three litres of ice cream. Ten litres cost EUR 25. How much does Maria's ice cream cost?",
-  "17754__p10__q3c501c431a5f75cb__oec36fda6540975c9":
+  "2/4 + 2/4":
     "Calculate: 2/4 + 2/4.",
-  "460131__p10__q13a0e43cee444f8c__o3bd9f83da741f2fe":
+  "Mik\u00e4 on prosenttiluvun 25 % prosenttikerroin?":
     "Write 25% as a decimal multiplier.",
-  "65204__p10__q317369c78834f798__o038732b487a43a51":
+  "450 : 10":
     "Calculate: 450 \u00f7 10.",
-  "79717__p3__q68eddd414b1c3673__oceb5aee08c735a3d":
+  "8 litraa vaniljaj\u00e4\u00e4tel\u00f6\u00e4 maksaa 32 euroa. Kuinka paljon maksaa 9 litraa vaniljaj\u00e4\u00e4tel\u00f6\u00e4?":
     "Eight litres of vanilla ice cream cost EUR 32. How much do nine litres cost?",
-  "47506__p8__qcc51534be3a3e23a__o7197e2866f97b3d1":
+  "4/10 : 2":
     "Calculate: 4/10 \u00f7 2.",
-  "459972__p1__q1fd796c3931c36f0__of2ba5e496304fbef":
+  "Tuotteen hintaa korotettiin 20 % eli 64 \u20ac. Mik\u00e4 oli alkuper\u00e4inen hinta?":
     "The price of a product increased by 20%, an increase of EUR 64. What was the original price?",
-  "23127__p10__q0ccbb3e88ed3b715__o4c7237e888269437":
+  "4+4\u22c510+10":
     "Calculate: 4 + 4 \u00d7 10 + 10.",
-  "653713__p3__q1cf64466888647cb__oa77a4bd3afab91f9":
+  "500 gramman karkkipussi maksaa 6,50 euroa. Kuinka paljon maksaa kilo karkkia?":
     "A 500-gram bag of sweets costs EUR 6.50. How much does one kilogram of sweets cost?",
-  "17754__p10__q02fc7651eeff3595__ofb00806eff226d69":
+  "1/3 + 1/3":
     "Calculate: 1/3 + 1/3.",
-  "459972__p10__qaff17c40310ae601__o65a289bd8e6d5a65":
+  "Mist\u00e4 luvusta 120 % on 60?":
     "120% of what number is 60?",
-  "23127__p10__q1d7ed4f6c655c203__o5ecd0eac0b919a05":
+  "4\u00d7(2+2)\u00f74":
     "Calculate: 4 \u00d7 (2 + 2) \u00f7 4.",
-  "79720__p1__q109c0d7c9ac0bee2__o6954d1d0ede8460d":
+  "Elsa ostaa 12 kappaletta haarukoita. 20 haarukkaa maksaa 40 euroa. Paljonko Elsan ostokset maksavat?":
     "Elsa buys 12 forks. Twenty forks cost EUR 40. How much do Elsa's forks cost?",
-  "42903__p10__q308ea024c44e5c4c__o7dcc2f928a816786":
+  "2\u20443 + 2\u20446":
     "Calculate: 2/3 + 2/6.",
-  "460131__p10__q09ffa2c535cf3137__o7eb69369145914ef":
+  "Mist\u00e4 luvusta 10 % on luku 7?":
     "10% of what number is 7?",
-  "23127__p10__q299a45545d6434fc__o01664e308966e120":
+  "2+6*(7+4)":
     "Calculate: 2 + 6 \u00d7 (7 + 4).",
-  "79717__p2__q32d47b510b68f842__o4e7e6ec741b14058":
+  "Viisi kahvipakettia maksaa 20,25 euroa. Kuinka paljon maksaa yksi kahvipaketti?":
     "Five packets of coffee cost EUR 20.25. How much does one packet cost?",
-  "64974__p10__q01d29c49363cca85__o415d3a4d9721886f":
+  "3/4 + 1/4":
     "Calculate: 3/4 + 1/4.",
-  "460002__p10__q0aedf501f9cda8dc__o27611459b8dad17f":
+  "Mist\u00e4 luvusta 25 % on 5?":
     "25% of what number is 5?",
-  "23127__p10__q2a52a7db5fbacc15__o035bf13fba7c78e1":
+  "7+22+3*5":
     "Calculate: 7 + 22 + 3 \u00d7 5.",
-  "653713__p5__q0722e28763c17950__oe55ff617fd891802":
+  "2,5 desilitran limut\u00f6lkki maksaa 2,65 euroa. Mik\u00e4 on limun litrahinta?":
     "A 2.5-decilitre can of soft drink costs EUR 2.65. What is its price per litre?",
-  "39338__p10__q5f1e4aabbc541a3b__o8f7f1e6ee61a5b94":
+  "2\u20443 \u00b7 10\u20448":
     "Calculate: 2/3 \u00d7 10/8.",
-  "459972__p1__q971d7cb98273d764__o7c0a4c976e92f883":
+  "Mist\u00e4 raham\u00e4\u00e4r\u00e4st\u00e4 95 % on 760 \u20ac?":
     "95% of what amount of money is EUR 760?",
-  "65204__p10__q3fe42eef29bab2d9__o11d688f5b86e5036":
+  "110 : 10":
     "Calculate: 110 \u00f7 10.",
-  "653713__p6__qb73206ba0d284e0c__o627d28a41240218e":
+  "2 litraa limua maksaa 3 euroa. Puolen litran pullo samaa limua maksaa 1,50 euroa. Kuinka paljon kalliimpi litrahinta on puolen litran pullossa kuin kahden litra pullossa?":
     "Two litres of soft drink cost EUR 3. A half-litre bottle of the same drink costs EUR 1.50. How much higher is the price per litre in the half-litre bottle than in the two-litre bottle?",
-  "42903__p10__qc6d6158988ac31d3__oaa6de5b5b60f3839":
+  "1\u20442 + 1\u20444":
     "Calculate: 1/2 + 1/4.",
-  "460131__p10__q58804b37a5e9b683__o5e7af3576774b5e8":
+  "Montako prosenttia luku 4 on luvusta 200?":
     "What percentage of 200 is 4?",
 });
 
@@ -105,9 +111,17 @@ function englishSkillName(name) {
 }
 
 function englishQuestionText(question) {
-  const id = question && question.question_id;
-  return Object.prototype.hasOwnProperty.call(ENGLISH_QUESTION_TEXT, id)
-    ? ENGLISH_QUESTION_TEXT[id] : (question && question.text) || "";
+  const text = (question && question.text) || "";
+  if (Object.prototype.hasOwnProperty.call(ENGLISH_QUESTION_TEXT, text)) {
+    return ENGLISH_QUESTION_TEXT[text];
+  }
+  const percentage = text.match(/^(\d+) % luvusta (\d+)$/);
+  if (percentage) return `What is ${percentage[1]}% of ${percentage[2]}?`;
+  const divisor = text.match(/^(\d+) on jaollinen luvulla\.\.\.$/);
+  if (divisor) return `${divisor[1]} is divisible by…`;
+  if (text === "Alkuluku?") return "Which is a prime number?";
+  if (/^Sievenn[äa]/.test(text)) return text.replace(/^Sievenn[äa]( lauseke:)?\s*/, "Simplify: ");
+  return text;
 }
 
 function englishOptionText(value) {
@@ -287,7 +301,7 @@ function renderSelectionDecision(audience, review, baseline,
   card.appendChild(el("p",
     "These are review options for this session, not simulation " +
     "profiles. Counts support offering an option; no validated " +
-    "explanation of Jev's preference is recorded. KT/conformal do " +
+    "explanation of Jev's preference is recorded. KT estimates do " +
     "not determine this selection.", "meta"));
 
   const table = el("table", null, "grid decision-table");
@@ -326,7 +340,7 @@ function studentPage() {
   let submitting = false;
   let starting = false;
   let backoff = POLL_MS;
-  let currentQuestionId = null;
+  let currentQuestionToken = null;
 
   function saveCreds(value) {
     creds = value;
@@ -402,6 +416,7 @@ function studentPage() {
       return;
     }
     const answered = snapshot.answered_count;
+    $("#session-bank").textContent = snapshot.bank_label;
     const mid = snapshot.feedback && snapshot.feedback.midpoint;
     const acked =
       localStorage.getItem(ackKey(snapshot.session_id)) === "1";
@@ -417,11 +432,16 @@ function studentPage() {
     }
     const question = snapshot.current_question;
     if (!question) { showPanel(PANELS, "#start-panel"); return; }
-    currentQuestionId = question.question_id;
+    currentQuestionToken = question.question_token;
     submitting = false;
     $("#q-pos").textContent = question.position;
     $("#q-progress").value = answered;
-    $("#q-text").textContent = englishQuestionText(question);
+    const finnish = $("#display-language").value === "fi";
+    $("#q-text").textContent = finnish ? question.text : englishQuestionText(question);
+    $("#q-skill").textContent = finnish ? question.skill_name : englishSkillName(question.skill_name);
+    $("#language-note").textContent = finnish
+      ? "Original source wording."
+      : "Draft English display; untranslated prompts retain their original Finnish wording.";
     const box = $("#q-options");
     box.replaceChildren(el("legend", "Choose one answer", "visually-hidden"));
     question.options.forEach((option, index) => {
@@ -432,7 +452,7 @@ function studentPage() {
       radio.value = String(index);
       label.appendChild(radio);
       label.appendChild(el("span", `${index + 1}.`, "opt-num"));
-      label.appendChild(el("span", englishOptionText(option)));
+      label.appendChild(el("span", finnish ? option : englishOptionText(option)));
       box.appendChild(label);
     });
     $("#submit-answer").disabled = true;
@@ -470,7 +490,8 @@ function studentPage() {
     $("#start-button").disabled = true;
     $("#fresh-start").disabled = true;
     try {
-      const payload = await api("/api/sessions", {body: {synthetic: true}});
+      const payload = await api("/api/sessions", {
+        body: {synthetic: true, bank_mode: $("#bank-mode").value}});
       saveCreds({sid: payload.session_id, token: payload.student_token});
       localStorage.removeItem(ackKey(payload.session_id));
       netError(null);
@@ -489,6 +510,7 @@ function studentPage() {
     $("#start-button").disabled = starting || !$("#synthetic-consent").checked;
   });
   $("#start-button").addEventListener("click", startSession);
+  $("#display-language").addEventListener("change", refresh);
   function returnToSetup() {
     saveCreds(null);
     $("#synthetic-consent").checked = false;
@@ -502,7 +524,7 @@ function studentPage() {
     $("#submit-answer").disabled = submitting;
   });
   $("#submit-answer").addEventListener("click", async () => {
-    if (submitting || !creds || !currentQuestionId) return;
+    if (submitting || !creds || !currentQuestionToken) return;
     const chosen = document.querySelector("input[name=answer]:checked");
     if (!chosen) return;
     submitting = true;
@@ -510,7 +532,7 @@ function studentPage() {
     try {
       const snap = await api(`/api/sessions/${creds.sid}/responses`, {
         token: creds.token,
-        body: {question_id: currentQuestionId,
+        body: {question_token: currentQuestionToken,
                selected_index: Number(chosen.value)}});
       render(snap);
     } catch (err) {
@@ -755,7 +777,7 @@ function teacherPage() {
     $("#sim-error").hidden = true;
     try {
       const result = await api("/api/teacher/simulations", {
-        body: {profile: $("#sim-profile").value, seed}});
+        body: {profile: $("#sim-profile").value, seed, bank_mode: $("#sim-bank").value}});
       simLinks.set(result.session_id, result.student_url);
       selected = result.session_id;
       detail = null;
@@ -989,6 +1011,32 @@ function createDetailView(root, options = {}) {
   function renderGraphContent() {
     const pane = $("#tab-graph");
     pane.replaceChildren();
+    const context = detail.content_context;
+    if (context && context.exercises) {
+      const content = el("div", null, "card-inner");
+      content.appendChild(el("h3", `${detail.bank_label || "Assessment"} · descriptive content and practice`));
+      content.appendChild(el("p",
+        `Graph v3 · ${context.practice_question_count} practice drafts · pending formal educator review. ` +
+        "Review does not approve learner delivery. These descriptions do not explain incorrect answers.", "warn"));
+      for (const role of ["assessment", "practice"]) {
+        const rows = context.exercises.filter((row) => row.role === role);
+        if (!rows.length) continue;
+        const section = el("details");
+        section.appendChild(el("summary", `${role === "practice" ? "Practice drafts" : "Assessed tasks"} (${rows.length})`));
+        rows.forEach((row) => {
+          const item = el("div", null, "topic");
+          item.appendChild(el("h4", englishQuestionText(row)));
+          const options = el("ol");
+          row.options.forEach((option) => options.appendChild(el("li", englishOptionText(option))));
+          item.appendChild(options);
+          item.appendChild(el("p", `${row.concept_label}: ${row.mathematical_task}`));
+          item.appendChild(el("p", row.interpretation_boundary, "meta small"));
+          section.appendChild(item);
+        });
+        content.appendChild(section);
+      }
+      pane.appendChild(content);
+    }
     const card = el("div", null, "card-inner");
     card.appendChild(el("p",
       "Assessment structure only: subtopics are part-of groupings, " +
@@ -1096,15 +1144,12 @@ function createDetailView(root, options = {}) {
       "source-derived, but the simulated sessions are not additional " +
       "real-learner validation."));
     card.appendChild(el("p",
-      "Why still research-only: predictive performance and probability " +
-      "calibration need assessment-specific evaluation for this fixed " +
-      "session setting. Existing held-out ViLLE answers may support that " +
-      "work after a split and history audit. Conformal ranges are not " +
-      "guaranteed for this assessment, and neither diagnostic determines " +
-      "the feedback focus."));
+      "Why still research-only: predictive performance needs assessment-specific evaluation. These " +
+      "estimates do not establish mastery, difficulty or learning benefit " +
+      "and do not determine the feedback focus."));
     const picker = el("div", null, "cp-picker");
-    [["midpoint", "Midpoint — first 20 answers (k=5)"],
-     ["end", "End — all 40 answers (k=10)"]].forEach(([cp, label]) => {
+    [["midpoint", "Midpoint — first 20 answers"],
+     ["end", "End — all 40 answers"]].forEach(([cp, label]) => {
       const b = el("button", label,
         "ghost small" + (researchCp === cp ? " active" : ""));
       b.type = "button";
@@ -1125,7 +1170,7 @@ function createDetailView(root, options = {}) {
       pane.appendChild(card);
       return;
     }
-    card.appendChild(el("p", diag.mode === "frozen_replay_no_model_or_calibration_rerun" ?
+    card.appendChild(el("p", diag.mode === "frozen_replay_no_model_rerun" ?
       "Saved historical inference — not recomputed." : "Fresh inference using the frozen model; the model was not retrained.", "boundary-note"));
     card.appendChild(el("h3",
       `${researchCp === "end" ? "Final" : "Halfway"} checkpoint · ${diag.answer_count} answers`));
@@ -1135,32 +1180,9 @@ function createDetailView(root, options = {}) {
       "(teal=correct, rust=incorrect, grey=answer record unavailable).", "meta"));
     const chart = ktChart(diag);
     if (chart) card.appendChild(chart);
-    const conformal = diag.conformal || {};
-    const skills = conformal.skills || {};
-    if (Object.keys(skills).length) {
-      const table = el("table", null, "grid");
-      table.appendChild(el("caption",
-        `Conformal checkpoint summary — calibrated k=${conformal.calibrated_k}; ` +
-        `labels are raw historical gate labels, exploratory only`));
-      const head = el("tr");
-      ["Skill", "Point", "Lower", "Upper", "Items", "Regime",
-       "Raw label"].forEach((h) => head.appendChild(el("th", h)));
-      table.appendChild(head);
-      Object.values(skills).forEach((row) => {
-        const tr = el("tr");
-        [englishSkillName(row.skill_name), row.point_estimate,
-         row.lower, row.upper,
-         row.n_items, row.regime, row.status]
-          .forEach((v) => tr.appendChild(el("td", String(v))));
-        table.appendChild(tr);
-      });
-      card.appendChild(table);
-    }
     card.appendChild(el("p", diag.scope_warning || "", "meta"));
     card.appendChild(jsonDetails("Full KT trace (raw JSON)", diag.kt,
       "kt-trace"));
-    card.appendChild(jsonDetails("Full conformal output (raw JSON)",
-      conformal, "conformal"));
     card.appendChild(jsonDetails("Provenance",
       (diag.kt || {}).provenance || {}, "provenance"));
     pane.appendChild(card);

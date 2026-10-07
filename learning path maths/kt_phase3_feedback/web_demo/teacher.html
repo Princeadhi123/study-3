@@ -20,7 +20,7 @@
 </header>
 <main id="teacher-root" tabindex="-1">
   <div class="page-heading"><div><p class="eyebrow">OBSERVE. COMPARE. REVIEW.</p><h2>Better questions. Clearer evidence.</h2><p class="meta">Explore synthetic assessments and evaluate feedback with the evidence in view.</p></div><span class="environment-badge">Local research environment</span></div>
-  <p class="boundary-note"><strong>Synthetic data only.</strong> Feedback is an educator-review draft, not approved learner advice. KT and conformal values do not establish mastery.</p>
+  <p class="boundary-note"><strong>Synthetic data only.</strong> Feedback is an educator-review draft, not approved learner advice. KT estimates do not establish mastery, difficulty or learning benefit.</p>
   <p id="teacher-error" class="error" role="alert" hidden></p>
   <div id="config-strip" class="strip" hidden></div>
   <section id="unlock-panel" class="card narrow">
@@ -48,6 +48,12 @@
         <details class="simulation-disclosure" open>
           <summary>Create a synthetic example</summary>
           <form id="sim-form" class="sim">
+            <label for="sim-bank">Assessment bank</label>
+            <select id="sim-bank">
+              <option value="demo">Demo bank</option>
+              <option value="warm">Warm research bank — pending educator review</option>
+              <option value="cold">Cold research bank — pending educator review</option>
+            </select>
             <label for="sim-profile">Response pattern</label>
             <select id="sim-profile"></select>
             <details class="raw"><summary>Reproducibility settings</summary>

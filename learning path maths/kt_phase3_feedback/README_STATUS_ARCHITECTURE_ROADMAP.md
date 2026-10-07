@@ -1,6 +1,6 @@
 # Status, Architecture, and Roadmap
 
-Snapshot date: 2026-10-05. This file is the current handoff for the local
+Runtime transition updated: 2026-10-07. This file is the current handoff for the local
 synthetic demo in this repository. It describes working software for private
 research review — not a validated educational product.
 
@@ -19,6 +19,11 @@ research review — not a validated educational product.
   `../kt_phase2_inference/artifacts/test_question_bank_text_only_approved_v2.json`;
   taxonomy `assessment_taxonomy_draft.json` (descriptive AI-assisted content
   audit — not independently educator-approved).
+- Each new session explicitly selects the demo bank or one 40-question warm/
+  cold research bank. Research banks retain their pending educator approval
+  status and use separate validation with graph v3 assessed-concept taxonomies.
+  Source hashes, canonical bank/taxonomy hashes, bank mode and intended item
+  regime are bound to the session and checked after restart.
 - This file contains no private keys, exam answer keys, session ids, PIN
   values, or credentials.
 
@@ -29,7 +34,9 @@ research review — not a validated educational product.
 | Student + teacher web UI (`web_demo/`) | Implemented |
 | Local PIN teacher auth, owner-token student auth | Implemented (local demo separation only) |
 | Async provider jobs (Jev selection + Aitta opening) | Implemented |
-| Frozen KT + conformal research diagnostics | Implemented |
+| Frozen KT research diagnostics | Implemented; active conformal computation/output removed |
+| Warm/cold research sessions and v3 taxonomies | Implemented; synthetic only, pending educator review |
+| Teacher task context and 24-question practice drafts | Implemented; no learner release |
 | Assessment graph, reviews ledger, English display layer, poll/disclosure persistence | Implemented |
 | 54-case Scenario Library browser UI | Implemented: readable names, search/filters, shared six-tab live detail renderer |
 | Selected / filtered / all-scenario replay | Implemented: original-answer resubmission, progress/cancel, saved versions and original-result comparison |
@@ -43,8 +50,8 @@ research review — not a validated educational product.
 | Real-student privacy review + production deployment | **Pending** |
 
 The candidate-ordering method and method-review actions are draft
-heuristics. The fixed assessment bank is approved for this synthetic
-assessment; a practice bank has not been created.
+heuristics. The existing demo bank remains available. Warm/cold research
+banks and the 24-question practice source are not educator-approved.
 
 ## 3. Architecture
 
@@ -54,12 +61,14 @@ browser (index.html / teacher.html, app.js)
 demo_api.py  --  loopback-only boundary, owner token + teacher cookie
    |
 DemoService (demo_service.py)
-   |-- ordered MCQ scoring (fixed 40-question order)
+   |-- bank-bound ordered MCQ scoring (one selected 40-question bank)
    |-- observed evidence + assessment graph at n=20 / n=40
    |-- branch A: feedback baseline + Jev selection + Aitta opening
    |            (one provider worker; per-audience isolation)
-   +-- branch B: private frozen KT -> conformal research diagnostics
-                 (own diagnostics worker; snapshot rows at queue admission)
+   |-- branch B: private frozen KT research diagnostics
+   |             (own diagnostics worker; snapshot rows at queue admission)
+   +-- teacher-only v3 task context / 24-question practice drafts
+                 (optional KT selector requires augmented embeddings)
 ```
 
 - Provider/diagnostic work triggers **only at n=20 and n=40**, never on poll.
@@ -71,15 +80,14 @@ DemoService (demo_service.py)
 - Diagnostics snapshot the answer rows at queue admission so later answers
   cannot race the evaluation.
 - KT uses current answers on CPU via the frozen variant D
-  (`skill_item_content_option`); no retraining. Historical k=5 (mid) / k=10
-  (end). Diagnostics carry labels
-  `uncalibrated_for_20_40_question_feed` +
-  `exploratory_only_not_fixed_bank_validated` and
+  (`skill_item_content_option`); no retraining or calibration loading.
+  Diagnostics carry labels `uncalibrated_for_20_40_question_feed` and
   `used_for_student_advice: false`.
 - The graph relation is `is_part_of_not_prerequisite` — part-of groupings,
   not prerequisites; no conformal gate is used for advice.
-- Boundary: student payloads exclude diagnostics, response history beyond
-  index-only submissions, and private answer keys. Jev receives allow-listed
+- Boundary: student payloads exclude diagnostics, private question/item IDs,
+  content text, source paths and answer keys. Submissions use opaque
+  session/position tokens plus an option index. Jev receives allow-listed
   aggregate observed skill/subtopic counts and permitted candidates only —
   never raw responses, question texts, session IDs, or research probabilities.
 
@@ -110,8 +118,10 @@ DemoService (demo_service.py)
 - **Polling**: every ~2 s; unchanged session detail JSON skips redraw;
   real redraws preserve open/closed disclosure state per session+tab and per
   research checkpoint; unsaved review edits survive polls.
-- **English display layer** (in `app.js`): authored mappings cover all 40
-  bank question ids and the four skill names; options display decimal dots
+- **Finnish/English display layer** (in `app.js`): authored mappings use
+  public prompt text, with research topic labels and short-prompt translations.
+  Finnish originals remain selectable; untranslated English-view prompts are
+  explicitly labeled as original wording. English options display decimal dots
   and "EUR" while indices and wire values are unchanged; raw JSON and exports
   keep original Finnish wording; these are prototype translations, not
   independently educator-checked.
@@ -154,8 +164,8 @@ fixed-bank calibration claim is introduced.
 The scenario library renders two always-visible boundary notes (observed counts
 describe this assessment; all scenarios are synthetic test cases, not learners)
 plus a collapsed static `#research-readiness` disclosure of project-wide
-guidance — explicitly not a per-scenario diagnosis or readiness score. Six cards
-(KT, conformal prediction, feedback focus/wording, skill map, synthetic replay,
+guidance — explicitly not a per-scenario diagnosis or readiness score. Five cards
+(KT, feedback focus/wording, skill map, synthetic replay,
 blind educator comparison) each state what the component does, why it remains
 research-only, and the next validation step. For KT, recorded predictive
 evaluation on real ViLLE interactions already exists and the 40-question bank is
@@ -174,7 +184,7 @@ access controls, TLS, and durable storage as prerequisites for real learner use.
 The research diagnostics tab adds the parallel caveat that KT was trained and
 predictively evaluated on real ViLLE data, estimates correctness rather than
 mastery, that simulated sessions are not additional real-learner validation,
-and that conformal ranges are not guarantees for this assessment. Opening the
+and that KT estimates do not establish difficulty or learning benefit. Opening the
 guide reveals no drafts, candidate IDs, or scenario mappings and sets no
 exposure flag.
 
@@ -200,8 +210,11 @@ claims are generated. Completed reviews are not learner-delivery approval.
 
 ## 5. What is dynamic, and provenance rules
 
-- Live session counts, evidence, graph, KT, and conformal values are computed
+- Live session counts, evidence, graph and KT values are computed
   per session; stored completed sessions are read, not recomputed.
+- Historical conformal evidence remains on disk. Active API projections,
+  including replay exports, omit conformal/calibration output without
+  rewriting saved captures.
 - Jev selects a permitted observed-error focus; a single permitted candidate
   bypasses Jev locally. Candidate priority: highest incorrect count, then
   highest incorrect fraction, then stable taxonomy order — an unvalidated
@@ -410,7 +423,12 @@ and `git diff --check`. These are software checks, not research-validity results
 
 ## 10. Prioritised roadmap
 
-### Immediate prototype transition backlog (2026-10-07)
+### Completed prototype transition (2026-10-07)
+
+The following transition is implemented. New research sessions remain
+synthetic-only and pending educator review; no learner-release workflow was
+introduced. See `FEEDBACK_AND_PRACTICE.md` for the current launch command and
+`tests/test_research_runtime.py` for warm/cold and privacy acceptance checks.
 
 - **Use the 24-question v2 practice pool for new work.** The original
   20-question pool remains frozen smoke evidence only; the accepted current
@@ -450,7 +468,7 @@ and `git diff --check`. These are software checks, not research-validity results
 6. **Research calibration** — validity work on the fixed assessment, in
    parallel; diagnostics remain research-only until validated.
 
-All of the above are planned work — nothing here implies automatic approval
+The numbered roadmap items remain planned work — nothing here implies automatic approval
 for learner delivery.
 
 ## 11. KT and warm/cold bank next steps (2026-10-05)
@@ -458,8 +476,9 @@ for learner delivery.
 ### Decision and scope
 
 Keep the current frozen KT model; do not retrain it or add a mastery layer
-for this next study. The live demo already runs KT and conformal prediction
-as private research diagnostics, but neither controls student advice.
+for this next study. The active demo now runs KT alone as private research
+diagnostics; historical conformal captures remain preserved offline.
+Neither controls student advice.
 Scoring and feedback remain grounded in observed answers; Jev selects a
 permitted observed-evidence feedback focus, not a mastery diagnosis.
 
@@ -496,8 +515,9 @@ Bank hashes, all-combination results and independent checks are retained in
 folder. Its `review.md` explains the exhaustive capacity/content review and
 remaining data constraints; `cleanup_receipt_20261005.json` records the
 approved removal of superseded artifacts. Required source evidence and
-runtime dependencies remain. The demo assessment and student-advice branch
-are unchanged; no inference or bank switch accompanies this documentation.
+runtime dependencies remain. This historical selection did not approve the
+banks for learners. The later synthetic runtime transition adds explicit
+warm/cold session selection while retaining the original demo bank.
 
 ### Phase 4 historical study status
 

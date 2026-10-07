@@ -1,7 +1,7 @@
 """Tests for the local synthetic demo service (offline, fake adapters).
 
 No network, credentials, or real model files: providers are injected
-test doubles and diagnostics use the FakeKT/FakeGate pair from the
+test doubles and diagnostics use the FakeKT adapter from the
 existing adapter tests.
 """
 import json
@@ -15,15 +15,12 @@ import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 from demo_service import ConflictError, DemoService
 from live_diagnostics import LiveDiagnostics
 from tests.helpers import make_bank, make_taxonomy, responses
-from tests.test_live_diagnostics import FakeGate
 from tests.test_kt_adapter import FakeKT
 
 
 def fake_diagnostics(bank):
     return LiveDiagnostics(
-        model_loader=lambda: FakeKT(bank),
-        gate_loader=lambda: {"midpoint": FakeGate(5),
-                             "end": FakeGate(10)})
+        model_loader=lambda: FakeKT(bank))
 
 
 class BrokenDiagnostics:
@@ -373,9 +370,7 @@ class DemoServiceTests(unittest.TestCase):
             return FakeKT(self.bank)
 
         diagnostics = LiveDiagnostics(
-            model_loader=model_loader,
-            gate_loader=lambda: {"midpoint": FakeGate(5),
-                                 "end": FakeGate(10)})
+            model_loader=model_loader)
         real_evaluate = diagnostics.evaluate
 
         def spy(bank, taxonomy, rows):
@@ -399,10 +394,12 @@ class DemoServiceTests(unittest.TestCase):
         end = meta["checkpoints"]["end"]["diagnostics"]
         self.assertEqual(midpoint["checkpoint"], "midpoint")
         self.assertEqual(midpoint["answer_count"], 20)
-        self.assertEqual(midpoint["conformal"]["calibrated_k"], 5)
+        self.assertNotIn("conformal", midpoint)
+        self.assertEqual(len(midpoint["kt"]["items"]), 20)
         self.assertEqual(end["checkpoint"], "end")
         self.assertEqual(end["answer_count"], 40)
-        self.assertEqual(end["conformal"]["calibrated_k"], 10)
+        self.assertNotIn("conformal", end)
+        self.assertEqual(len(end["kt"]["items"]), 40)
 
     def test_graph_stored_at_checkpoints_without_model(self):
         service = self._service(diagnostics=BrokenDiagnostics())

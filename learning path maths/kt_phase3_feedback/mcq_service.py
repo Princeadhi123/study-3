@@ -14,6 +14,7 @@ from schemas import validate_submission
 from session_store import SessionStore, bank_fingerprint, utc_now
 
 from mcq_test import score_checkpoint, student_questions
+from research_runtime import research_questions, research_taxonomy, score_research_checkpoint
 
 HALF_LENGTH = 20
 FULL_LENGTH = 40
@@ -21,15 +22,19 @@ FULL_LENGTH = 40
 
 class MCQSessionService:
     def __init__(self, bank: dict, store: SessionStore, style_selector=None,
-                 taxonomy: dict | None = None):
+                 taxonomy: dict | None = None, research_mode: bool = False):
         self.bank = bank
         self.store = store
         self.style_selector = style_selector
+        self._question_reader = research_questions if research_mode else student_questions
+        self._checkpoint_scorer = score_research_checkpoint if research_mode else score_checkpoint
         # Both calls validate protocol, approval, structure, and prompt
         # uniqueness before a session can be created.
-        student_questions(self.bank, 1)
-        student_questions(self.bank, 2)
-        self.taxonomy = taxonomy if taxonomy is not None else load_assessment_taxonomy(bank)
+        self._question_reader(self.bank, 1)
+        self._question_reader(self.bank, 2)
+        self.taxonomy = (taxonomy if taxonomy is not None else
+                         research_taxonomy(bank) if research_mode else
+                         load_assessment_taxonomy(bank))
         if self.taxonomy is not None:
             validate_assessment_taxonomy(bank, self.taxonomy)
 
@@ -49,7 +54,7 @@ class MCQSessionService:
         return {
             "session_id": session["session_id"],
             "half": 1,
-            "questions": student_questions(self.bank, 1),
+            "questions": self._question_reader(self.bank, 1),
         }
 
     def questions(self, session_id: str, half: int) -> dict:
@@ -58,11 +63,11 @@ class MCQSessionService:
         if half == 1 and count < HALF_LENGTH:
             return {"session_id": session_id, "half": 1,
                     "answered_count": count,
-                    "questions": student_questions(self.bank, 1)}
+                    "questions": self._question_reader(self.bank, 1)}
         if half == 2 and HALF_LENGTH <= count < FULL_LENGTH:
             return {"session_id": session_id, "half": 2,
                     "answered_count": count,
-                    "questions": student_questions(self.bank, 2)}
+                    "questions": self._question_reader(self.bank, 2)}
         raise ValueError("requested half is not available in this session state")
 
     def submit_response(self, session_id: str, row: dict) -> dict:
@@ -90,7 +95,7 @@ class MCQSessionService:
         answered = len(session["responses"])
         if answered in (HALF_LENGTH, FULL_LENGTH):
             checkpoint = "midpoint" if answered == HALF_LENGTH else "end"
-            feed = score_checkpoint(self.bank, self._response_prefix(session))
+            feed = self._checkpoint_scorer(self.bank, self._response_prefix(session))
             if self.taxonomy is not None:
                 attach_observed_subtopics(feed, self.bank,
                                           self._response_prefix(session), self.taxonomy)

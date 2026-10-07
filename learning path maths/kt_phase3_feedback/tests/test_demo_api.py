@@ -17,7 +17,6 @@ import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 from demo_api import make_server
 from demo_service import DemoService
 from tests.helpers import make_bank, make_taxonomy, responses
-from tests.test_live_diagnostics import FakeGate
 from tests.test_kt_adapter import FakeKT
 from live_diagnostics import LiveDiagnostics
 from tests.test_research_workspace import make_report, judgment
@@ -47,9 +46,7 @@ class DemoAPITests(unittest.TestCase):
             root=Path(self.tmp.name), bank=self.bank,
             taxonomy=make_taxonomy(self.bank), replay_report=report_path,
             diagnostics=LiveDiagnostics(
-                model_loader=lambda: FakeKT(self.bank),
-                gate_loader=lambda: {"midpoint": FakeGate(5),
-                                     "end": FakeGate(10)}))
+                model_loader=lambda: FakeKT(self.bank)))
         self.server = make_server(self.service, PIN)
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True)
@@ -102,8 +99,11 @@ class DemoAPITests(unittest.TestCase):
         status = 200
         payload = None
         for row in responses(self.bank, count=count):
+            snap = self.service.snapshot(sid, token)
+            public_row = {"question_token": snap["current_question"]["question_token"],
+                          "selected_index": row["selected_index"]}
             status, payload, _ = self.request(
-                "POST", f"/api/sessions/{sid}/responses", row,
+                "POST", f"/api/sessions/{sid}/responses", public_row,
                 headers={"X-Demo-Session-Token": token})
             self.assertEqual(status, 200)
         return payload
@@ -151,7 +151,7 @@ class DemoAPITests(unittest.TestCase):
             snap["provider_job"]["status"], "not_requested")
         question = snap["current_question"]
         self.assertEqual(
-            set(question), {"question_id", "skill_id", "text",
+            set(question), {"question_token", "skill_id", "skill_name", "text",
                             "options", "position", "half"})
         blob = json.dumps(snap)
         for marker in ("answer_index", "item_id", "correct",
@@ -161,7 +161,8 @@ class DemoAPITests(unittest.TestCase):
     def test_ordered_submission_and_duplicate(self):
         created = self.create_session()
         sid, token = created["session_id"], created["student_token"]
-        row = responses(self.bank, count=1)[0]
+        row = {"question_token": created["snapshot"]["current_question"]["question_token"],
+               "selected_index": self.bank["questions"][0]["answer_index"]}
         status, snap, _ = self.request(
             "POST", f"/api/sessions/{sid}/responses", row,
             headers={"X-Demo-Session-Token": token})
@@ -177,6 +178,67 @@ class DemoAPITests(unittest.TestCase):
             "POST", f"/api/sessions/{sid}/responses", out_of_order,
             headers={"X-Demo-Session-Token": token})
         self.assertEqual(status, 400)
+
+    def test_research_bank_selection_over_http_uses_safe_response_tokens(self):
+        from research_runtime import load_research_bank
+        status, available, _ = self.request("GET", "/api/banks")
+        self.assertEqual(status, 200)
+        self.assertEqual({b["bank_mode"] for b in available["banks"]}, {"demo", "warm", "cold"})
+        for mode in ("warm", "cold"):
+            bank, _, _ = load_research_bank(mode)
+            status, created, _ = self.request(
+                "POST", "/api/sessions", {"synthetic": True, "bank_mode": mode})
+            self.assertEqual(status, 201)
+            sid, token = created["session_id"], created["student_token"]
+            snap = created["snapshot"]
+            for index, q in enumerate(bank["questions"]):
+                self.assertEqual(snap["bank_mode"], mode)
+                question = snap["current_question"]
+                self.assertNotIn("question_id", question)
+                self.assertNotIn("item_id", question)
+                chosen = q["answer_index"] if index % 2 == 0 else (q["answer_index"] + 1) % len(q["options"])
+                status, snap, _ = self.request(
+                    "POST", f"/api/sessions/{sid}/responses",
+                    {"question_token": question["question_token"], "selected_index": chosen},
+                    headers={"X-Demo-Session-Token": token})
+                self.assertEqual(status, 200)
+            self.assertEqual(snap["feedback"]["end"]["total"], {"correct": 20, "out_of": 40})
+            self.assertEqual(snap["status"], "complete")
+        for mode in ("merged", None, [], 40):
+            status, _, _ = self.request(
+                "POST", "/api/sessions", {"synthetic": True, "bank_mode": mode})
+            self.assertEqual(status, 400)
+
+    def test_active_http_projection_filters_archived_fields(self):
+        created = self.create_session()
+        sid = created["session_id"]
+        meta = self.service._load_meta(sid)
+        meta["checkpoints"]["midpoint"]["diagnostics"] = {
+            "conformal": {"skills": {"private": "output"}},
+            "kt": {"provenance": {"midpoint_calibration": {"file": "historical.json"}}}}
+        self.service._save_meta(meta)
+        _, _, headers = self.unlock()
+        cookie = self.cookie_from(headers)
+        status, view, _ = self.teacher_get(f"/api/teacher/sessions/{sid}", cookie)
+        self.assertEqual(status, 200)
+        self.assertNotIn("conformal", json.dumps(view["checkpoints"]))
+        self.assertNotIn("calibration", json.dumps(view["checkpoints"]))
+        self.assertIn("conformal", self.service._load_meta(sid)["checkpoints"]["midpoint"]["diagnostics"])
+        status, library, _ = self.teacher_get("/api/teacher/scenarios", cookie)
+        case_id = library["scenarios"][0]["id"]
+        status, case, _ = self.teacher_get(f"/api/teacher/scenarios/{case_id}/export", cookie)
+        self.assertEqual(status, 200)
+
+        def check_keys(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    self.assertNotIn("conformal", key.lower())
+                    self.assertNotIn("calibration", key.lower())
+                    check_keys(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check_keys(child)
+        check_keys(case)
 
     # ---------- transport hardening ----------
 
@@ -227,7 +289,8 @@ class DemoAPITests(unittest.TestCase):
     def test_response_shape_rejected(self):
         created = self.create_session()
         sid, token = created["session_id"], created["student_token"]
-        row = responses(self.bank, count=1)[0]
+        row = {"question_token": created["snapshot"]["current_question"]["question_token"],
+               "selected_index": self.bank["questions"][0]["answer_index"]}
         self.request("POST", f"/api/sessions/{sid}/responses", row,
                      headers={"X-Demo-Session-Token": token})
         for bad in (
@@ -235,7 +298,7 @@ class DemoAPITests(unittest.TestCase):
                 dict(row, selected_index=True),
                 dict(row, selected_index="0"),
                 {k: v for k, v in row.items()
-                 if k != "question_id"},
+                 if k != "question_token"},
                 None):
             status, _, _ = self.request(
                 "POST", f"/api/sessions/{sid}/responses", bad,

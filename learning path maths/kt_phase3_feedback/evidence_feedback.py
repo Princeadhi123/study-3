@@ -55,6 +55,10 @@ def build_evidence(bank, taxonomy, responses):
 
 def build_research_evidence(bank, taxonomy, responses):
     """Private synthetic scoring of frozen research banks, without serving approval."""
+    if taxonomy.get("schema") == "phase3_research_assessment_taxonomy_v1":
+        from research_runtime import score_research_checkpoint
+        return _aggregate_evidence(
+            bank, taxonomy, responses, score_research_checkpoint(bank, responses))
     if (bank.get("protocol") != "offline_historical_evaluation_bank"
             or bank.get("review_status") != "independently_math_checked; educator_approval_pending"):
         raise ValueError("explicit independently checked research bank required")

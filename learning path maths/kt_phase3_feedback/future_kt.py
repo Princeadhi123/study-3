@@ -12,6 +12,12 @@ QUERY_KEYS = ("question_id", "skill_id", "item_id", "text", "options", "content_
 
 def predict_future_candidates(bank, responses, candidates, kt):
     """Append exactly one unanswered query per forward pass, never a batch of futures."""
+    synthetic = [q for q in candidates if q["item_id"].startswith("synthetic_divisibility_")]
+    if synthetic:
+        from research_runtime import require_augmented_embeddings
+        require_augmented_embeddings()
+        if any(q["item_id"] in kt.item_vocab for q in synthetic):
+            raise ValueError("synthetic practice items must use the frozen UNK representation")
     if len(responses) != 40:
         raise ValueError("future practice requires 40 completed assessment responses")
     config = getattr(kt, "config", {})

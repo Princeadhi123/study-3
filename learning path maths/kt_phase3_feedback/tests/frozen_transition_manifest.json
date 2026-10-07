@@ -1,0 +1,39 @@
+{
+  "schema": "phase3_transition_frozen_inputs_v1",
+  "captured_before_runtime_transition": true,
+  "file_hash_algorithm": "sha256_bytes",
+  "tree_hash_algorithm": "sha256_of_json_sorted_relative_posix_path_and_file_sha256_pairs_ascii_compact",
+  "files": {
+    "../kt_phase2_inference/artifacts/test_question_bank_text_only_approved_v2.json": "d0bf9fc7caf93555f89cf4d2c5ed94ee64afbaa34f9a289cf3e026cf32af372b",
+    "../kt_phase1/modeling/runs/skill_item_content_option/best_model_joint.pt": "a539546e3dd9df67ba898bee129c68d727b7f7602486f8e50360ba8f0c21ee81",
+    "../kt_phase1/modeling/runs/skill_item_content_option/config.json": "17763b1833b9cb1f3c24c79f77395b8beab6df40d1d2e179ca7457cd6a26cbed",
+    "../kt_phase1/modeling/prepared_v2/vocab.json": "766368abca84df5ce0f2df163e87323b05cf7f9201c824661d60c855d7112b94",
+    "../kt_phase2_inference/artifacts/text_embeddings_v2.npz": "8bd32840edb58cc6e27d5e9c0eeb9bf21448952a61480bb4629079cbe9fc6370"
+  },
+  "trees": {
+    "artifacts/shadow_smoke_20261006": {
+      "file_count": 13,
+      "sha256": "e4fb9e065c305a0d45e22347b4f90ee9cfc367083a77113a976f42872613fe31"
+    },
+    "artifacts/bounded_content_graph_20261006": {
+      "file_count": 4,
+      "sha256": "6c378689a4669c2df7fb420f9e2c74c888f5f2164cc2612eec31ce38e886caf9"
+    },
+    "artifacts/bounded_content_graph_v2_20261006": {
+      "file_count": 4,
+      "sha256": "0560dbbb4e4cf7779d5e255ff5ed36d69c3b229a6512bc7e1c740195f53a70fa"
+    },
+    "artifacts/bounded_content_graph_v3_20261007": {
+      "file_count": 3,
+      "sha256": "01e85cdf331cd44b0a453efa3a6d9ca46ddce62ac04abcb79e42e77eb50aa105"
+    },
+    "artifacts/synthetic_practice_supplement_20261006": {
+      "file_count": 4,
+      "sha256": "80388078ce3c2fc56532624c6744bdcde2bc01779189243573a8661f0d62255a"
+    },
+    "artifacts/practice_comparison_20261006": {
+      "file_count": 11,
+      "sha256": "fb2bd6634a68c57d34074d071e2373f293d6dbb0f69cd77c2f5170770e9e4b8c"
+    }
+  }
+}

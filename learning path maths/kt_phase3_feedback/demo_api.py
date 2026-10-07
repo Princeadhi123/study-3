@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from active_payload import active_payload
 from demo_service import (
     DEFAULT_ROOT, ConflictError, DemoService)
 from research_workspace import DEFAULT_REPORT, ResearchConflict
@@ -167,9 +168,13 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
         if method == "POST" and path == "/api/sessions":
             body = self._json_body()
-            if set(body) != {"synthetic"} or body["synthetic"] is not True:
+            if (set(body) - {"synthetic", "bank_mode"}
+                    or body.get("synthetic") is not True):
                 raise ValueError("session creation requires attestation")
-            return 201, self.service.create_session(), {}
+            return 201, self.service.create_session(bank_mode=body.get("bank_mode", "demo")), {}
+
+        if method == "GET" and path == "/api/banks":
+            return 200, {"banks": self.service.available_banks()}, {}
 
         if method == "POST" and path == "/api/teacher/unlock":
             return self._unlock()
@@ -188,17 +193,18 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
                 return 200, self.service.snapshot(sid, token), {}
             if method == "POST" and match.group("action") == "responses":
                 body = self._json_body()
-                return 200, self.service.submit_response(
+                return 200, self.service.submit_student_response(
                     sid, token, body), {}
             raise FileNotFoundError("route not found")
 
         if path == "/api/teacher/simulations" and method == "POST":
             self._require_teacher()
             body = self._json_body()
-            if set(body) != {"profile", "seed"}:
+            if (set(body) - {"profile", "seed", "bank_mode"}
+                    or not {"profile", "seed"} <= set(body)):
                 raise ValueError("simulation requires profile and seed")
             return 201, self.service.simulate(
-                body["profile"], body["seed"]), {}
+                body["profile"], body["seed"], bank_mode=body.get("bank_mode", "demo")), {}
 
         if path == "/api/teacher/config" and method == "GET":
             self._require_teacher()
@@ -415,7 +421,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload, extra):
         if payload is None:
             return
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(active_payload(payload), ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

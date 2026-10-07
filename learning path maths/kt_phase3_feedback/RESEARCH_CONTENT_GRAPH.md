@@ -53,11 +53,15 @@ no responses, no KT output, and no student data.
 - All annotations are illustrative and not exhaustive; none are used for
   routing, student claims, or approval. Support links are hypotheses, not a
   validated teaching sequence.
-- No operational integration, no approval workflow. Active-runtime conformal
-  removal, multi-question selection and teacher release are recorded as
-  pending transition work in `FEEDBACK_AND_PRACTICE.md`; nothing here
-  implements or activates any workflow, teacher-release path, score or
-  rubric.
+- The synthetic session runtime reads the frozen v3 capture through
+  `research_runtime.py`. Only assessed concepts form warm/cold taxonomies;
+  teacher-only context uses their task descriptions and the 24-question
+  practice source. Proposed support links and possible-error annotations do
+  not enter session routing, student payloads or provider context.
+- Formal approval, multi-question practice delivery and teacher release
+  remain pending. Teacher review does not approve learner delivery. Active
+  conformal computation/display has been removed; historical evidence remains
+  on disk.
 - Educator review of the mapping is the next step; zero formal educator
   reviews are complete. User review accepted the four synthetic questions
   for research use, but that is not independent educator validation.

@@ -10,6 +10,10 @@ from session_store import bank_fingerprint
 
 
 def validate_assessment_taxonomy(bank: dict, taxonomy: dict) -> None:
+    if taxonomy.get("schema") == "phase3_research_assessment_taxonomy_v1":
+        from research_runtime import validate_research_taxonomy
+        validate_research_taxonomy(bank, taxonomy)
+        return
     if (taxonomy.get("schema") != "phase3_assessment_taxonomy_draft_v1"
             or taxonomy.get("status") != "approved_for_descriptive_research_prototype"
             or taxonomy.get("relation") != "is_part_of_not_prerequisite"
@@ -127,7 +131,9 @@ def assessment_feedback_graph(bank: dict, taxonomy: dict, responses: list[dict])
                         "No incorrect answers were observed in the answered questions for this skill.")}
     return {"schema": "phase3_assessment_feedback_graph_v1",
             "status": "descriptive_observed_counts_only",
-            "scope": "approved_bank_topics_subtopics_only",
+            "scope": ("research_bank_assessed_concepts_pending_educator_review"
+                      if taxonomy.get("schema") == "phase3_research_assessment_taxonomy_v1"
+                      else "approved_bank_topics_subtopics_only"),
             "relation": "is_part_of_not_prerequisite", "bank_sha256": bank_fingerprint(bank),
             "checkpoint": "midpoint" if len(rows) == 20 else "end",
             "topics": topics, "recommendations": recommendations,

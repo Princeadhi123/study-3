@@ -12,11 +12,9 @@ from pathlib import Path
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 import demo_api
 from demo_service import DemoService
-from live_diagnostics import LiveDiagnostics
 from shadow_practice import ShadowPracticeRecommender
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_demo_service import fake_diagnostics, wait_for
-from tests.test_kt_adapter import FakeKT
 
 
 def make_pool(skills=("sA", "sB")):
@@ -288,61 +286,15 @@ class RecommendationWiringTests(ServiceCase):
 
 
 class FutureKTPoolPathTests(ServiceCase):
-    def _gateless_diagnostics(self, pool):
-        def model_loader():
-            kt = FakeKT(self.bank)
-            kt.config = {"variant": "skill_item_content_option",
-                         "max_seq_len": 50, "seed": 42}
-            for q in pool["questions"]:
-                kt.dataset.text_to_row.setdefault(
-                    q["content_text"],
-                    len(kt.dataset.text_to_row))
-            return kt
+    def test_active_service_rejects_arbitrary_pool(self):
+        with self.assertRaisesRegex(ValueError, "24-question"):
+            self._service(practice_pool=make_pool(), practice_target_band=[0.5, 1.0])
 
-        def broken_gate_loader():
-            raise RuntimeError("conformal gates unavailable")
-
-        return LiveDiagnostics(model_loader=model_loader,
-                               gate_loader=broken_gate_loader)
-
-    def test_pool_path_predicts_despite_gate_outage(self):
-        pool = make_pool()
-        service = self._service(
-            diagnostics=self._gateless_diagnostics(pool),
-            practice_pool=pool, practice_target_band=[0.5, 1.0])
-        sid, _ = self._complete(
-            service, rows=wrong_in(self.bank, {"sA", "sB"}))
-        self._wait_done(service, sid)
-        end = self._end(service, sid)
-        self.assertEqual(end["recommendation_job"]["status"], "selected")
-        self.assertEqual(end["recommendation"]["status"], "selected")
-        self.assertIn(end["recommendation"]["selected_question_id"],
-                      {"pool_q1", "pool_q2"})
-        self.assertEqual(
-            end["recommendation"]["used_for_student_advice"], False)
-
-    def test_empty_pool_real_recommender_abstains_without_predictor(self):
-        class SpyPredictor:
-            def __init__(self):
-                self.calls = 0
-
-            def __call__(self, bank, responses_arg, candidates):
-                self.calls += 1
-                raise AssertionError("predictor must not run")
-
-        spy = SpyPredictor()
+    def test_injected_recommender_cannot_bypass_current_pool_binding(self):
         recommender = ShadowPracticeRecommender(
-            empty_pool(), [0.5, 0.9], spy)
-        service = self._service(recommender=recommender)
-        sid, _ = self._complete(
-            service, rows=wrong_in(self.bank, {"sA", "sB"}))
-        self._wait_done(service, sid)
-        recommendation = self._end(service, sid)["recommendation"]
-        self.assertEqual(recommendation["status"], "abstained")
-        self.assertEqual(
-            recommendation["reason"],
-            "no_eligible_unattempted_error_topic_candidates")
-        self.assertEqual(spy.calls, 0)
+            empty_pool(), [0.5, 0.9], lambda *args: None)
+        with self.assertRaisesRegex(ValueError, "24-question"):
+            self._service(recommender=recommender)
 
     def test_constructor_rejects_unpaired_and_mixed_arguments(self):
         pool = make_pool()
@@ -365,9 +317,7 @@ class FutureKTPoolPathTests(ServiceCase):
         service = self._service()
         self.assertEqual(service.teacher_config()["shadow_practice"],
                          {"enabled": False, "mode": "shadow_only"})
-        shadowed = self._service(
-            practice_pool=make_pool(), practice_target_band=[0.5, 1.0],
-            diagnostics=self._gateless_diagnostics(make_pool()))
+        shadowed = self._service(recommender=FakeRecommender())
         self.assertEqual(shadowed.teacher_config()["shadow_practice"],
                          {"enabled": True, "mode": "shadow_only"})
 

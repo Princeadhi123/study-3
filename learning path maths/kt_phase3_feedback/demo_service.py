@@ -2,7 +2,7 @@
 
 This is a localhost research demo over the approved private bank. It is
 not the live student API: every session is attested synthetic, all
-feedback remains a draft requiring educator review, and KT/conformal
+feedback remains a draft requiring educator review, and KT
 values stay private research diagnostics that never reach student
 payloads.
 
@@ -25,7 +25,9 @@ from pathlib import Path
 import educator_review_contract
 import phase3_paths
 from aitta_generator import AittaGenerator
-from evidence_feedback import build_evidence, canonical_digest, run_feedback
+from active_payload import active_payload
+from evidence_feedback import (
+    build_evidence, build_research_evidence, canonical_digest, run_feedback)
 from evidence_feedback_policy import (
     POLICY_VERSION, SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from evidence_providers import EvidenceJevSelector
@@ -37,6 +39,9 @@ from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
 from replay_provider_scenarios import CaptureCache
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace, case_display
+from research_runtime import (
+    BANK_LABELS, load_research_bank, require_augmented_embeddings,
+    teacher_content_context, validate_current_practice_pool)
 from scenario_replays import DEFAULT_SOURCE, ScenarioReplays
 from scenario_runner import generate_responses
 from schemas import SESSION_SCHEMA
@@ -56,7 +61,7 @@ SIMULATION_PROFILES = (
     "all_correct", "all_incorrect", "weak_fractions_only",
     "first_half_correct_second_half_wrong", "alternating")
 PUBLIC_QUESTION_KEYS = (
-    "question_id", "skill_id", "text", "options")
+    "skill_id", "text", "options")
 
 
 class ConflictError(Exception):
@@ -102,12 +107,18 @@ class DemoService:
                 "injected recommender cannot combine with practice pool/band")
         if practice_pool is not None:
             validate_practice_pool(practice_pool)
+            validate_current_practice_pool(practice_pool)
+            require_augmented_embeddings()
             validate_target_band(practice_target_band)
+        if recommender is not None and hasattr(recommender, "pool"):
+            validate_current_practice_pool(recommender.pool)
+            require_augmented_embeddings()
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.research = ResearchWorkspace(self.root, replay_report)
-        if bank is None:
+        default_bank = bank is None
+        if default_bank:
             bank = json.loads(phase3_paths.require(
                 phase3_paths.APPROVED_BANK).read_text(encoding="utf-8"))
         if taxonomy is None:
@@ -116,6 +127,18 @@ class DemoService:
         self.bank, self.taxonomy = bank, taxonomy
         self.store = SessionStore(self.root / "sessions")
         self.mcqs = MCQSessionService(bank, self.store, taxonomy=taxonomy)
+        self._banks = {"demo": {
+            "bank": bank, "taxonomy": taxonomy, "mcqs": self.mcqs,
+            "provenance": {
+                "bank_mode": "demo", "bank_identity": "demo_bank",
+                "bank_label": BANK_LABELS["demo"], "session_mode": "synthetic_demo",
+                "validation_mode": "approved_demo_bank",
+                "bank_sha256": bank_fingerprint(bank),
+                "source_path": str(phase3_paths.APPROVED_BANK) if default_bank else "injected",
+                "source_sha256": hashlib.sha256(phase3_paths.APPROVED_BANK.read_bytes()).hexdigest()
+                if default_bank else None,
+                "declared_item_regime": "mixed_frozen_vocabulary",
+            }}}
         self.meta_dir = self.root / "metadata"
         self.meta_dir.mkdir(parents=True, exist_ok=True)
         self.provider_pool = ThreadPoolExecutor(
@@ -153,6 +176,34 @@ class DemoService:
         self.diag_pool.submit(self.diagnostics.warmup)
 
     # ---------------- lifecycle ----------------
+
+    def _bank_context(self, bank_mode="demo"):
+        if not isinstance(bank_mode, str) or bank_mode not in BANK_LABELS:
+            raise ValueError("unknown bank mode")
+        with self.lock:
+            if bank_mode not in self._banks:
+                bank, taxonomy, provenance = load_research_bank(bank_mode)
+                self._banks[bank_mode] = {
+                    "bank": bank, "taxonomy": taxonomy,
+                    "mcqs": MCQSessionService(
+                        bank, self.store, taxonomy=taxonomy, research_mode=True),
+                    "provenance": provenance}
+            return self._banks[bank_mode]
+
+    def _context_for(self, meta):
+        return self._bank_context(meta.get("bank_mode", "demo"))
+
+    def _evidence(self, meta, rows):
+        context = self._context_for(meta)
+        builder = (build_evidence if meta.get("bank_mode", "demo") == "demo"
+                   else build_research_evidence)
+        return builder(context["bank"], context["taxonomy"], rows)
+
+    @staticmethod
+    def available_banks():
+        return [{"bank_mode": mode, "label": label, "question_count": FULL_LENGTH,
+                 "research_pending_review": mode != "demo"}
+                for mode, label in BANK_LABELS.items()]
 
     def _hosted_adapters(self, jev_env_file, call_budget, timeout):
         """Construct real providers once for the single provider worker."""
@@ -258,14 +309,28 @@ class DemoService:
         if not path.exists():
             raise FileNotFoundError("unknown demo session")
         meta = json.loads(path.read_text(encoding="utf-8"))
+        context = self._context_for(meta)
         if (meta.get("session_id") != session_id
                 or meta.get("schema") != META_SCHEMA
                 or meta.get("synthetic") is not True
-                or meta.get("bank_sha256") != bank_fingerprint(self.bank)
+                or meta.get("bank_sha256") != bank_fingerprint(context["bank"])
                 or meta.get("taxonomy_sha256")
-                != canonical_digest(self.taxonomy)
+                != canonical_digest(context["taxonomy"])
+                or ("bank_provenance" in meta
+                    and meta["bank_provenance"] != context["provenance"])
+                or (meta.get("bank_mode", "demo") != "demo"
+                    and "bank_provenance" not in meta)
                 or meta.get("policy_version") != POLICY_VERSION):
             raise ValueError("metadata is incompatible")
+        session = self.store.load(session_id)
+        if (session["bank_sha256"] != meta["bank_sha256"]
+                or ("bank_mode" in session
+                    and session["bank_mode"] != meta.get("bank_mode", "demo"))
+                or ("bank_provenance" in session
+                    and session["bank_provenance"] != context["provenance"])
+                or ("taxonomy_sha256" in session
+                    and session["taxonomy_sha256"] != meta["taxonomy_sha256"])):
+            raise ValueError("session provenance is incompatible")
         return meta
 
     def _try_load_meta(self, session_id):
@@ -286,17 +351,20 @@ class DemoService:
 
     # ---------------- sessions ----------------
 
-    def _new_meta(self, session_id, token, label=None, simulated=None):
+    def _new_meta(self, session_id, token, label=None, simulated=None, bank_mode="demo"):
+        context = self._bank_context(bank_mode)
         return {
             "session_id": session_id,
             "schema": META_SCHEMA,
             "synthetic": True,
             "attestation": "synthetic_demo_not_real_learner_data",
-            "label": label or f"demo-{session_id[:8]}",
+            "label": label or f"{bank_mode}-{session_id[:8]}",
+            "bank_mode": bank_mode, "bank_label": BANK_LABELS[bank_mode],
+            "bank_provenance": copy.deepcopy(context["provenance"]),
             "simulated": simulated,
             "created_at": utc_now(),
-            "bank_sha256": bank_fingerprint(self.bank),
-            "taxonomy_sha256": canonical_digest(self.taxonomy),
+            "bank_sha256": bank_fingerprint(context["bank"]),
+            "taxonomy_sha256": canonical_digest(context["taxonomy"]),
             "policy_version": POLICY_VERSION,
             "token_sha256": _hash_token(token),
             "provider_job": {"status": "not_requested",
@@ -316,15 +384,24 @@ class DemoService:
                     "recommendation_job": {"status": "not_requested"}}},
             "reviews": []}
 
-    def create_session(self, label=None, simulated=None, replay=None, provider_mode=None):
+    def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
+                       bank_mode="demo"):
         if provider_mode not in (None, "rules", self.provider_mode):
             raise ValueError("provider mode is not configured")
         token = secrets.token_urlsafe(32)
         with self.lock:
-            started = self.mcqs.start_session()
+            if replay and bank_mode != "demo":
+                raise ValueError("historical replays require the demo bank")
+            context = self._bank_context(bank_mode)
+            started = context["mcqs"].start_session()
             session_id = started["session_id"]
             meta = self._new_meta(
-                session_id, token, label=label, simulated=simulated)
+                session_id, token, label=label, simulated=simulated, bank_mode=bank_mode)
+            session = context["mcqs"].private_record(session_id)
+            session["bank_mode"] = bank_mode
+            session["bank_provenance"] = copy.deepcopy(context["provenance"])
+            session["taxonomy_sha256"] = meta["taxonomy_sha256"]
+            self.store.save(session)
             meta["replay"] = copy.deepcopy(replay)
             meta["provider_job"]["provider_mode"] = provider_mode or self.provider_mode
             self._save_meta(meta)
@@ -340,12 +417,14 @@ class DemoService:
                 if meta is None or meta.get("replay"):
                     continue
                 try:
-                    session = self.mcqs.private_record(meta["session_id"])
+                    session = self._context_for(meta)["mcqs"].private_record(meta["session_id"])
                 except Exception:
                     continue
                 sessions.append({
                     "session_id": meta["session_id"],
                     "label": meta["label"],
+                    "bank_mode": meta.get("bank_mode", "demo"),
+                    "bank_label": BANK_LABELS[meta.get("bank_mode", "demo")],
                     "display_name": self._session_display(meta),
                     "created_at": meta["created_at"],
                     "status": session["status"],
@@ -358,12 +437,20 @@ class DemoService:
         sessions.sort(key=lambda row: row["created_at"], reverse=True)
         return sessions
 
-    def _current_question(self, session):
+    def _question_token(self, meta, position):
+        return hmac.new(meta["token_sha256"].encode("ascii"),
+                        f"{meta['session_id']}:{position}".encode("ascii"),
+                        hashlib.sha256).hexdigest()
+
+    def _current_question(self, session, meta):
         answered = len(session["responses"])
         if answered >= FULL_LENGTH or session["status"] == "complete":
             return None
-        question = self.bank["questions"][answered]
-        return {key: question[key] for key in PUBLIC_QUESTION_KEYS} | {
+        bank = self._context_for(meta)["bank"]
+        question = bank["questions"][answered]
+        return {key: copy.deepcopy(question[key]) for key in PUBLIC_QUESTION_KEYS} | {
+            "question_token": self._question_token(meta, answered + 1),
+            "skill_name": bank["skill_names"][question["skill_id"]],
             "position": answered + 1,
             "half": 1 if answered < HALF_LENGTH else 2}
 
@@ -403,15 +490,17 @@ class DemoService:
             "requires_educator_review": True}
 
     def _public_snapshot(self, session_id, meta=None):
-        session = self.mcqs.private_record(session_id)
         if meta is None:
             meta = self._load_meta(session_id)
+        session = self._context_for(meta)["mcqs"].private_record(session_id)
         return {
             "session_id": session_id,
             "synthetic": True,
+            "bank_mode": meta.get("bank_mode", "demo"),
+            "bank_label": BANK_LABELS[meta.get("bank_mode", "demo")],
             "status": session["status"],
             "answered_count": len(session["responses"]),
-            "current_question": self._current_question(session),
+            "current_question": self._current_question(session, meta),
             "feedback": {
                 "midpoint": self._student_feedback(
                     session_id, meta, "midpoint"),
@@ -427,9 +516,30 @@ class DemoService:
 
     # ---------------- submissions ----------------
 
+    def submit_student_response(self, session_id, token, row):
+        with self.lock:
+            meta = self._authorize(session_id, token)
+            if (not isinstance(row, dict)
+                    or set(row) != {"question_token", "selected_index"}
+                    or not isinstance(row["question_token"], str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", row["question_token"])):
+                raise ValueError("response requires an opaque question token and selection")
+            context = self._context_for(meta)
+            session = context["mcqs"].private_record(session_id)
+            answered = len(session["responses"])
+            for position in (answered + 1, answered):
+                if (1 <= position <= FULL_LENGTH
+                        and hmac.compare_digest(row["question_token"],
+                                                self._question_token(meta, position))):
+                    return self.submit_response(session_id, token, {
+                        "question_id": context["bank"]["questions"][position - 1]["question_id"],
+                        "selected_index": row["selected_index"]})
+            raise ValueError("response token does not match the current question")
+
     def submit_response(self, session_id, token, row):
         with self.lock:
             meta = self._authorize(session_id, token)
+            mcqs = self._context_for(meta)["mcqs"]
             if (not isinstance(row, dict)
                     or set(row) != {"question_id", "selected_index"}
                     or not isinstance(row["question_id"], str)
@@ -437,7 +547,7 @@ class DemoService:
                     or isinstance(row["selected_index"], bool)):
                 raise ValueError(
                     "response must be {question_id, selected_index}")
-            session = self.mcqs.private_record(session_id)
+            session = mcqs.private_record(session_id)
             responses = session["responses"]
             if (responses
                     and responses[-1]["question_id"] == row.get("question_id")):
@@ -445,7 +555,7 @@ class DemoService:
                     # Identical retry of the saved latest answer.
                     return self._public_snapshot(session_id, meta)
                 raise ValueError("response does not match the required order")
-            result = self.mcqs.submit_response(session_id, row)
+            result = mcqs.submit_response(session_id, row)
             answered = result["position"]
             if answered == HALF_LENGTH:
                 self._finish_midpoint(session_id, meta)
@@ -455,23 +565,25 @@ class DemoService:
             return self._public_snapshot(session_id, meta)
 
     def _rows(self, session_id):
-        return self.mcqs.private_response_rows(session_id)
+        return self._context_for(self._load_meta(session_id))["mcqs"].private_response_rows(session_id)
 
     def _finish_midpoint(self, session_id, meta):
         # Rows are snapshotted at admission: the queued worker must never
         # observe a later session state.
         rows = copy.deepcopy(self._rows(session_id))
-        evidence = build_evidence(self.bank, self.taxonomy, rows)
+        context = self._context_for(meta)
+        evidence = self._evidence(meta, rows)
         block = meta["checkpoints"]["midpoint"]
         block["baseline_student"] = run_feedback(
             evidence, "student", "midpoint")
         block["graph"] = assessment_feedback_graph(
-            self.bank, self.taxonomy, rows)
+            context["bank"], context["taxonomy"], rows)
         self._admit_diagnostics(session_id, meta, "midpoint", rows)
 
     def _finish_end(self, session_id, meta):
         rows = copy.deepcopy(self._rows(session_id))
-        evidence = build_evidence(self.bank, self.taxonomy, rows)
+        context = self._context_for(meta)
+        evidence = self._evidence(meta, rows)
         end = meta["checkpoints"]["end"]
         end["evidence"] = evidence
         end["baseline_student"] = run_feedback(
@@ -479,7 +591,7 @@ class DemoService:
         end["baseline_teacher"] = run_feedback(
             evidence, "teacher", "end")
         end["graph"] = assessment_feedback_graph(
-            self.bank, self.taxonomy, rows)
+            context["bank"], context["taxonomy"], rows)
         mode = meta["provider_job"]["provider_mode"]
         if self._pending_provider >= self.max_pending_jobs:
             meta["provider_job"] = {
@@ -552,8 +664,10 @@ class DemoService:
 
     def _run_diagnostics(self, session_id, checkpoint, rows):
         try:
+            with self.lock:
+                context = self._context_for(self._load_meta(session_id))
             result = self.diagnostics.evaluate(
-                self.bank, self.taxonomy, rows)
+                context["bank"], context["taxonomy"], rows)
             expected = CHECKPOINT_LENGTHS[checkpoint]
             if (result["status"] == "ready"
                     and (result.get("checkpoint") != checkpoint
@@ -591,8 +705,13 @@ class DemoService:
 
     def _run_recommendation(self, session_id, rows):
         try:
-            result = self.recommender.recommend(
-                copy.deepcopy(self.bank), copy.deepcopy(self.taxonomy), rows)
+            with self.lock:
+                meta = self._load_meta(session_id)
+                context = self._context_for(meta)
+            recommend = (self.recommender.recommend if meta.get("bank_mode", "demo") == "demo"
+                         else self.recommender.recommend_research)
+            result = recommend(
+                copy.deepcopy(context["bank"]), copy.deepcopy(context["taxonomy"]), rows)
             if not isinstance(result, dict):
                 raise ValueError("invalid recommendation result")
             result["used_for_student_advice"] = False
@@ -699,9 +818,9 @@ class DemoService:
             try:
                 with self.lock:
                     rows = self._rows(session_id)
-                    mode = self._load_meta(session_id)["provider_job"]["provider_mode"]
-                evidence = build_evidence(
-                    self.bank, self.taxonomy, rows)
+                    meta = self._load_meta(session_id)
+                    mode = meta["provider_job"]["provider_mode"]
+                evidence = self._evidence(meta, rows)
                 results = {}
                 for audience in ("student", "teacher"):
                     review, executions = self._audience_result(
@@ -723,9 +842,7 @@ class DemoService:
                     return
                 end = meta["checkpoints"]["end"]
                 if results is None:
-                    evidence = build_evidence(
-                        self.bank, self.taxonomy,
-                        self._rows(session_id))
+                    evidence = self._evidence(meta, self._rows(session_id))
                     for audience in ("student", "teacher"):
                         end[f"{audience}_review"] = (
                             self._baseline_review(
@@ -759,13 +876,13 @@ class DemoService:
         """Ensure restart-interrupted jobs keep usable baselines."""
         end = meta["checkpoints"]["end"]
         try:
-            session = self.mcqs.private_record(meta["session_id"])
+            session = self._context_for(meta)["mcqs"].private_record(meta["session_id"])
             rows = [{"question_id": e["question_id"],
                      "selected_index": e["selected_index"]}
                     for e in session["responses"]]
             if len(rows) != FULL_LENGTH:
                 return
-            evidence = build_evidence(self.bank, self.taxonomy, rows)
+            evidence = self._evidence(meta, rows)
             if end.get("evidence") is None:
                 end["evidence"] = evidence
             if end.get("baseline_student") is None:
@@ -788,11 +905,12 @@ class DemoService:
             "message": review["message"],
             "selected_candidate_id": review["selected_candidate_id"],
             "policy_version": review["trace"]["policy_version"],
-            "bank_sha256": bank_fingerprint(self.bank)})
+            "bank_sha256": review["sanitized_evidence"]["bank_sha256"]})
 
     def teacher_config(self):
-        return {
+        return active_payload({
             "synthetic": True,
+            "available_banks": self.available_banks(),
             "simulation_profiles": [{"id": name, **case_display(name)} for name in SIMULATION_PROFILES],
             "provider_mode": self.provider_mode,
             "call_budget": {"limit": self.call_budget,
@@ -815,17 +933,19 @@ class DemoService:
                     educator_review_contract.REVIEW_CONTRACT_VERSION,
                 "fields": educator_review_contract.REVIEW_FIELDS,
                 "notice": educator_review_contract.REVIEW_NOTICE},
-            "disclaimer": "local synthetic demo; not production auth"}
+            "disclaimer": "local synthetic demo; not production auth"})
 
     def _session_display(self, meta):
         if meta.get("replay"):
             return meta["label"]
         simulated = meta.get("simulated")
-        return case_display(simulated["profile"])["display_name"] if simulated else "Manual synthetic assessment"
+        name = case_display(simulated["profile"])["display_name"] if simulated else "Manual synthetic assessment"
+        return f"{BANK_LABELS[meta.get('bank_mode', 'demo')]} · {name}"
 
-    def _question_records(self, responses, include_subtopics=True):
-        questions = {q["question_id"]: q for q in self.bank["questions"]}
-        subtopics = {qid: (sub["id"], sub["name"]) for topic in self.taxonomy["topics"]
+    def _question_records(self, responses, include_subtopics=True, context=None):
+        context = context or self._bank_context()
+        questions = {q["question_id"]: q for q in context["bank"]["questions"]}
+        subtopics = {qid: (sub["id"], sub["name"]) for topic in context["taxonomy"]["topics"]
                      for sub in topic["subtopics"] for qid in sub["question_ids"]}
         rows = []
         for position, event in enumerate(responses, 1):
@@ -859,18 +979,14 @@ class DemoService:
             graph = case.get("assessment_graph", {}).get("checkpoints", {}).get(checkpoint)
             kt = copy.deepcopy(stored_diag.get("kt", {}))
             probs = kt.get("p_correct_before_each_answer", [])
-            conformal = stored_diag.get("conformal", {})
-            skills = conformal.get("checkpoints", {}).get(checkpoint, {})
-            available = len(probs) == 40 and bool(skills)
+            available = len(probs) == 40
             kt["p_correct_before_each_answer"] = probs[:count]
             kt["coverage_scope"] = "original_full_40_question_trace"
             kt["provenance"] = copy.deepcopy(library.get("diagnostic_provenance", {}))
             diag = {"status": "ready" if available else "unavailable",
-                    "mode": "frozen_replay_no_model_or_calibration_rerun",
+                    "mode": "frozen_replay_no_model_rerun",
                     "checkpoint": checkpoint, "answer_count": count,
                     "used_for_student_advice": False, "kt": kt,
-                    "conformal": {"skills": skills, "calibrated_k": 5 if count == 20 else 10,
-                                  "status": "exploratory_only_not_fixed_bank_validated"},
                     "scope_warning": "Historical saved model outputs; not recomputed and not validated mastery evidence."}
             checkpoints[checkpoint] = {"graph": graph, "diagnostics": diag,
                                        "diagnostics_job": {"status": diag["status"]}}
@@ -901,13 +1017,14 @@ class DemoService:
                                            "executions": executions},
                           "provenance": {"report_sha256": library["report_sha256"], "source": library["source"],
                                          "policy": library["policy"], "mode": "retained_original_not_recomputed"}}
-        return case
+        return active_payload(case)
 
     def teacher_session(self, session_id):
         with self.lock:
             meta = self._load_meta(session_id)
-            session = self.mcqs.private_record(session_id)
-            rows = self._question_records(session["responses"])
+            context = self._context_for(meta)
+            session = context["mcqs"].private_record(session_id)
+            rows = self._question_records(session["responses"], context=context)
             checkpoints = copy.deepcopy(meta["checkpoints"])
             end = checkpoints.get("end", {})
             review_hashes = {}
@@ -918,6 +1035,7 @@ class DemoService:
                 review_hashes["teacher"] = self._message_sha(
                     end["teacher_review"])
             provenance = {
+                **copy.deepcopy(context["provenance"]),
                 "bank_sha256": meta["bank_sha256"],
                 "taxonomy_sha256": meta["taxonomy_sha256"],
                 "policy_version": meta["policy_version"],
@@ -928,8 +1046,11 @@ class DemoService:
                     and isinstance(diagnostics.get("kt"), dict)):
                 provenance["diagnostics"] = copy.deepcopy(
                     diagnostics["kt"].get("provenance", {}))
-            return {
+            return active_payload({
                 "session_id": session_id,
+                "bank_mode": meta.get("bank_mode", "demo"),
+                "bank_label": BANK_LABELS[meta.get("bank_mode", "demo")],
+                "content_context": self._teacher_context(meta.get("bank_mode", "demo")),
                 "label": meta["label"],
                 "display_name": self._session_display(meta),
                 "created_at": meta["created_at"],
@@ -947,7 +1068,14 @@ class DemoService:
                 "review_contract": self.teacher_config()["review_contract"],
                 "reviews": copy.deepcopy(meta["reviews"]),
                 "provider_job": copy.deepcopy(meta["provider_job"]),
-                "provenance": provenance}
+                "provenance": provenance})
+
+    @staticmethod
+    def _teacher_context(bank_mode):
+        try:
+            return teacher_content_context(bank_mode)
+        except (OSError, ValueError, KeyError):
+            return {"status": "unavailable", "reason": "current_content_binding_unavailable"}
 
     # ---------------- educator reviews ----------------
 
@@ -979,7 +1107,7 @@ class DemoService:
             body.get("reviewer_label", "anonymous"), "reviewer_label", 80)
         with self.lock:
             meta = self._load_meta(session_id)
-            session = self.mcqs.private_record(session_id)
+            session = self._context_for(meta)["mcqs"].private_record(session_id)
             if session["status"] != "complete":
                 raise ValueError(
                     "reviews require a completed end checkpoint")
@@ -1011,15 +1139,24 @@ class DemoService:
 
     # ---------------- simulation ----------------
 
-    def simulate(self, profile, seed):
+    def simulate(self, profile, seed, bank_mode="demo"):
         if profile not in SIMULATION_PROFILES:
             raise ValueError("profile is not whitelisted")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError("seed must be an integer")
+        context = self._bank_context(bank_mode)
+        simulation_bank = context["bank"]
+        if bank_mode != "demo" and profile == "weak_fractions_only":
+            # The historical scenario generator names the demo fraction topic.
+            # Adapt its display label locally; source bank records stay unchanged.
+            simulation_bank = {**simulation_bank, "skill_names": {
+                sid: ("Murtoluvut" if name == "Murtolukujen kerto- ja jakolasku" else name)
+                for sid, name in simulation_bank["skill_names"].items()}}
         rows = generate_responses(
-            self.bank, {"profile": profile, "seed": seed,
+            simulation_bank, {"profile": profile, "seed": seed,
                         "name": f"demo_{profile}_{seed}"})
         created = self.create_session(
+            bank_mode=bank_mode,
             label=f"simulated:{profile} seed={seed}",
             simulated={"profile": profile, "seed": seed,
                        "label": "simulated response pattern, "

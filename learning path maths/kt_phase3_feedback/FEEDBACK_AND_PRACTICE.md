@@ -13,21 +13,24 @@ Completed answers (20 / 40)
   -> observed evidence -> permitted Jev focus -> Aitta opening
   -> feedback draft (existing branch, unchanged)
 
-Completed answers (40 only) + explicitly supplied private practice pool
+Completed answers (40 only) + hash-bound 24-question v2 practice pool
   -> same observed history + one unanswered candidate query at a time
   -> frozen KT next-response probabilities
   -> experimental practice policy + observed-error baseline comparison
   -> teacher-private shadow result (new, opt-in; never delivered to students)
 
-Assessment answer prefix
-  -> historical pre-answer KT trace + existing conformal sets/score intervals
-  -> teacher-private research diagnostics (existing branch, preserved)
+Assessment answer prefix (20 / 40)
+  -> frozen pre-answer KT trace, without live conformal computation
+  -> teacher-private research diagnostics
+
+Saved historical conformal artifacts
+  -> preserved offline analysis only; excluded from active API/UI output
 ```
 
 Feedback baselines are built before research jobs are admitted. Providers and
 research use separate workers. Future queries reuse the serialized frozen
 model worker, not the provider worker; feedback does not wait for either
-research result. Recommendations do not need conformal to load successfully.
+research result. No active worker loads conformal calibration.
 They do not wait for Jev/Aitta completion or use their generated text.
 
 ## Component boundaries
@@ -40,7 +43,7 @@ They do not wait for Jev/Aitta completion or use their generated text.
 | Aitta | Narrow communication context and selected candidate identity | Opening only; no replacement of the evidence-rendered body |
 | Future KT | Forty observed responses plus one unanswered query | Estimate candidate response correctness |
 | Shadow practice policy | Observed topic errors, explicit pool, probabilities, explicit band | Record an experimental recommendation and baseline for research |
-| Conformal | Historical predictor outputs and calibration | Existing research diagnostics, not recommendation or feedback authority |
+| Historical conformal analysis | Preserved predictor outputs and calibration | Offline evidence only; absent from active runtime/API/UI |
 
 No raw response history, answer keys or research probabilities enter Jev/Aitta.
 The student snapshot receives neither candidate probabilities nor the shadow
@@ -123,17 +126,22 @@ checks before interpreting a native practice experiment.
 
 ## Opt-in use
 
-The default demo leaves recommendations disabled. After a suitable private
-pool is prepared, from this folder:
+The default demo leaves KT recommendations disabled. The teacher's Skill map
+tab still shows graph v3 assessed tasks and all 24 practice drafts, pending
+formal educator review. To opt into the existing experimental KT selector,
+from this folder:
 
 ```powershell
+$env:KT_PHASE2_TEXT_EMBEDDINGS = (Resolve-Path "..\kt_phase2_inference\artifacts\text_embeddings_v2_synthetic_practice_20261007.npz").Path
 python demo_api.py --providers rules `
-  --shadow-practice-pool artifacts/private_practice_pool.json `
+  --shadow-practice-pool artifacts/synthetic_practice_supplement_20261006/practice_pool_v2_private.json `
   --shadow-target-band 0.40 0.80
 ```
 
-The pool path above is illustrative and does not exist automatically. The band
-is illustrative, not an endorsed study configuration. Both flags are required
+The active service rejects other pools, including the original 20-question
+smoke pool. Set the environment before starting Python; a stale Phase 2
+embedding-path import is rejected. The band is illustrative, not an endorsed
+study configuration. Both flags are required
 together. This uses the normal synthetic-only localhost demo; it does not
 deploy a live ViLLE integration or send recommendations to learners.
 
@@ -227,7 +235,42 @@ The smoke pool matches the final research-bank topics, not the different
 skill IDs in the unchanged demo assessment. The original 20-question pool and
 its smoke results remain preserved as a completed experiment only.
 
-## Required next implementation changes (decision recorded 2026-10-07)
+## Implemented transition (decision recorded 2026-10-07)
+
+The following transition requirements are implemented in `demo_api.py`,
+`demo_service.py`, `research_runtime.py` and `web_demo/`. Formal educator
+approval and learner release remain pending.
+
+The start page and teacher simulations select `demo`, `warm` or `cold`.
+Each session binds one 40-question bank for its entire lifetime; restart
+validation checks the bank mode, canonical bank/taxonomy hashes and source
+provenance. Research source-file hashes remain distinct from canonical JSON
+fingerprints. Research taxonomies are derived from v3 `assesses` edges and
+are labeled `descriptive_pending_formal_educator_review`. The approved demo
+validator remains strict; research banks use a separate validation/scoring
+path without changing their approval metadata.
+
+Student HTTP submissions contain only `question_token` and `selected_index`.
+Tokens are scoped to a session and position; the latest identical submission
+can be retried. Private question/item IDs, keys, graph context and paths stay
+server-side. Display translations are keyed by public prompt text; Finnish
+originals are available and English fallbacks are labeled. Teacher content
+context contains assessed concepts and task descriptions, never proposed
+support links or possible-error annotations. It is not sent to Jev/Aitta.
+
+Active JSON projections remove archived conformal/calibration fields, including
+historical replay exports, without rewriting their source captures. The
+legacy `api.py` is a separate approved-demo-only prototype; `demo_api.py` is
+the active UI entry point.
+
+`tests/test_research_runtime.py` and the service/API tests cover synthetic
+mixed-answer warm/cold completion, restart isolation, opaque response tokens,
+v3 mappings and current pool/embedding guards. The frozen-input regression in
+`tests/test_provenance.py` checks the pre-transition hashes recorded in
+`tests/frozen_transition_manifest.json`, including the original embedding table,
+weights, banks, smoke/comparison results and all three graph captures.
+
+Recorded requirements retained for context:
 
 1. **Use the 24-question practice pool for new work.** The accepted pool is
    `practice_pool_v2_private.json` with 6/6/6/6 topic counts and four

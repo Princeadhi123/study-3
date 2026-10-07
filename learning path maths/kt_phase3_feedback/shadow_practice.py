@@ -121,6 +121,14 @@ def select_predictions(candidates, prediction_result, skills, band):
 class ShadowPracticeRecommender:
     def __init__(self, pool, target_band, predictor):
         self.pool = validate_practice_pool(pool)
+        if any(q["item_id"].startswith("synthetic_divisibility_")
+               for q in self.pool["questions"]):
+            # A v2 run must opt into its embeddings even if topic eligibility
+            # later excludes the four synthetic questions from prediction.
+            from research_runtime import (
+                require_augmented_embeddings, validate_current_practice_pool)
+            validate_current_practice_pool(self.pool)
+            require_augmented_embeddings()
         self.band = validate_target_band(target_band)
         self.predictor = predictor
         self.pool_sha256 = canonical_digest(self.pool)
