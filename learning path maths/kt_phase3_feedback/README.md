@@ -151,8 +151,10 @@ updates.
 
 ### Scenario Library
 
-The library reads `artifacts/integrated_feedback_20261002_hosted_full/report.json`
-by default. Override it with `--replay-report PATH`. It loads the report lazily
+The library can read a saved integrated replay report. The former bundled
+report was removed by the approved cleanup, so the default
+`artifacts/integrated_replay_report.json` is absent until one is generated.
+Supply an existing report with `--replay-report PATH`. It loads the report lazily
 and pins that snapshot for the server process; restart to use a different file
 revision. Missing or malformed reports show an unavailable state without
 blocking live sessions. Opening the library makes **no provider or model calls**.
@@ -289,9 +291,14 @@ DemoService (demo_service.py)
         |       -> draft requiring educator review
         |
         +-- research branch
-                frozen KT inference
-                -> historical conformal application
-                -> private teacher diagnostics
+        |       frozen KT inference
+        |       -> historical conformal application
+        |       -> private teacher diagnostics
+        |
+        +-- optional shadow practice branch (end checkpoint only,
+                opt-in) explicit private practice pool + target band
+                -> frozen KT future queries over the finished history
+                -> teacher-only shadow recommendation record
 ```
 
 Checkpoint behavior:
@@ -305,6 +312,30 @@ Checkpoint behavior:
   interrupted diagnostics to `interrupted_by_restart`;
 - opening a completed session reads its persisted results rather than
   automatically rerunning providers or inference.
+
+An optional third private branch is enabled only by the paired
+`--shadow-practice-pool` and `--shadow-target-band` flags: after the 40th
+answer the frozen KT model scores candidates from an explicit private
+practice pool and stores a teacher-only shadow recommendation. It never
+reaches student payloads, Jev/Aitta, or feedback; see
+[FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md). The frozen native smoke
+protocol is [SHADOW_SMOKE_PROTOCOL.md](SHADOW_SMOKE_PROTOCOL.md) and its
+review is in `artifacts/shadow_smoke_20261006/SMOKE_REVIEW.md` (private,
+git-ignored). A source-masked comparison of KT-assisted versus observed-error
+practice suggestions is prepared under
+[PRACTICE_COMPARISON_PROTOCOL.md](PRACTICE_COMPARISON_PROTOCOL.md) (ten tasks,
+zero human reviews; offline reviewer page
+`artifacts/practice_comparison_20261006/reviewer/index.html`). Observed-evidence
+feedback is unchanged, conformal remains historical diagnostics with no
+per-item probability intervals, and the final research and demo banks are
+unchanged. Bounded, hash-bound content maps of the frozen sources are
+available for offline educator review: see
+[RESEARCH_CONTENT_GRAPH.md](RESEARCH_CONTENT_GRAPH.md). The default v3
+descriptive-task capture is `artifacts/bounded_content_graph_v3_20261007/`
+(24 practice questions); preserved v1/v2 captures remain under
+`artifacts/bounded_content_graph_20261006/` and
+`artifacts/bounded_content_graph_v2_20261006/` (private, git-ignored;
+descriptive drafts pending educator review, no routing or student use).
 
 ## 6. Provider boundaries
 
@@ -409,21 +440,27 @@ and is not the current UI backend.
 
 ## 10. Retained evidence and metrics
 
-The most useful retained reports are:
+The most useful retained artifacts are:
 
-- `artifacts/live_demo_20261002/` — live demo sessions, metadata, provider
-  captures, and verification evidence;
-- `artifacts/integrated_feedback_20261002_hosted_full/` — current
-  evidence-focused hosted replay: 54 saved scenarios, 162 packages, 69/108
-  end selections matching baseline and 39 differing;
-- `artifacts/evidence_feedback_20261002_v2/` — deterministic
-  observed-evidence review: 172 scenarios, 516 packages, and 14,641 checked
-  skill-total vectors (inputs plus retained summary docs);
 - `artifacts/assessment_pipeline_20261001.json` — 54-scenario answer source
-  used by replay.
+  used by replay;
+- `artifacts/shadow_smoke_20261006/` — frozen banks, original practice pool,
+  taxonomies, cases and smoke results;
+- `artifacts/practice_comparison_20261006/` — source-masked practice-review
+  pack and comparison analysis;
+- `artifacts/bounded_content_graph_v3_20261007/` — current descriptive graph
+  with the 24-question practice pool;
+- `artifacts/bounded_content_graph_v2_20261006/` — preserved v2 graph;
+- `artifacts/bounded_content_graph_20261006/` — preserved v1 graph;
+- `artifacts/synthetic_practice_supplement_20261006/` — reviewed synthetic
+  supplement, 24-question pool and KT compatibility check.
 
-Past reports now deleted by an approved cleanup (no longer on disk; quoted
-metrics remain past results): `integrated_feedback_20261002_offline/`
+Past reports now deleted by approved cleanups (no longer on disk; quoted
+metrics remain past results): `live_demo_20261002/`,
+`integrated_feedback_20261002_hosted_full/`,
+`evidence_feedback_20261002_v2/`, `sessions/`,
+`practice_pool_capacity_20261006.json`, transient test/environment logs, and
+`integrated_feedback_20261002_offline/`
 (deterministic equivalent of the hosted report), `provider_replay_20261002/`
 (older generic-candidate replay where Jev matched the rules baseline on all
 108 end packages), `assessment_pipeline_20261001/` (54-scenario observed/KT
@@ -471,13 +508,16 @@ python render_evidence_feedback.py artifacts\evidence_feedback_NEW\report.json -
 Offline integrated replay:
 
 ```powershell
-python integrated_synthetic_pipeline.py --mode offline --all-scenarios --out-dir artifacts\integrated_feedback_NEW
+python integrated_synthetic_pipeline.py --mode offline --all-scenarios `
+  --evidence-inputs artifacts\evidence_feedback_NEW\inputs.json `
+  --out-dir artifacts\integrated_feedback_NEW
 ```
 
 A hosted batch replay is intentionally explicit and bounded:
 
 ```powershell
 python integrated_synthetic_pipeline.py --mode hosted --all-scenarios `
+  --evidence-inputs artifacts\evidence_feedback_NEW\inputs.json `
   --jev-env-file "C:/path/to/jev.env" --provider-timeout 120 `
   --max-new-calls 101 --out-dir artifacts\integrated_feedback_NEW_HOSTED
 ```
@@ -551,13 +591,20 @@ coordinate the server before a memory-heavy full test run.
 
 ## 14. Next work
 
-1. Review the implemented comparison protocol with educators; preregister the
+1. Implement the recorded transition backlog in
+   [FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md): use the 24-question
+   v2 practice pool for new work with the augmented KT text-embedding table,
+   remove conformal from the active runtime/UI, add warm/cold research-bank
+   sessions with matching taxonomies, update student/teacher UI, and connect
+   graph v3 evidence to teacher-facing feedback/practice drafts.
+2. Review the implemented comparison protocol with educators; preregister the
    evaluation questions, sampling, duplicate handling, and analysis before data collection.
-2. Run independent educator reviews using the source-masked workflow; inspect
+3. Run independent educator reviews using the source-masked workflow; inspect
    evidence-support judgments as well as preferences, stratified by exposure and execution provenance.
-3. Expand feedback carefully with bounded, evidence-grounded composition.
-4. Create a reviewed practice-activity bank and worked explanations.
-5. Validate KT/conformal behavior for this fixed assessment before any use in
-   advice.
-6. Only after educator and privacy review, consider a supervised pilot and
+4. Expand feedback carefully with bounded, evidence-grounded composition.
+5. Maintain the reviewed practice-activity pool and worked explanations under
+   formal educator review.
+6. Validate KT behavior for the selected fixed assessment before any use in
+   advice; conformal is planned for removal from the active prototype.
+7. Only after educator and privacy review, consider a supervised pilot and
    production hardening.

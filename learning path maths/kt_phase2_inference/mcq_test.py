@@ -115,6 +115,13 @@ def _validate_bank(bank: dict) -> list[dict]:
             "reviewer must mark the assembled bank reviewed offline before "
             "serving"
         )
+    return validate_bank_structure(bank)
+
+
+def validate_bank_structure(bank: dict) -> list[dict]:
+    """Structure only; does not approve a bank or authorize learner serving."""
+    if not isinstance(bank, dict):
+        raise ValueError("bank must be a dict")
     questions = bank.get("questions")
     names = bank.get("skill_names")
     if not isinstance(questions, list) or len(questions) != FULL_LENGTH:

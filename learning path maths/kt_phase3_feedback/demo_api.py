@@ -482,13 +482,25 @@ def main(argv=None):
     parser.add_argument("--teacher-pin")
     parser.add_argument("--replay-report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--replay-source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--shadow-practice-pool", type=Path)
+    parser.add_argument("--shadow-target-band", type=float, nargs=2,
+                        metavar=("LOW", "HIGH"))
     args = parser.parse_args(argv)
+    if (args.shadow_practice_pool is None) != (args.shadow_target_band is None):
+        parser.error("--shadow-practice-pool and --shadow-target-band "
+                     "are required together")
+    practice_pool = None
+    if args.shadow_practice_pool is not None:
+        practice_pool = json.loads(
+            args.shadow_practice_pool.read_text(encoding="utf-8"))
     pin = args.teacher_pin or f"{secrets.randbelow(1_000_000):06d}"
     service = DemoService(
         root=args.root, provider_mode=args.providers,
         jev_env_file=args.jev_env_file, call_budget=args.call_budget,
         provider_timeout=args.provider_timeout, replay_report=args.replay_report,
-        replay_source=args.replay_source)
+        replay_source=args.replay_source,
+        practice_pool=practice_pool,
+        practice_target_band=args.shadow_target_band)
     server = make_server(service, pin, host=args.host, port=args.port)
     host, port = server.server_address[:2]
     print(f"Synthetic demo listening at http://{host}:{port}", flush=True)

@@ -455,8 +455,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=(
         phase3_paths.ARTIFACTS / "assessment_pipeline_20261001.json"))
-    parser.add_argument("--evidence-inputs", type=Path, default=(
-        phase3_paths.ARTIFACTS / "evidence_feedback_20261002_v2" / "inputs.json"))
+    parser.add_argument("--evidence-inputs", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--mode", choices=("offline", "hosted"), default="offline")
     group = parser.add_mutually_exclusive_group()

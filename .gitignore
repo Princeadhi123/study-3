@@ -84,6 +84,9 @@ learning path maths/kt_phase2_inference/*.err
 # Phase 3 prototype sessions may contain submitted answers and private scoring
 learning path maths/kt_phase3_feedback/artifacts/
 
+# Phase 4 replay manifests/predictions contain private student-derived records.
+learning path maths/kt_phase4_evaluation/artifacts/
+
 # Local Python tooling and editor/system files
 .venv/
 venv/

@@ -306,33 +306,35 @@ student routes.
 
 Current protected artifacts under `artifacts/`:
 
-- `live_demo_20261002/` — runtime stores: sessions, metadata, provider
-  captures
-- `integrated_feedback_20261002_hosted_full/` — retained `report.json`,
-  `review.md`/`review.html`, `contract.json`, `inputs.json`, captures and
-  reviews (54 cases, 162 packages in the stored report)
-- `assessment_pipeline_20261001.json` — default source input for the
-  integrated runner (not its output)
-- `evidence_feedback_20261002_v2/` — retained inputs plus small docs
-  (`review.md`, coverage/verification summaries)
-- `sessions/` — legacy session store
+- `assessment_pipeline_20261001.json` — 54-scenario answer source
+- `shadow_smoke_20261006/` — frozen banks, original pool, taxonomies, cases
+  and smoke outputs
+- `practice_comparison_20261006/` — reviewer pack and comparison analysis
+- `bounded_content_graph_v3_20261007/` — current descriptive graph with the
+  24-question practice pool
+- `bounded_content_graph_v2_20261006/` — preserved v2 graph
+- `bounded_content_graph_20261006/` — preserved v1 graph
+- `synthetic_practice_supplement_20261006/` — synthetic supplement, balanced
+  v2 pool and KT compatibility check
 
-An approved later cleanup removed the historical smoke/offline/repair
-artifacts, cleanup receipts, and old verification screenshots previously
-listed here (including `integrated_feedback_20261002_offline/`,
-`provider_replay_20261002/`, `assessment_pipeline_20261001/`,
-`report_fixed40_baselines_20260929/`, `live_demo_20261002/verification/`,
+Approved cleanups removed historical runtime, replay and test artifacts,
+including `live_demo_20261002/`,
+`integrated_feedback_20261002_hosted_full/`,
+`evidence_feedback_20261002_v2/`, `sessions/`,
+`practice_pool_capacity_20261006.json`,
+`integrated_feedback_20261002_offline/`, `provider_replay_20261002/`,
+`assessment_pipeline_20261001/`, `report_fixed40_baselines_20260929/`,
 `ui_verification_20261004/`, `hosted_combined_20261002_run1_review.md`, and
-`cleanup_result_artifacts_v2.json`). These files and directories no longer
-exist on disk — do not link them. Reports and metrics quoted below from those sources
-are past verification results, citable as history but not re-inspectable.
+`cleanup_result_artifacts_v2.json`. These files and directories no longer
+exist on disk — do not link them. Reports and metrics quoted below from
+those sources are past verification results, citable as history but not
+re-inspectable.
 
-Frozen measured figures (from
-`artifacts/integrated_feedback_20261002_hosted_full/review.md`, not
+Frozen measured figures (from the now-deleted hosted replay review, not
 rederived): of 108 end packages, **69 match the rules baseline and 39
 differ** — software identity comparison including local/cache execution,
 not educational accuracy. Live sessions run fresh KT inference; the batch
-report replays frozen predictions. Coverage was 54 chosen cases, not all
+report replayed frozen predictions. Coverage was 54 chosen cases, not all
 sequences.
 
 ### Earlier metrics and what they validate
@@ -346,9 +348,9 @@ deleted artifacts; they are retained as history, not on-disk evidence.
 | `artifacts/assessment_pipeline_20261001/summary.csv` | 54 scenario labels with first-half, second-half, total observed scores and KT means. | Compares observed patterns with model probabilities; not calibration or mastery validation. |
 | `artifacts/assessment_pipeline_20261001/conformal_checkpoints.csv` + `pipeline_diagnostics.json` | 432 checkpoint-skill rows; midpoint statuses `UNCERTAIN_BEHAVIOR` 139 / `CONFIDENT_STRUGGLE` 77; end statuses `MASTERY_SAFE` 6 / `UNCERTAIN_BEHAVIOR` 110 / `CONFIDENT_STRUGGLE` 100; 102 end rows have observed rate outside the interval; one `MASTERY_SAFE` row had observed rate 7/10 below its 0.8 threshold. | Synthetic stress-test counts over correlated fixed-bank cases; not empirical coverage and not a safe learner decision signal. |
 | `artifacts/assessment_pipeline_20261001/llm_boundary.json` | Distractor probe: 39 KT item positions changed, max absolute probability delta 0.088278, while observed feedback stayed identical; 54 labels contain 53 unique response sequences. | Shows option identity can affect KT while the feedback branch remains observed-count-based; not evidence of misconception detection. |
-| `artifacts/evidence_feedback_20261002_v2/` | 172 review scenarios, 516 feedback packages, 14,641 skill-total vectors, 239 software tests, zero provider calls. | Validates deterministic policy, evidence binding, and finite boundary coverage; does not measure educational quality or exhaust answer sequences. |
+| `artifacts/evidence_feedback_20261002_v2/` (deleted) | 172 review scenarios, 516 feedback packages, 14,641 skill-total vectors, 239 software tests, zero provider calls. | Past deterministic policy/evidence-binding validation; does not measure educational quality or exhaust answer sequences. |
 | `artifacts/provider_replay_20261002/review.md` | Older generic candidate set: 162 packages, 108 end packages, 98 fresh Jev calls, zero fallbacks; Jev selected `observed_summary` and matched rules on all 108 end packages; Jev latency median 291.7005 ms. | Provider/API compatibility on the old selector contract only; not comparable as a current Jev quality result because the candidate set later changed. |
-| `artifacts/integrated_feedback_20261002_hosted_full/review.md` | Current evidence-focused replay: 162 packages, 108 end packages, 69 baseline matches / 39 differences, zero recorded failures/fallbacks; 98 successful distinct Jev requests, three Aitta contexts, Jev median capture latency about 318 ms. | Current software/provenance evidence. A different selection is not a better selection; educator review is still required. |
+| `artifacts/integrated_feedback_20261002_hosted_full/review.md` (deleted) | Past evidence-focused replay: 162 packages, 108 end packages, 69 baseline matches / 39 differences, zero recorded failures/fallbacks; 98 successful distinct Jev requests, three Aitta contexts, Jev median capture latency about 318 ms. | Past software/provenance evidence. A different selection is not a better selection; educator review is still required. |
 | `artifacts/hosted_combined_20261002_run1_review.md` | Three-package hosted smoke test; caught unsafe midpoint progress wording and teacher-audience wording. | Human semantic review found issues that lexical/interface checks missed. |
 
 These historical metrics should inform the Scenario Library and educator
@@ -408,6 +410,31 @@ and `git diff --check`. These are software checks, not research-validity results
 
 ## 10. Prioritised roadmap
 
+### Immediate prototype transition backlog (2026-10-07)
+
+- **Use the 24-question v2 practice pool for new work.** The original
+  20-question pool remains frozen smoke evidence only; the accepted current
+  pool is `practice_pool_v2_private.json` with four user-review-accepted
+  synthetic divisibility questions. KT runs must explicitly select the
+  augmented text-embedding table; frozen KT weights stay unchanged, and the
+  synthetic item IDs use the cold/unknown-item representation.
+- **Remove conformal from the active runtime/UI.** Preserve historical
+  Phase 4 conformal artifacts and analysis, but stop live conformal
+  computation and teacher-page display in the current prototype.
+- **Replace demo assessment items for the research prototype.** Add explicit
+  warm/cold bank selection (one 40-question bank per session), a separate
+  research-mode serving boundary, matching graph-derived taxonomies and
+  separated session provenance. Preserve each bank's KT item regime: cold
+  bank item IDs intentionally use the frozen unknown-item representation.
+- **Update student and teacher UI.** Add bank selection/labels, update skill
+  and question wording, distinguish demo/warm/cold sessions, and expose only
+  descriptive task evidence—not answer keys, graph internals or pending
+  diagnostic annotations.
+- **Connect graph v3 to teacher-facing feedback/practice.** Keep Jev/Aitta
+  constrained, use the 24-question pool for KT-assisted practice drafts,
+  retain teacher review and implement a separate release gate before any
+  learner delivery.
+
 1. **Educator protocol and evaluation** — review the implemented source-masked
    comparison protocol, preregister sampling/analysis and duplicate handling,
    then collect independent educator judgments. Tool availability is not evidence
@@ -446,14 +473,14 @@ The warm/cold banks are separate research inputs, not replacements for the
 demo bank or validated student assessments. Historical responses can support
 next-response evaluation without a complete 40-question session; they do not
 establish validity for the designed fixed, sequential assessment. The final
-selection and its support/optimality evidence now exist; the evaluation
-protocol, predictive results and learner approval remain pending.
+selection, protocol, replay capture and qualified exploratory CPU results now
+exist in Phase 4. Fixed-assessment validation and learner approval remain pending.
 
 ### Current global bank selection
 
 As of 2026-10-05, use the private research pair in
 `../kt_phase2_inference/artifacts/evaluation_banks_support_optimal_20261005/`
-for the next planned historical study, not the removed original/v2 proposals.
+for the Phase 4 historical study, not the removed original/v2 proposals.
 The research version is `3_support_optimal_under_declared_rules_20261005`.
 
 The accurate claim is **globally support-optimal within the frozen eligible
@@ -472,7 +499,40 @@ approved removal of superseded artifacts. Required source evidence and
 runtime dependencies remain. The demo assessment and student-advice branch
 are unchanged; no inference or bank switch accompanies this documentation.
 
-### Immediate deliverables, before inference
+### Phase 4 historical study status
+
+The separate workspace is `../kt_phase4_evaluation/`; read its `PROTOCOL.md`,
+`CPU_REFERENCE_ADDENDUM.md` and README. Frozen outputs and lead interpretation
+are in `artifacts/selected_bank_v3_20261005/` within that workspace.
+
+The capture contains 1,012 eligible responses from 531 students: 860 warm
+responses (63 errors) and 152 cold responses (4 errors). Warm KT history
+improves AUC (0.830 versus 0.661) and log loss (0.208 versus 0.252), with
+paired student-cluster intervals favoring history. Cold history benefit is
+inconclusive. Warm pooled results are dominated by algebra.
+
+Historical conformal threshold transfer has warm overall coverage 94.42%,
+but incorrect-label coverage 61.90%; cold incorrect-label coverage is 2/4.
+These are not validated student-facing uncertainty guarantees. There are
+zero genuine selected-bank k10 blocks or contiguous ordered 40-question
+matches, so selected-bank score coverage is not evaluated.
+
+The original CUDA/reference `1e-4` parity requirement failed on 87 targets;
+maximum probability gap is 0.00088215. All-target same-CPU full-input versus
+response-blind predictions agree exactly under the tighter `1e-6` check.
+The failed original record remains unchanged, and the precise historical
+reference discrepancy is unresolved. The addendum preceded performance
+analysis and changes no targets, baseline fitting, metrics or bootstrap rules.
+Results are qualified exploratory CPU evidence, not an original-protocol pass.
+
+Next work is historical-generator provenance, independently specified
+cold/error support, and matching conformal calibration/evaluation. A practice
+selection shadow policy remains separately planned and needs suitable content.
+Observed-answer feedback remains independent; no KT/conformal student-advice
+or mastery authority is enabled. The earlier preparation plan below is retained
+as context, not a claim that those deliverables are still wholly unimplemented.
+
+### Original pre-inference deliverables (retained plan)
 
 1. **Selection provenance and freeze.** Use the retained final version and
    certificate hashes; do not rebuild the deleted original proposal or call
@@ -525,3 +585,26 @@ comparison is needed to test whether KT-assisted choices help students.
 No bank switch, automatic progression, student-facing KT/conformal authority,
 or mastery claim is authorized by this plan. Feedback development can proceed
 independently while the research study is prepared.
+
+### Shadow practice wiring (2026-10-06)
+
+`future_kt.py`, `shadow_practice.py` and the DemoService/diag_pool wiring now
+exist as code: an opt-in teacher-only branch that, only when the paired
+`--shadow-practice-pool`/`--shadow-target-band` flags are supplied, runs frozen
+KT future queries over an explicit private practice pool after the 40th answer
+and stores a private shadow recommendation. Observed-evidence feedback and the
+approved demo bank are unchanged; conformal remains historical diagnostics with
+no per-item probability intervals. Native evaluation was pending at initial
+wiring; the small smoke run below is now complete, but no broader study or
+learning benefit is established. See
+[FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md).
+
+A small frozen native smoke ran 2026-10-06 under
+[SHADOW_SMOKE_PROTOCOL.md](SHADOW_SMOKE_PROTOCOL.md) via the separate offline
+research seam (`recommend_research`), not approvals or public serving:
+10 cases (5 per research bank), 20 all-warm-item candidates, 0.60-0.80 band,
+quotas 6/2/6/6; warm 3 selected / 2 abstained, cold 4 selected / 1 abstained,
+none unavailable; sampled blind-vs-full gap 1.1920928955078125e-07 (tolerance
+1e-6); all feedback unchanged. This is a smoke check only, not a validated
+policy or a completed 108-scenario study. Frozen outputs and review:
+`artifacts/shadow_smoke_20261006/` (private, git-ignored).

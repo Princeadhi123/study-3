@@ -41,10 +41,12 @@ from scenario_replays import DEFAULT_SOURCE, ScenarioReplays
 from scenario_runner import generate_responses
 from schemas import SESSION_SCHEMA
 from session_store import SessionStore, bank_fingerprint, utc_now
+from shadow_practice import (
+    ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
 from synthetic_feedback import GENERATION_INSTRUCTIONS, PROMPT_VERSION
 from transport_diagnostics import InstrumentedEvidenceAittaGenerator
 
-DEFAULT_ROOT = phase3_paths.ARTIFACTS / "live_demo_20261002"
+DEFAULT_ROOT = phase3_paths.ARTIFACTS / "live_demo_runtime"
 SESSION_ID_RE = re.compile(r"\A[a-f0-9]{32}\Z")
 META_SCHEMA = "phase3_live_demo_session_meta_v1"
 CHECKPOINT_LENGTHS = {"midpoint": HALF_LENGTH, "end": FULL_LENGTH}
@@ -86,7 +88,21 @@ class DemoService:
                  provider_mode="rules", jev_env_file=None, call_budget=12,
                  provider_timeout=120.0, diagnostics=None,
                  selector=None, generator=None, max_pending_jobs=16,
-                 replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE):
+                 replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE,
+                 practice_pool=None, practice_target_band=None,
+                 recommender=None):
+        # Validate opt-in shadow wiring before any directory/pool/provider
+        # side effects.
+        if (practice_pool is None) != (practice_target_band is None):
+            raise ValueError(
+                "shadow practice requires pool and target band together")
+        if recommender is not None and (
+                practice_pool is not None or practice_target_band is not None):
+            raise ValueError(
+                "injected recommender cannot combine with practice pool/band")
+        if practice_pool is not None:
+            validate_practice_pool(practice_pool)
+            validate_target_band(practice_target_band)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -125,6 +141,12 @@ class DemoService:
                 jev_env_file, call_budget, provider_timeout)
         else:
             self.selector, self.generator = None, None
+        if practice_pool is not None:
+            self.recommender = ShadowPracticeRecommender(
+                practice_pool, practice_target_band,
+                self.diagnostics.predict_future_candidates)
+        else:
+            self.recommender = recommender
         self._recover_interrupted()
         self.replays = ScenarioReplays(self, replay_source)
         # Lazy frozen-model prewarm; serialized on the diagnostics worker.
@@ -169,6 +191,17 @@ class DemoService:
                         checkpoint["diagnostics"] = {
                             "status": "unavailable",
                             "reason": "interrupted_by_restart"}
+                        changed = True
+                    rjob = checkpoint.get("recommendation_job")
+                    if rjob and rjob["status"] == "pending":
+                        rjob["status"] = "unavailable"
+                        rjob["reason"] = "interrupted_by_restart"
+                        checkpoint["recommendation"] = {
+                            "status": "unavailable",
+                            "mode": "shadow_only",
+                            "reason": "interrupted_by_restart",
+                            "used_for_student_advice": False,
+                            "used_for_feedback": False}
                         changed = True
                     diag = checkpoint.get("diagnostics")
                     if (isinstance(diag, dict)
@@ -278,7 +311,9 @@ class DemoService:
                     "baseline_teacher": None, "student_review": None,
                     "teacher_review": None, "provider_job": None,
                     "graph": None, "diagnostics": None,
-                    "diagnostics_job": {"status": "not_requested"}}},
+                    "diagnostics_job": {"status": "not_requested"},
+                    "recommendation": None,
+                    "recommendation_job": {"status": "not_requested"}}},
             "reviews": []}
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None):
@@ -463,6 +498,7 @@ class DemoService:
             self.provider_pool.submit(self._run_provider_job, session_id)
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
         self._admit_diagnostics(session_id, meta, "end", rows)
+        self._admit_recommendation(session_id, meta, rows)
 
     def _admit_diagnostics(self, session_id, meta, checkpoint, rows):
         block = meta["checkpoints"][checkpoint]
@@ -480,6 +516,37 @@ class DemoService:
             "status": "pending", "queued_at": utc_now()}
         self.diag_pool.submit(
             self._run_diagnostics, session_id, checkpoint, rows)
+
+    def _admit_recommendation(self, session_id, meta, rows):
+        """Opt-in private shadow practice pick after the 40th answer."""
+        end = meta["checkpoints"]["end"]
+        if self.recommender is None:
+            end["recommendation_job"] = {
+                "status": "disabled",
+                "reason": "shadow_practice_not_configured",
+                "finished_at": utc_now()}
+            end["recommendation"] = {
+                "status": "disabled", "mode": "shadow_only",
+                "reason": "shadow_practice_not_configured",
+                "used_for_student_advice": False,
+                "used_for_feedback": False}
+            return
+        if self._pending_diag >= self.max_pending_jobs:
+            end["recommendation_job"] = {
+                "status": "unavailable",
+                "reason": "demo_diagnostics_queue_capacity",
+                "finished_at": utc_now()}
+            end["recommendation"] = {
+                "status": "unavailable", "mode": "shadow_only",
+                "reason": "demo_diagnostics_queue_capacity",
+                "used_for_student_advice": False,
+                "used_for_feedback": False}
+            return
+        self._pending_diag += 1
+        end["recommendation_job"] = {
+            "status": "pending", "queued_at": utc_now()}
+        self.diag_pool.submit(
+            self._run_recommendation, session_id, copy.deepcopy(rows))
 
     # ---------------- background jobs ----------------
 
@@ -517,6 +584,47 @@ class DemoService:
                     return
                 meta["checkpoints"][checkpoint]["diagnostics"] = result
                 meta["checkpoints"][checkpoint]["diagnostics_job"] = job
+                self._save_meta(meta)
+        finally:
+            with self.lock:
+                self._pending_diag = max(0, self._pending_diag - 1)
+
+    def _run_recommendation(self, session_id, rows):
+        try:
+            result = self.recommender.recommend(
+                copy.deepcopy(self.bank), copy.deepcopy(self.taxonomy), rows)
+            if not isinstance(result, dict):
+                raise ValueError("invalid recommendation result")
+            result["used_for_student_advice"] = False
+            result["used_for_feedback"] = False
+            status = result.get("status")
+            if status in ("selected", "abstained"):
+                job = {"status": status, "finished_at": utc_now()}
+            else:
+                job = {"status": "unavailable",
+                       "reason": result.get("reason", "unavailable"),
+                       "finished_at": utc_now()}
+                result = {"status": "unavailable", "mode": "shadow_only",
+                          "reason": result.get("reason", "unavailable"),
+                          "used_for_student_advice": False,
+                          "used_for_feedback": False}
+        except Exception:
+            result = {"status": "unavailable", "mode": "shadow_only",
+                      "reason": "future_recommendation_failed",
+                      "used_for_student_advice": False,
+                      "used_for_feedback": False}
+            job = {"status": "unavailable",
+                   "reason": "future_recommendation_failed",
+                   "finished_at": utc_now()}
+        try:
+            with self.lock:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return
+                end = meta["checkpoints"]["end"]
+                end["recommendation"] = result
+                end["recommendation_job"] = job
                 self._save_meta(meta)
         finally:
             with self.lock:
@@ -692,6 +800,8 @@ class DemoService:
                             if self.cache is not None else 0},
             "provider_timeout_seconds": self.provider_timeout,
             "diagnostics": self.diagnostics.state,
+            "shadow_practice": {"enabled": self.recommender is not None,
+                                "mode": "shadow_only"},
             "bank_sha256": bank_fingerprint(self.bank),
             "taxonomy_sha256": canonical_digest(self.taxonomy),
             "policy_version": POLICY_VERSION,

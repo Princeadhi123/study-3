@@ -14,10 +14,11 @@ from evidence_feedback_policy import (
     GENERATION_SCHEMA, POLICY_VERSION, REVIEW_SCHEMA, REVIEW_STATUS,
     SELECTION_SCHEMA, build_candidates, render_message)
 from feedback_service import validate_assessment_taxonomy
-from mcq_test import score_checkpoint
+from mcq_test import score_checkpoint, validate_bank_structure
 from schemas import validate_submission
 from session_store import bank_fingerprint
 from synthetic_feedback import _check_generated_opening
+from test_feed import build_test_feed
 
 EVIDENCE_SCHEMA = "phase3_observed_evidence_v1"
 COUNT_KEYS = {"correct", "incorrect", "out_of"}
@@ -49,6 +50,28 @@ def build_evidence(bank, taxonomy, responses):
     authorization. Its source-of-truth inputs stay local.
     """
     scored = score_checkpoint(bank, responses)
+    return _aggregate_evidence(bank, taxonomy, responses, scored)
+
+
+def build_research_evidence(bank, taxonomy, responses):
+    """Private synthetic scoring of frozen research banks, without serving approval."""
+    if (bank.get("protocol") != "offline_historical_evaluation_bank"
+            or bank.get("review_status") != "independently_math_checked; educator_approval_pending"):
+        raise ValueError("explicit independently checked research bank required")
+    questions = validate_bank_structure(bank)
+    if not isinstance(responses, list) or len(responses) != 40:
+        raise ValueError("research scoring requires 40 synthetic responses")
+    observed = []
+    for index, (row, question) in enumerate(zip(responses, questions)):
+        selected = validate_submission(row, question, index)
+        observed.append({"question_id": question["question_id"],
+                         "skill_id": question["skill_id"],
+                         "correct": selected == question["answer_index"]})
+    scored = build_test_feed(observed, bank["skill_names"])
+    return _aggregate_evidence(bank, taxonomy, responses, scored)
+
+
+def _aggregate_evidence(bank, taxonomy, responses, scored):
     validate_assessment_taxonomy(bank, taxonomy)
     if len(bank["skill_names"]) != 4:
         raise ValueError("feedback requires exactly four assessed skills")

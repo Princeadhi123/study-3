@@ -447,12 +447,13 @@ combinations are feasible, with maximum support sums 910 and 917; the
 other three fail prompt-uniqueness capacity. The independent checks verify
 these bounds, the selected banks, mathematical answers and hashes.
 
-Content/selection checks are complete under these rules; historical KT
-inference, its evaluation protocol, matching conformal evaluation and
-learner-delivery approval are not. Genuine selected-bank ten-question or
-sequential 40-question sessions have not been established. Keep these
-banks private and research-only; the approved demo bank and serving
-defaults are unchanged.
+Content/selection checks are complete under these rules. The separate
+[Phase 4 study](../kt_phase4_evaluation/README.md) now has a frozen protocol,
+actual replay capture and qualified exploratory CPU results. It is not a
+strict original CUDA-reference parity pass or matched new calibration.
+Genuine selected-bank ten-question or sequential 40-question sessions have
+not been established. Keep these banks private and research-only; learner
+approval, the approved demo bank and serving defaults are unchanged.
 
 The retained `global_bank_closed_review_20261005/` directory contains the
 full relevant decision ledger and all-source capacity bounds. The frozen
@@ -462,11 +463,18 @@ The [cleanup receipt](artifacts/evaluation_banks_support_optimal_20261005/cleanu
 records removal of superseded bank/audit folders and preparation outputs;
 removed historical bank reports are not current on-disk evidence.
 
-Next: bind the retained selection/support evidence into the evaluation
-protocol, resolve eligible target events and genuine score-block support,
-then run historical KT evaluation. Define conformal's target separately
-before writing its evaluation code. No fresh selection or inference was
-performed for this documentation update.
+Phase 4 resolved 1,012 targets from 531 students. Warm history KT improves
+AUC from 0.661 to 0.830 and log loss from 0.252 to 0.208; cold history
+benefit is inconclusive with four errors. Historical conformal thresholds
+cover 94.42% of warm responses overall but only 61.90% of incorrect warm
+responses. Do not use overall coverage as intervention-gate validation.
+The original CUDA/cache check failed (87 targets, max gap 0.00088215);
+all-target same-CPU full/blind inputs agree exactly. Read the Phase 4
+protocol, CPU-reference addendum and retained interpretation together.
+Next: resolve historical-generator provenance, specify independent cold/error
+support and matching conformal calibration/evaluation, and consider only a
+separately defined shadow policy. No bank selection or serving switch is
+made by this documentation update.
 
 #### Callable MCQ test path (backend API surface)
 

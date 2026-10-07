@@ -53,11 +53,12 @@ class LiveDiagnostics:
                 return self.state
             self._state = "loading"
             try:
-                if self._model_loader is None:
-                    self._kt = importlib.import_module("frozen_model").load_frozen_model(
-                        device="cpu")
-                else:
-                    self._kt = self._model_loader()
+                if self._kt is None:
+                    if self._model_loader is None:
+                        self._kt = importlib.import_module("frozen_model").load_frozen_model(
+                            device="cpu")
+                    else:
+                        self._kt = self._model_loader()
                 if self._gate_loader is None:
                     phase2_paths = importlib.import_module("paths")
                     gate_class = importlib.import_module("conformal_gate").ConformalGate
@@ -88,9 +89,26 @@ class LiveDiagnostics:
                     raise ValueError("live checkpoints require existing k5/k10 calibrations")
                 self._state = "ready"
             except Exception:
-                self._kt, self._gates = None, None
+                self._gates = None
                 self._state = "unavailable"
             return self.state
+
+    def predict_future_candidates(self, bank, responses, candidates):
+        """Private shadow-path future query over the one frozen model.
+
+        Loads the model through the same strict loader when missing, but
+        never requires conformal gates; a gate outage does not block it.
+        """
+        with self._lock:
+            if self._kt is None:
+                if self._model_loader is None:
+                    self._kt = importlib.import_module("frozen_model").load_frozen_model(
+                        device="cpu")
+                else:
+                    self._kt = self._model_loader()
+            return importlib.import_module(
+                "future_kt").predict_future_candidates(
+                    bank, responses, candidates, self._kt)
 
     def evaluate(self, bank, taxonomy, responses):
         graph = assessment_feedback_graph(bank, taxonomy, responses)

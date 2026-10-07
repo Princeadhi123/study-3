@@ -11,7 +11,7 @@ from session_store import utc_now
 
 
 DEFAULT_REPORT = (Path(__file__).parent / "artifacts" /
-                  "integrated_feedback_20261002_hosted_full" / "report.json")
+                  "integrated_replay_report.json")
 ID_RE = re.compile(r"\A[a-f0-9]{32}\Z")
 PROTOCOL = "phase3_blind_draft_comparison_v1"
 LIMITATION = (
