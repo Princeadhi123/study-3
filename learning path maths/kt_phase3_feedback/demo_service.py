@@ -95,7 +95,7 @@ class DemoService:
                  selector=None, generator=None, max_pending_jobs=16,
                  replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE,
                  practice_pool=None, practice_target_band=None,
-                 recommender=None):
+                 recommender=None, replay_bank_mode="demo"):
         # Validate opt-in shadow wiring before any directory/pool/provider
         # side effects.
         if (practice_pool is None) != (practice_target_band is None):
@@ -113,6 +113,9 @@ class DemoService:
         if recommender is not None and hasattr(recommender, "pool"):
             validate_current_practice_pool(recommender.pool)
             require_augmented_embeddings()
+        if (not isinstance(replay_bank_mode, str)
+                or replay_bank_mode not in BANK_LABELS):
+            raise ValueError("unknown replay bank mode")
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -139,6 +142,9 @@ class DemoService:
                 if default_bank else None,
                 "declared_item_regime": "mixed_frozen_vocabulary",
             }}}
+        self.replay_bank_mode = replay_bank_mode
+        if replay_bank_mode != "demo":
+            self._bank_context(replay_bank_mode)
         self.meta_dir = self.root / "metadata"
         self.meta_dir.mkdir(parents=True, exist_ok=True)
         self.provider_pool = ThreadPoolExecutor(
@@ -390,8 +396,8 @@ class DemoService:
             raise ValueError("provider mode is not configured")
         token = secrets.token_urlsafe(32)
         with self.lock:
-            if replay and bank_mode != "demo":
-                raise ValueError("historical replays require the demo bank")
+            if replay and bank_mode != self.replay_bank_mode:
+                raise ValueError("scenario replays require the configured replay bank")
             context = self._bank_context(bank_mode)
             started = context["mcqs"].start_session()
             session_id = started["session_id"]
@@ -918,6 +924,8 @@ class DemoService:
                             if self.cache is not None else 0},
             "provider_timeout_seconds": self.provider_timeout,
             "diagnostics": self.diagnostics.state,
+            "replay_bank_mode": self.replay_bank_mode,
+            "replay_bank_label": BANK_LABELS[self.replay_bank_mode],
             "shadow_practice": {"enabled": self.recommender is not None,
                                 "mode": "shadow_only"},
             "bank_sha256": bank_fingerprint(self.bank),
@@ -963,12 +971,16 @@ class DemoService:
     def scenario_detail(self, case_id):
         case = self.research.scenario(case_id)
         library = self.research.library()
+        context = self._bank_context(self.replay_bank_mode)
         end_packages = {p["audience"]: p for p in case["packages"] if p["checkpoint"] == "end"}
         evidence = end_packages["student"]["review"]["sanitized_evidence"]
         identity = case_display(case["name"], evidence)
         try:
             responses = self.replays.source_cases()[case_id]
-            rows = self._question_records(responses, library["source"].get("taxonomy_sha256") == canonical_digest(self.taxonomy))
+            rows = self._question_records(
+                responses,
+                library["source"].get("taxonomy_sha256") == canonical_digest(context["taxonomy"]),
+                context)
             response_notice = "Original saved answer sequence joined to the matching private bank."
         except (OSError, ValueError, KeyError, TypeError):
             rows = []
@@ -1007,6 +1019,9 @@ class DemoService:
                                    "generator": package.get("generator_execution")}
         case.update(identity)
         case["detail"] = {"session_id": case_id, "label": case["name"], **identity,
+                          "bank_mode": self.replay_bank_mode,
+                          "bank_label": BANK_LABELS[self.replay_bank_mode],
+                          "content_context": self._teacher_context(self.replay_bank_mode),
                           "status": "complete", "answered_count": 40,
                           "read_only": True, "source_mode": "retained_original",
                           "observed_total": copy.deepcopy(evidence["total"]),
@@ -1016,7 +1031,8 @@ class DemoService:
                           "provider_job": {"status": "ready", "provider_mode": library["policy"].get("provider_mode", "recorded"),
                                            "executions": executions},
                           "provenance": {"report_sha256": library["report_sha256"], "source": library["source"],
-                                         "policy": library["policy"], "mode": "retained_original_not_recomputed"}}
+                                         "policy": library["policy"], "mode": "retained_original_not_recomputed",
+                                         "bank": copy.deepcopy(context["provenance"])}}
         return active_payload(case)
 
     def teacher_session(self, session_id):

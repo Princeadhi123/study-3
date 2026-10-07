@@ -486,12 +486,22 @@ def main(argv=None):
     parser.add_argument("--call-budget", type=int, default=12)
     parser.add_argument("--provider-timeout", type=float, default=120.0)
     parser.add_argument("--teacher-pin")
-    parser.add_argument("--replay-report", type=Path, default=DEFAULT_REPORT)
-    parser.add_argument("--replay-source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--replay-bank-mode", choices=("demo", "warm"),
+                        default="demo")
+    parser.add_argument("--replay-report", type=Path, default=None)
+    parser.add_argument("--replay-source", type=Path, default=None)
     parser.add_argument("--shadow-practice-pool", type=Path)
     parser.add_argument("--shadow-target-band", type=float, nargs=2,
                         metavar=("LOW", "HIGH"))
     args = parser.parse_args(argv)
+    if args.replay_bank_mode == "warm":
+        args.replay_report = args.replay_report or (
+            Path(__file__).parent / "artifacts" / "warm_scenarios_v1" / "report.json")
+        args.replay_source = args.replay_source or (
+            Path(__file__).parent / "artifacts" / "warm_scenarios_v1" / "source.json")
+    else:
+        args.replay_report = args.replay_report or DEFAULT_REPORT
+        args.replay_source = args.replay_source or DEFAULT_SOURCE
     if (args.shadow_practice_pool is None) != (args.shadow_target_band is None):
         parser.error("--shadow-practice-pool and --shadow-target-band "
                      "are required together")
@@ -506,7 +516,8 @@ def main(argv=None):
         provider_timeout=args.provider_timeout, replay_report=args.replay_report,
         replay_source=args.replay_source,
         practice_pool=practice_pool,
-        practice_target_band=args.shadow_target_band)
+        practice_target_band=args.shadow_target_band,
+        replay_bank_mode=args.replay_bank_mode)
     server = make_server(service, pin, host=args.host, port=args.port)
     host, port = server.server_address[:2]
     print(f"Synthetic demo listening at http://{host}:{port}", flush=True)

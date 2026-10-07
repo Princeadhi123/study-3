@@ -249,8 +249,15 @@ python demo_api.py --host 127.0.0.1 --port 8766 --providers rules
 # hosted mode (optional; requires a Jev env file you hold locally)
 python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
   --jev-env-file "C:/path/to/jev.env" --call-budget 12 --provider-timeout 120
+
+# warm research-bank scenario library (rules; stop any running server first)
+python demo_api.py --port 8766 --providers rules --replay-bank-mode warm
 ```
 
+- `--replay-bank-mode warm` serves the retained warm capture in
+  `artifacts/warm_scenarios_v1/`; omitting the flag keeps the original demo
+  library. Replay history is listed per bank mode; `--replay-report` and
+  `--replay-source` override the per-mode defaults.
 - Student: `http://127.0.0.1:8766/` — Teacher: `http://127.0.0.1:8766/teacher`
 - Only loopback hosts are accepted; any other Host or Origin — including a
   direct-Origin browser preview bound to a different port — is
@@ -265,14 +272,15 @@ python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/api/sessions` | POST | create session (`{"synthetic": true}`) |
+| `/api/sessions` | POST | create session (`{"synthetic": true}`, optional `bank_mode`) |
 | `/api/sessions/{sid}` | GET | student snapshot (owner token) |
-| `/api/sessions/{sid}/responses` | POST | submit `{question_id, selected_index}` |
+| `/api/sessions/{sid}/responses` | POST | submit `{question_token, selected_index}` |
+| `/api/banks` | GET | available bank labels and 40-question count |
 | `/api/teacher/unlock` | POST | issue PIN auth cookie |
 | `/api/teacher/logout` | POST | drop teacher cookie |
 | `/api/teacher/config` | GET | mode, diagnostics, call budget |
 | `/api/teacher/sessions` | GET | session list |
-| `/api/teacher/simulations` | POST | `{profile, seed}` synthetic run |
+| `/api/teacher/simulations` | POST | `{profile, seed}`, optional `bank_mode` |
 | `/api/teacher/sessions/{sid}` | GET | private detail (incl. answer keys) |
 | `/api/teacher/sessions/{sid}/export` | GET | JSON export |
 | `/api/teacher/sessions/{sid}/reviews` | POST | record educator review |

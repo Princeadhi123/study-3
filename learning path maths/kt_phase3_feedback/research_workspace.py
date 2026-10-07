@@ -7,6 +7,7 @@ import threading
 from collections import Counter
 from pathlib import Path
 
+from research_runtime import BANK_LABELS
 from session_store import utc_now
 
 
@@ -25,7 +26,11 @@ class ResearchConflict(Exception):
 
 
 SKILL_LABELS = {"Peruslaskutoimitukset": "Arithmetic", "Hinta": "Prices",
-                "Murtoluvut": "Fractions", "Prosenttilaskenta": "Percentages"}
+                "Murtoluvut": "Fractions", "Prosenttilaskenta": "Percentages",
+                "Prosenttilaskuja": "Percentages",
+                "Jaollisuus, tekijät, alkuluvut": "Divisibility, factors and primes",
+                "Samanmuotoisten termien yhdistäminen": "Combining like terms",
+                "Murtolukujen kerto- ja jakolasku": "Fraction multiplication and division"}
 GROUP_LABELS = {"deterministic": "Fixed answer patterns", "seeded": "Sampled answer patterns",
                 "subtopic": "Errors in one subtopic", "distractor": "Wrong-option comparisons"}
 PROFILE_LABELS = {
@@ -41,7 +46,6 @@ PROFILE_LABELS = {
     "all_skills_equal": "Five correct answers in every skill",
     "tied_strongest": "Two skills at 8/10, two at 3/10",
     "tied_weakest": "Two skills at 2/10, two at 8/10",
-    "multiple_weak": "Errors in Arithmetic and Prices only",
     "weak_fractions_only": "Errors in Fractions only",
     "stable_strong": "High correct-answer probability",
     "stable_weak": "Low correct-answer probability",
@@ -49,8 +53,8 @@ PROFILE_LABELS = {
     "learning": "Correct-answer probability increases over time",
     "fatigue": "Correct-answer probability decreases over time",
     "guessing": "Random guessing",
-    "wrong_option_1": "Every answer incorrect — wrong-option set A",
-    "wrong_option_2": "Every answer incorrect — wrong-option set B"}
+    "wrong_option_1": "Alternating correct and incorrect answers — wrong-option set A",
+    "wrong_option_2": "Alternating correct and incorrect answers — wrong-option set B"}
 
 
 def case_display(name, evidence=None):
@@ -58,6 +62,11 @@ def case_display(name, evidence=None):
     match = re.fullmatch(r"(.+)_s(\d+)", name)
     base = match[1] if match else name
     label = PROFILE_LABELS.get(base)
+    if base == "multiple_weak":
+        names = [SKILL_LABELS.get(row.get("skill_name"), row.get("skill_name"))
+                 for row in evidence.get("skills", [])[:2]]
+        if len(names) == 2 and all(names):
+            label = f"Errors in {names[0]} and {names[1]} only"
     if label is None:
         label = base
         for row in evidence.get("skills", []):
@@ -218,7 +227,10 @@ class ResearchWorkspace:
                                  p["review"]["baseline_candidate_id"] !=
                                  p["review"]["selected_candidate_id"] for p in packages)})
             differences = sum(row["selection_differences"] for row in rows)
+            bank_mode = self._report["source"].get("bank_mode", "demo")
             return {"status": "ready", "report_sha256": self._sha256,
+                    "bank_mode": bank_mode,
+                    "bank_label": BANK_LABELS.get(bank_mode, bank_mode),
                     "source": copy.deepcopy(self._report["source"]),
                     "policy": copy.deepcopy(self._report["policy"]),
                     "diagnostic_provenance": copy.deepcopy(self._report.get("diagnostic_provenance", {})),

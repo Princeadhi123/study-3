@@ -103,7 +103,19 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Calculate: 1/2 + 1/4.",
   "Montako prosenttia luku 4 on luvusta 200?":
     "What percentage of 200 is 4?",
+  "Norjalaiset lohik\u00e4\u00e4rmeet harrastavat silmukoiden tekemist\u00e4 ilmassa. Nuoremmat lohik\u00e4\u00e4rmeet osaavat tehd\u00e4 per\u00e4kk\u00e4isi\u00e4 silmukoita luonnollisesti vanhempia enemm\u00e4n. Suurin per\u00e4kk\u00e4isten silmukoiden m\u00e4\u00e4r\u00e4 on 28. Vanhimmat lohik\u00e4\u00e4rmeet tekev\u00e4t silmukoita parhaimmillaan vain nelj\u00e4sosan parhaasta tuloksesta. Kuinka monta silmukkaa vanhat lohik\u00e4\u00e4rmeet tekev\u00e4t per\u00e4kk\u00e4in parhaimmillaan?":
+    "Norwegian dragons practise making loops in the air. Younger dragons can naturally make more consecutive loops than older dragons. The highest number of consecutive loops is 28. At their best, the oldest dragons make only one quarter of that record. What is the greatest number of consecutive loops the old dragons can make?",
 });
+
+/* Presentation only: some frozen source prompts carry literal backslash-n
+   sequences; fold them (and real whitespace) away before display. Does not
+   decode other escapes or alter stored data. */
+function normalizeDisplayText(value) {
+  return String(value ?? "")
+    .replace(/\\r\\n|\\r|\\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 function englishSkillName(name) {
   return Object.prototype.hasOwnProperty.call(ENGLISH_SKILL_NAMES, name)
@@ -111,7 +123,7 @@ function englishSkillName(name) {
 }
 
 function englishQuestionText(question) {
-  const text = (question && question.text) || "";
+  const text = normalizeDisplayText(question && question.text);
   if (Object.prototype.hasOwnProperty.call(ENGLISH_QUESTION_TEXT, text)) {
     return ENGLISH_QUESTION_TEXT[text];
   }
@@ -125,7 +137,7 @@ function englishQuestionText(question) {
 }
 
 function englishOptionText(value) {
-  return String(value)
+  return normalizeDisplayText(value)
     .replace(/(\d),(\d)/g, "$1.$2")
     .replace(/€/g, "EUR");
 }
@@ -437,7 +449,7 @@ function studentPage() {
     $("#q-pos").textContent = question.position;
     $("#q-progress").value = answered;
     const finnish = $("#display-language").value === "fi";
-    $("#q-text").textContent = finnish ? question.text : englishQuestionText(question);
+    $("#q-text").textContent = finnish ? normalizeDisplayText(question.text) : englishQuestionText(question);
     $("#q-skill").textContent = finnish ? question.skill_name : englishSkillName(question.skill_name);
     $("#language-note").textContent = finnish
       ? "Original source wording."
@@ -452,7 +464,7 @@ function studentPage() {
       radio.value = String(index);
       label.appendChild(radio);
       label.appendChild(el("span", `${index + 1}.`, "opt-num"));
-      label.appendChild(el("span", finnish ? option : englishOptionText(option)));
+      label.appendChild(el("span", finnish ? normalizeDisplayText(option) : englishOptionText(option)));
       box.appendChild(label);
     });
     $("#submit-answer").disabled = true;

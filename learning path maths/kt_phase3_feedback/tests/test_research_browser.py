@@ -1,4 +1,6 @@
 import base64
+import contextlib
+import io
 import json
 import os
 import secrets
@@ -12,10 +14,12 @@ from pathlib import Path
 
 from demo_api import make_server
 from demo_service import DemoService
+from research_runtime import load_research_bank
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace
 from tests.helpers import make_bank, make_taxonomy
 from tests.test_demo_service import fake_diagnostics
 from tests.test_scenario_replays import replay_fixture
+from warm_scenarios import write_capture
 
 
 class Browser:
@@ -142,6 +146,57 @@ class ResearchBrowserTests(unittest.TestCase):
     def assert_no_overflow(self):
         self.assertFalse(self.browser.js(
             "document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+
+    def test_warm_54_library_and_selected_replay(self):
+        bank = load_research_bank("warm")[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            source, report = write_capture(self.root / "warm_capture")
+        self.service.close(wait=True)
+        self.service = DemoService(
+            root=self.root / "warm_data", bank=make_bank(),
+            taxonomy=make_taxonomy(make_bank()), diagnostics=fake_diagnostics(bank),
+            replay_report=report, replay_source=source, replay_bank_mode="warm")
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 54")
+        self.assertTrue(b.js("document.querySelector('#library-pane').textContent.includes('Warm research bank')"))
+        self.assertIn("54", b.js("document.querySelector('#replay-all').textContent"))
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=evidence]').click()")
+        b.wait("document.querySelectorAll('#scenario-tab-evidence .qrow').length === 40")
+        prompt = json.dumps({"text": bank["questions"][0]["text"]})
+        self.assertIn(b.js(f"englishQuestionText({prompt})"),
+                      b.js("document.querySelector('#scenario-tab-evidence').textContent"))
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=graph]').click()")
+        graph_text = "document.querySelector('#scenario-tab-graph').textContent"
+        b.wait(f"{graph_text}.includes('Norwegian dragons')")
+        self.assertFalse(b.js(f"{graph_text}.includes('Norjalaiset')"))
+        self.assertFalse(b.js(f"{graph_text}.includes('\\\\n')"))
+        self.assertTrue(b.js(
+            "Boolean([...document.querySelectorAll('#scenario-tab-graph h4')]"
+            ".find((h) => h.textContent === 'Simplify: 5v + 2v'))"))
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete')")
+        run = self.service.replays.list()["runs"][0]
+        self.assertEqual(run["bank_mode"], "warm")
+        self.assertEqual(run["completed"], 1)
+        self.assertEqual(run["failed"], 0)
+        view = self.service.replays.result(run["id"], run["cases"][0]["scenario_id"])
+        self.assertEqual(view["bank_mode"], "warm")
+        self.assertNotIn("conformal", json.dumps(view["checkpoints"]))
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        self.assertEqual(b.errors, [])
 
     def test_selected_filtered_all_replays_and_shared_review_views(self):
         b = self.browser

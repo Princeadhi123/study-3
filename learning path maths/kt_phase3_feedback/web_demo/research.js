@@ -207,6 +207,11 @@ function initResearchWorkspace({mountDetail, getConfig}) {
   function renderLibrary() {
     libraryPane.replaceChildren(heading("RETAINED EXPERIMENTS", "Scenario library",
       "Inspect the retained original or replay the same answers through the current pipeline. Every new run is saved separately."));
+    const bankMode = library.bank_mode || "demo";
+    const bankLabel = library.bank_label || "Demo bank";
+    libraryPane.append(notice(bankMode === "demo"
+      ? `${bankLabel} · 40 questions per scenario.`
+      : `${bankLabel} · 40 questions per scenario. Synthetic research bank pending educator review — not approved for learner delivery.`));
     libraryPane.append(notice("Planning a blind review? Complete it before opening scenario drafts. Prior exposure can bias preferences."));
     libraryPane.append(
       el("p", "Observed answer counts describe this assessment. Model estimates, feedback choices and review judgments remain exploratory."),

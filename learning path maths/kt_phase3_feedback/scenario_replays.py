@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import phase3_paths
+from evidence_feedback import canonical_digest
 from research_workspace import ID_RE, ResearchConflict
 from schemas import validate_submission
 from session_store import bank_fingerprint, utc_now
@@ -40,7 +41,8 @@ class ScenarioReplays:
                  "evidence_feedback.py", "evidence_feedback_policy.py", "evidence_providers.py",
                  "feedback_service.py", "mcq_service.py", "live_diagnostics.py", "kt_adapter.py",
                  "integrated_synthetic_pipeline.py", "replay_provider_scenarios.py",
-                 "jev_selector.py", "aitta_generator.py", "synthetic_feedback.py")
+                 "jev_selector.py", "aitta_generator.py", "synthetic_feedback.py",
+                 "research_runtime.py", "active_payload.py")
         root = Path(__file__).parent
         paths = {name: root / name for name in names}
         paths.update({f"phase2/{name}": phase3_paths.PHASE2_ROOT / name for name in
@@ -66,14 +68,24 @@ class ScenarioReplays:
         library = self.service.research.library()
         if library["status"] != "ready":
             raise ValueError("replay report unavailable")
+        bank_mode = self.service.replay_bank_mode
+        context = self.service._bank_context(bank_mode)
+        bank, taxonomy = context["bank"], context["taxonomy"]
         raw = self.source_path.read_bytes()
         source = json.loads(raw)
         if (not isinstance(source, dict)
+                or library["source"].get("bank_mode", "demo") != bank_mode
+                or source.get("bank_mode", "demo") != bank_mode
                 or hashlib.sha256(raw).hexdigest() != library["source"].get("sha256")
                 or source.get("schema") != "phase3_fixed40_comparison_v1"
                 or source.get("scope") != "private_synthetic_fixed_40_cold_start_not_student_validation"
-                or source.get("bank_sha256") != bank_fingerprint(self.service.bank)
+                or source.get("bank_sha256") != bank_fingerprint(bank)
                 or source["bank_sha256"] != library["source"]["bank_sha256"]):
+            raise ValueError("original response source is missing or incompatible")
+        if bank_mode != "demo" and (
+                source.get("taxonomy_sha256") != canonical_digest(taxonomy)
+                or library["source"].get("taxonomy_sha256") != canonical_digest(taxonomy)
+                or source.get("bank_provenance") != context["provenance"]):
             raise ValueError("original response source is missing or incompatible")
         cases = source["scenarios"]
         by_name = {case["name"]: case for case in cases}
@@ -86,12 +98,12 @@ class ScenarioReplays:
             if len(rows) != 40:
                 raise ValueError("expected forty original responses")
             submissions = []
-            for index, (row, question) in enumerate(zip(rows, self.service.bank["questions"])):
+            for index, (row, question) in enumerate(zip(rows, bank["questions"])):
                 submission = {"question_id": row["question_id"], "selected_index": row["selected_index"]}
                 validate_submission(submission, question, index)
                 submissions.append(submission)
             correct = sum(row["selected_index"] == q["answer_index"] for row, q in
-                          zip(submissions, self.service.bank["questions"]))
+                          zip(submissions, bank["questions"]))
             if correct != item["total"]["correct"]:
                 raise ValueError("saved report disagrees with original responses")
             result[item["id"]] = submissions
@@ -99,7 +111,9 @@ class ScenarioReplays:
 
     def list(self):
         with self.lock:
-            runs = [self._view(self._read(path.stem)) for path in self.directory.glob("*.json")]
+            runs = [self._view(record) for record in
+                    (self._read(path.stem) for path in self.directory.glob("*.json"))
+                    if record.get("bank_mode", "demo") == self.service.replay_bank_mode]
         return {"runs": sorted(runs, key=lambda r: r["created_at"], reverse=True),
                 "restart_required": self.current_code() != self.code,
                 "configured_provider_mode": self.service.provider_mode}
@@ -188,6 +202,7 @@ class ScenarioReplays:
             except (OSError, KeyError, TypeError, ValueError):
                 raise ValueError("original response source unavailable or incompatible") from None
             record = {"id": body["request_id"], "schema": "phase3_scenario_replay_run_v1",
+                      "bank_mode": self.service.replay_bank_mode,
                       "request": copy.deepcopy(body), "created_at": utc_now(), "status": "queued",
                       "report_sha256": body["report_sha256"], "source": library["source"],
                       "code_sha256": self.code, "provider_mode": body["provider_mode"],
@@ -245,7 +260,8 @@ class ScenarioReplays:
                 replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
                           "scenario_name": row["name"], "report_sha256": record["report_sha256"]}
                 created = self.service.create_session(label=row["display_name"], replay=replay,
-                                                      provider_mode=record["provider_mode"])
+                                                      provider_mode=record["provider_mode"],
+                                                      bank_mode=record.get("bank_mode", "demo"))
                 session_id, token = created["session_id"], created["student_token"]
                 with self.lock:
                     record = self._read(run_id)

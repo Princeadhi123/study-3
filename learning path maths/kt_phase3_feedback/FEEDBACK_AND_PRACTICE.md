@@ -270,6 +270,37 @@ v3 mappings and current pool/embedding guards. The frozen-input regression in
 `tests/frozen_transition_manifest.json`, including the original embedding table,
 weights, banks, smoke/comparison results and all three graph captures.
 
+### Warm scenario library
+
+A separate 54-case warm-bank capture lives in the private directory
+`artifacts/warm_scenarios_v1/` (`source.json` answer bindings and
+`report.json` retained drafts and diagnostics). It was generated once with
+`python warm_scenarios.py --with-kt` — frozen KT traces plus rules-only
+feedback, no hosted calls — and the generator refuses to write into an
+existing output directory. The cases reuse the same scenario structure on
+the chosen 40-question warm bank: 20 deterministic patterns, 2 subtopic-error
+cases, 30 seeded profiles, and 2 wrong-option comparisons. Profile names
+describe synthetic answer patterns, not learner diagnoses. The existing
+capture is the retained evidence; do not regenerate it.
+
+To serve the warm library instead of the retained demo library, stop the
+running demo server first (Ctrl+C — one process per port), then from this
+folder:
+
+```powershell
+python demo_api.py --port 8766 --providers rules --replay-bank-mode warm
+```
+
+The teacher page stays at `http://127.0.0.1:8766/teacher`; the PIN is printed
+in the terminal at startup. Omitting `--replay-bank-mode` keeps the retained
+original demo library. Warm source/report hashes are checked against the
+warm bank, and replay history is listed separately per bank mode;
+`--replay-report` and `--replay-source` still override the per-mode
+defaults. The warm report is a rules baseline plus frozen KT traces — no
+hosted provider calls were made, so it is not Jev quality evidence. Jev
+keeps its existing constrained observed-evidence selection role, and no KT,
+graph internals or private bank data enter provider inputs.
+
 Recorded requirements retained for context:
 
 1. **Use the 24-question practice pool for new work.** The accepted pool is
