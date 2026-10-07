@@ -9,12 +9,13 @@ import json
 import unittest
 
 import evidence_feedback
+import research_content_catalog as catalog
 from evidence_feedback import (
     EVIDENCE_SCHEMA, build_evidence, run_feedback, selection_payload,
     validate_evidence)
 from evidence_feedback_policy import (
-    GENERATION_SCHEMA, MIDPOINT_TEXT, POLICY_VERSION, REVIEW_STATUS,
-    SELECTION_SCHEMA)
+    GENERATION_SCHEMA, MIDPOINT_TEXT, POLICY_VERSION, PRACTICE_ACTIONS,
+    REVIEW_STATUS, SELECTION_PROMPT_VERSION, SELECTION_SCHEMA)
 from tests.helpers import make_bank, make_taxonomy, responses
 
 
@@ -312,6 +313,18 @@ class ReviewPolicyTests(unittest.TestCase):
                          "review_sub_sA_second")
         self.assertNotEqual(review_first["message"]["text"],
                             review_second["message"]["text"])
+        # The plans share the parent counts but focus on different
+        # assessed subtopics, so the plans themselves differ.
+        self.assertEqual(review_first["feedback_plan"]["planning"]
+                         ["parent_counts"],
+                         review_second["feedback_plan"]["planning"]
+                         ["parent_counts"])
+        self.assertEqual(review_first["feedback_plan"]["focus"]
+                         ["subtopic_id"], "sub_sA_first")
+        self.assertEqual(review_second["feedback_plan"]["focus"]
+                         ["subtopic_id"], "sub_sA_second")
+        self.assertNotEqual(review_first["feedback_plan"],
+                            review_second["feedback_plan"])
 
     def test_ties_disclosed_without_uniquely_weak_claim(self):
         # Two skills each with two errors: equal count and fraction.
@@ -386,6 +399,243 @@ class ReviewPolicyTests(unittest.TestCase):
                 self.assertTrue(review["requires_human_review"])
                 self.assertEqual(review["status"],
                                  "draft_not_for_learner_delivery")
+
+
+class FeedbackPlanTests(unittest.TestCase):
+    def assert_plan_matches(self, review):
+        plan = review["feedback_plan"]
+        self.assertEqual(set(plan), {
+            "schema", "candidate_id", "strategy", "review_status",
+            "focus", "action", "planning", "kt_used"})
+        self.assertEqual(plan["schema"],
+                         "phase3_observed_feedback_plan_v1")
+        self.assertIs(plan["kt_used"], False)
+        selected = next(c for c in review["candidates"]
+                        if c["candidate_id"]
+                        == review["selected_candidate_id"])
+        for key in ("candidate_id", "strategy", "review_status",
+                    "focus", "action", "planning"):
+            self.assertEqual(plan[key], selected[key])
+        self.assertEqual(review["trace"]["selection_prompt_version"],
+                         SELECTION_PROMPT_VERSION)
+        return plan, selected
+
+    def test_single_error_of_ten_is_isolated_focused_review(self):
+        review = run_feedback(end_evidence({0}), "student", "end")
+        plan, selected = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "review_sub_sA")
+        self.assertEqual(selected["strategy"], "focused_review")
+        self.assertEqual(plan["planning"]["error_pattern"],
+                         "isolated_incorrect_answer")
+        self.assertEqual(plan["planning"]["assessment_coverage"],
+                         "multiple_items")
+        self.assertEqual(plan["planning"]["parent_counts"],
+                         {"correct": 9, "incorrect": 1, "out_of": 10})
+        self.assertIn("limited_evidence", sections(review))
+        self.assertIn("Only one incorrect answer was observed on "
+                      "this content", review["message"]["text"])
+        # The plan is an independent snapshot, not an alias.
+        plan["planning"]["parent_counts"]["correct"] = 0
+        self.assertEqual(review["candidates"][0]["planning"]
+                         ["parent_counts"]["correct"], 9)
+
+    def test_single_question_error_is_single_item_not_supported(self):
+        bank = make_bank()
+        sA_ids = [q["question_id"] for q in bank["questions"]
+                  if q["skill_id"] == "sA"]
+        taxonomy = split_taxonomy(bank, {sA_ids[0]})
+        pos = {q["question_id"]: i
+               for i, q in enumerate(bank["questions"])}
+        evidence = build_evidence(
+            bank, taxonomy, submissions(bank, {pos[sA_ids[0]]}))
+        review = run_feedback(evidence, "student", "end")
+        plan, selected = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "review_sub_sA_first")
+        self.assertEqual(selected["strategy"], "focused_review")
+        self.assertEqual(plan["planning"]["error_pattern"],
+                         "isolated_incorrect_answer")
+        self.assertEqual(plan["planning"]["assessment_coverage"],
+                         "single_item")
+        self.assertEqual(plan["planning"]["parent_counts"],
+                         {"correct": 9, "incorrect": 1, "out_of": 10})
+
+    def test_two_errors_same_subtopic_multiple_with_parent_counts(self):
+        bank, taxonomy = fixture()
+        wrong = set(positions(bank, "sA")[:2])
+        review = run_feedback(build_evidence(bank, taxonomy,
+                                             submissions(bank, wrong)),
+                              "student", "end")
+        plan, _ = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "review_sub_sA")
+        self.assertEqual(plan["planning"]["error_pattern"],
+                         "multiple_incorrect_answers")
+        self.assertEqual(plan["planning"]["assessment_coverage"],
+                         "multiple_items")
+        self.assertEqual(plan["planning"]["parent_counts"],
+                         {"correct": 8, "incorrect": 2, "out_of": 10})
+
+    def test_zero_correct_subtopic_is_supported_review(self):
+        bank, taxonomy = fixture()
+        wrong = set(positions(bank, "sA"))
+        review = run_feedback(build_evidence(bank, taxonomy,
+                                             submissions(bank, wrong)),
+                              "student", "end")
+        plan, selected = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "review_sub_sA")
+        self.assertEqual(selected["strategy"], "supported_review")
+        self.assertTrue(selected["action"].startswith(
+            "Start with a teacher"))
+        self.assertEqual(plan["planning"]["error_pattern"],
+                         "multiple_incorrect_answers")
+        self.assertEqual(plan["planning"]["parent_counts"],
+                         {"correct": 0, "incorrect": 10, "out_of": 10})
+
+    def test_tied_candidates_share_group_and_plan_follows_selector(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sA")[:2])
+                 | set(positions(bank, "sB")[:2]))
+        evidence = build_evidence(bank, taxonomy,
+                                  submissions(bank, wrong))
+        review = run_feedback(
+            evidence, "student", "end",
+            RecordingSelector({"candidate_id": "review_sub_sB"}))
+        plan, _ = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "review_sub_sB")
+        self.assertEqual(review["trace"]["selection_source"],
+                         "injected_selector")
+        tied = ["review_sub_sA", "review_sub_sB"]
+        for candidate in review["candidates"]:
+            self.assertEqual(candidate["planning"]["priority_group"], 1)
+            self.assertEqual(candidate["planning"]["tied_candidate_ids"],
+                             tied)
+
+    def test_equal_counts_different_denominators_differ_in_group(self):
+        bank = make_bank()
+        sA_ids = [q["question_id"] for q in bank["questions"]
+                  if q["skill_id"] == "sA"]
+        pos = {q["question_id"]: i
+               for i, q in enumerate(bank["questions"])}
+        taxonomy = split_taxonomy(bank, sA_ids[:4])
+        wrong = {pos[sA_ids[0]], pos[sA_ids[4]]}
+        evidence = build_evidence(bank, taxonomy,
+                                  submissions(bank, wrong))
+        review = run_feedback(evidence, "student", "end")
+        plans = {c["candidate_id"]: c["planning"]
+                 for c in review["candidates"]}
+        first = plans["review_sub_sA_first"]
+        second = plans["review_sub_sA_second"]
+        self.assertEqual(first["priority_group"], 1)
+        self.assertEqual(second["priority_group"], 2)
+        self.assertEqual(first["tied_candidate_ids"],
+                         ["review_sub_sA_first"])
+        self.assertEqual(second["tied_candidate_ids"],
+                         ["review_sub_sA_second"])
+
+    def test_tampered_planning_is_rejected(self):
+        payload = selection_payload(end_evidence({0, 4}),
+                                    "student", "end")
+
+        def rejected(mutate):
+            bad = copy.deepcopy(payload)
+            mutate(bad)
+            with self.assertRaises(ValueError):
+                evidence_feedback.validate_selection_payload(bad)
+
+        rejected(lambda p: p["candidates"][0]["planning"]
+                 ["parent_counts"].update(incorrect=0))
+        rejected(lambda p: p["candidates"][0]["planning"]
+                 .update(priority_group=9))
+        rejected(lambda p: p["candidates"][0].update(planning=None))
+        rejected(lambda p: p["candidates"][0]["planning"]
+                 .update(kt_estimate=0.9))
+        rejected(lambda p: p["candidates"][0]["planning"]
+                 .update(proposed_support=["divisibility"]))
+        rejected(lambda p: p["candidates"][0]["planning"]
+                 ["tied_candidate_ids"].append("review_sub_sB"))
+        rejected(lambda p: p["candidates"][0].pop("planning"))
+
+    def test_generator_payload_never_carries_plan_or_evidence(self):
+        generator = RecordingGenerator(valid_opening)
+        review = run_feedback(end_evidence({0}), "student", "end",
+                              generator=generator)
+        self.assertEqual(len(generator.payloads), 1)
+        payload = generator.payloads[0]
+        self.assertEqual(set(payload), {"schema", "audience",
+                                        "checkpoint",
+                                        "selected_candidate"})
+        self.assertEqual(set(payload["selected_candidate"]),
+                         {"candidate_id", "strategy", "review_status"})
+        blob = json.dumps(payload)
+        for marker in ('"planning"', '"parent_counts"',
+                       '"feedback_plan"', '"evidence":', '"focus"',
+                       '"action"', '"kt_', '"correct"',
+                       '"out_of"'):
+            self.assertNotIn(marker, blob)
+        self.assertEqual(review["feedback_plan"]["candidate_id"],
+                         "review_sub_sA")
+
+    def test_selector_failure_plan_is_baseline_generator_skipped(self):
+        generator = RecordingGenerator(valid_opening)
+        review = run_feedback(
+            end_evidence({0, 1}), "student", "end",
+            RecordingSelector(RuntimeError("x")), generator)
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "selector_error")
+        self.assertEqual(generator.payloads, [])
+        plan, _ = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"],
+                         review["baseline_candidate_id"])
+        self.assertEqual(plan["candidate_id"],
+                         review["candidates"][0]["candidate_id"])
+
+    def test_neutral_and_consolidation_plans_have_no_focus(self):
+        for audience in ("student", "teacher"):
+            with self.subTest(audience=audience):
+                review = run_feedback(end_evidence(), audience, "end")
+                plan, _ = self.assert_plan_matches(review)
+                self.assertEqual(plan["candidate_id"],
+                                 "optional_consolidation")
+                self.assertIsNone(plan["focus"])
+                self.assertIsNone(plan["planning"])
+        bank, taxonomy = fixture()
+        mid = build_evidence(bank, taxonomy,
+                             submissions(bank, count=20))
+        review = run_feedback(mid, "student", "midpoint")
+        plan, _ = self.assert_plan_matches(review)
+        self.assertEqual(plan["candidate_id"], "neutral")
+        self.assertIsNone(plan["focus"])
+        self.assertIsNone(plan["action"])
+        self.assertIsNone(plan["planning"])
+        self.assertNotIn("review_focus", sections(review))
+
+
+class PracticeActionCoverageTests(unittest.TestCase):
+    def test_all_eight_assessed_concepts_have_authored_actions(self):
+        assessed = {cid for cid, _label, sid in catalog.CONCEPTS if sid}
+        self.assertEqual(len(assessed), 8)
+        self.assertTrue(assessed.issubset(set(PRACTICE_ACTIONS)))
+        for cid in assessed:
+            with self.subTest(concept=cid):
+                self.assertIsInstance(PRACTICE_ACTIONS[cid], str)
+                self.assertGreater(len(PRACTICE_ACTIONS[cid]), 40)
+
+    def test_review_uses_authored_action_not_generic_fallback(self):
+        bank = make_bank()
+        sA_ids = [q["question_id"] for q in bank["questions"]
+                  if q["skill_id"] == "sA"]
+        taxonomy = split_taxonomy(bank, sA_ids[:5])
+        taxonomy["topics"][0]["subtopics"][0].update(
+            id="percentage_amount",
+            name="Calculate a percentage of an amount")
+        pos = {q["question_id"]: i
+               for i, q in enumerate(bank["questions"])}
+        evidence = build_evidence(
+            bank, taxonomy, submissions(bank, {pos[sA_ids[0]]}))
+        review = run_feedback(evidence, "student", "end")
+        self.assertEqual(review["feedback_plan"]["candidate_id"],
+                         "review_percentage_amount")
+        self.assertEqual(review["feedback_plan"]["action"],
+                         PRACTICE_ACTIONS["percentage_amount"])
 
 
 class MidpointTests(unittest.TestCase):

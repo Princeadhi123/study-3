@@ -3,6 +3,14 @@
 The private bank scores answers locally. Only aggregate observed counts enter
 the review/selector seam. Source labels, KT, simulated ability, distractor
 choices, and raw question/answer data cannot determine this feedback.
+
+Each review candidate carries a fixed application-owned ``planning`` block
+(error pattern, coverage, parent counts, priority group, exact ties) built by
+the policy module; the returned review adds ``feedback_plan``, a deep-copied
+``phase3_observed_feedback_plan_v1`` snapshot of the selected candidate with
+``kt_used=False``. Plans are never forwarded to the opening-only generator,
+and providers cannot invent or alter them because the selection payload is
+revalidated against freshly rebuilt candidates before any request.
 """
 import copy
 import hashlib
@@ -12,7 +20,8 @@ import re
 import phase3_paths
 from evidence_feedback_policy import (
     GENERATION_SCHEMA, POLICY_VERSION, REVIEW_SCHEMA, REVIEW_STATUS,
-    SELECTION_SCHEMA, build_candidates, render_message)
+    SELECTION_PROMPT_VERSION, SELECTION_SCHEMA, build_candidates,
+    build_feedback_plan, render_message)
 from feedback_service import validate_assessment_taxonomy
 from mcq_test import score_checkpoint, validate_bank_structure
 from schemas import validate_submission
@@ -306,6 +315,10 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
                 else:
                     selected = matches[0]
                     selection_source = "injected_selector"
+    # Application-owned plan snapshot of the validated selection. Deep-copied
+    # so it cannot alias candidates, evidence, or any callback-owned object,
+    # and it is never included in the narrow generator payload.
+    feedback_plan = copy.deepcopy(build_feedback_plan(selected))
     opening = None
     if generator is not None and not selector_failed:
         generation = {
@@ -337,11 +350,13 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
         "candidates": copy.deepcopy(candidates),
         "baseline_candidate_id": baseline["candidate_id"],
         "selected_candidate_id": selected["candidate_id"],
+        "feedback_plan": feedback_plan,
         "template_baseline": render_message(safe, audience, checkpoint, baseline),
         "message": render_message(safe, audience, checkpoint, selected, opening),
         "requires_human_review": True,
         "trace": {
             "policy_version": POLICY_VERSION,
+            "selection_prompt_version": SELECTION_PROMPT_VERSION,
             "selection_source": selection_source,
             "phrasing_source": phrasing_source,
             "fallback_reason": fallback_reason,

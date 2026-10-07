@@ -301,6 +301,33 @@ hosted provider calls were made, so it is not Jev quality evidence. Jev
 keeps its existing constrained observed-evidence selection role, and no KT,
 graph internals or private bank data enter provider inputs.
 
+### Feedback planning (policy v3)
+
+`evidence_feedback_policy.py` v3 adds an application-owned `planning` block
+to each review candidate, described to the selector by selection prompt
+`jev_observed_subtopic_selection_v2`. It records only observed-count
+structure: whether errors are isolated or multiple, single-item or
+multi-item coverage, the parent assessed-topic counts, the display priority
+group, and the exact tied candidate ids. `run_feedback` now returns a
+`feedback_plan` — a deep-copied `phase3_observed_feedback_plan_v1` snapshot
+of the validated selected candidate with `kt_used=False` — and traces
+`selection_prompt_version`. Validation rebuilds candidates from evidence,
+so provider-side tampering with planning is rejected before any request.
+
+The policy fixes a specific authored practice action for each of the eight
+assessed graph concepts, and a single isolated incorrect answer — including
+a 0/1 one-question case — is now `focused_review` rather than
+`supported_review`, which requires multiple incorrect answers and zero
+correct. No hosted calls were made for this change. The Aitta contract is
+byte-for-byte
+unchanged: it still receives only the narrow opening context, so plans,
+evidence and KT never reach it. KT remains separate teacher-only practice
+research and is never provider feedback evidence. Retained captures and the
+warm report are not rewritten; to see the new plan fields, run a fresh
+rules replay instead of reading the retained baseline. The teacher draft
+message already shows the parent counts and isolated-answer note, so no UI
+redesign was needed.
+
 Recorded requirements retained for context:
 
 1. **Use the 24-question practice pool for new work.** The accepted pool is

@@ -19,7 +19,11 @@ Boundaries:
   cannot reach the wire. The wire state is only the freshly validated
   ``{audience, checkpoint, evidence, candidates}``; the single-choice
   question maps each candidate id to its fixed policy action (or
-  strategy when the candidate carries no action). A single-candidate
+  strategy when the candidate carries no action). Each candidate's
+  ``planning`` block is application-owned policy output: it rides along
+  inside the validated candidates unchanged, and because validation
+  rebuilds the candidates rather than trusting the supplied ones, any
+  tampered planning is rejected before the request. A single-candidate
   payload (midpoint neutral, or all-correct optional consolidation)
   resolves locally without a request.
 - ``EvidenceAittaGenerator`` is a thin translation wrapper around an

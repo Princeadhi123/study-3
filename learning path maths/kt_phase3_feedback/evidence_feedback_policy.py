@@ -6,21 +6,31 @@ this module, and no diagnostic model is used.
 """
 from fractions import Fraction
 
-POLICY_VERSION = "observed_subtopic_feedback_v2"
+POLICY_VERSION = "observed_subtopic_feedback_v3"
 SELECTION_SCHEMA = "phase3_evidence_selection_v1"
 GENERATION_SCHEMA = "phase3_evidence_opening_v1"
 REVIEW_SCHEMA = "phase3_evidence_feedback_review_v1"
 REPORT_SCHEMA = "phase3_evidence_feedback_report_v1"
 REVIEW_STATUS = "draft_pending_educator_review"
-SELECTION_PROMPT_VERSION = "jev_observed_subtopic_selection_v1"
+SELECTION_PROMPT_VERSION = "jev_observed_subtopic_selection_v2"
 GENERATION_PROMPT_VERSION = "evidence_opening_v1"
 
 SELECTION_INSTRUCTIONS = (
     "Choose one supplied candidate for a private synthetic assessment-feedback "
     "review. Each review candidate names an assessed subtopic with observed "
     "incorrect answers and a fixed draft practice action. Choose a manageable "
-    "starting point supported by the counts; prefer repeated observed errors "
-    "over an isolated error when otherwise appropriate. Counts from different "
+    "starting point supported by the counts. Each candidate's planning block "
+    "distinguishes an isolated incorrect answer from multiple incorrect "
+    "answers, gives the parent assessed-topic counts, and lists exact "
+    "priority ties. Prefer multiple observed incorrect answers over an "
+    "isolated answer when otherwise appropriate. A single incorrect answer "
+    "does not establish a consistent difficulty, even when it is the only "
+    "question on that content. Priority groups are display heuristics, not "
+    "mandatory choices or evidence of educational need; tied candidates are "
+    "equally ranked by that heuristic, not uniquely weakest areas. Use the "
+    "assessed task only; do not introduce supporting concepts or explain "
+    "which task step caused an error. KT estimates are not supplied and must "
+    "not be inferred. Counts from different "
     "questions or halves do not establish learning, decline, fatigue, mastery, "
     "a misconception, or prerequisites. Do not invent a candidate, claim an "
     "optimal learning path, or treat the presentation priority as validated "
@@ -48,6 +58,51 @@ PRIORITY_DESCRIPTION = (
 
 # These teach a general method; they do not claim to explain the student's error.
 PRACTICE_ACTIONS = {
+    "percentage_amount": (
+        "Review a worked example of finding a percentage of an amount. "
+        "Identify the whole, express the percentage as a fraction out of "
+        "one hundred or a decimal, and multiply. Try a new amount and "
+        "explain the calculation."
+    ),
+    "divisibility": (
+        "Review a worked example of checking an offered divisor. Divide "
+        "the whole number by the proposed divisor and check whether the "
+        "remainder is zero. Try a new number and check by multiplication."
+    ),
+    "prime_recognition": (
+        "Review the definition of a prime: a whole number greater than "
+        "one with exactly two positive divisors. For a new set of offered "
+        "numbers, identify divisors and explain which number is prime."
+    ),
+    "combine_like_terms": (
+        "Review a worked example of combining like terms. Identify matching "
+        "variable parts, combine their coefficients with the signs shown, "
+        "and retain the variable part. Try a new expression and explain "
+        "which terms can be combined."
+    ),
+    "retain_unlike_terms": (
+        "Review an expression containing unlike variable parts or a "
+        "constant. Explain why these terms cannot be combined into one "
+        "term. Try a new expression and identify which terms must remain "
+        "separate."
+    ),
+    "fraction_product": (
+        "Review a worked example of multiplying two fractions. Multiply "
+        "the numerators and the denominators, then simplify if possible. "
+        "Try a new product and explain each step."
+    ),
+    "fraction_of_quantity": (
+        "Review a worked example of finding a fractional part of a "
+        "quantity. Identify the whole and the requested fraction, then "
+        "multiply the quantity by that fraction. Try a new quantity and "
+        "explain how the wording connects to the calculation."
+    ),
+    "fraction_times_integer": (
+        "Review a worked example of multiplying a fraction by an integer. "
+        "Write the integer as a fraction with denominator one, multiply "
+        "the numerators and denominators, and simplify if possible. Try "
+        "a new product and explain the result."
+    ),
     "arithmetic_order_of_operations": (
         "Review one worked example of order of operations. Mark brackets first, "
         "then multiplication and division from left to right, then addition "
@@ -135,18 +190,21 @@ def candidate_priority(row):
 def build_candidates(evidence, checkpoint):
     if checkpoint == "midpoint":
         return [{"candidate_id": "neutral", "strategy": "neutral_encouragement",
-                 "review_status": REVIEW_STATUS, "focus": None, "action": None}]
+                 "review_status": REVIEW_STATUS, "focus": None, "action": None,
+                 "planning": None}]
     errors = [s for s in evidence["subtopics"] if s["incorrect"]]
     if not errors:
         return [{"candidate_id": "optional_consolidation",
                  "strategy": "optional_consolidation",
-                 "review_status": REVIEW_STATUS, "focus": None,
+                 "review_status": REVIEW_STATUS, "focus": None, "planning": None,
                  "action": (
                      "If you want to continue, choose an assessed topic and "
                      "explain the method for a new example. Ask a teacher to "
                      "check your reasoning before choosing further work."
                  )}]
     candidates = []
+    parents = {row["skill_id"]: row for row in evidence["skills"]}
+    priorities = sorted({candidate_priority(row) for row in errors})
     for row in sorted(errors, key=candidate_priority):
         action = PRACTICE_ACTIONS.get(row["subtopic_id"], (
             f"Review one worked example of {row['subtopic_name']}. "
@@ -154,15 +212,39 @@ def build_candidates(evidence, checkpoint):
             "Compare your method with the explanation or ask a teacher "
             "to check it."
         ))
-        support = row["correct"] == 0
+        support = row["correct"] == 0 and row["incorrect"] > 1
         if support:
             action = ("Start with a teacher or a worked explanation rather "
                       "than a long set of questions. " + action)
         candidates.append({
             "candidate_id": "review_" + row["subtopic_id"],
             "strategy": "supported_review" if support else "focused_review",
-            "review_status": REVIEW_STATUS, "focus": dict(row), "action": action})
+            "review_status": REVIEW_STATUS, "focus": dict(row), "action": action,
+            "planning": {
+                "error_pattern": ("isolated_incorrect_answer"
+                                  if row["incorrect"] == 1
+                                  else "multiple_incorrect_answers"),
+                "assessment_coverage": ("single_item" if row["out_of"] == 1
+                                        else "multiple_items"),
+                "parent_counts": {key: parents[row["skill_id"]][key]
+                                  for key in ("correct", "incorrect", "out_of")},
+                "priority_group": priorities.index(candidate_priority(row)) + 1,
+                "tied_candidate_ids": [
+                    "review_" + other["subtopic_id"] for other in errors
+                    if candidate_priority(other) == candidate_priority(row)],
+            }})
     return candidates
+
+
+def build_feedback_plan(candidate):
+    """Application-owned plan; providers cannot invent its fields or wording."""
+    return {
+        "schema": "phase3_observed_feedback_plan_v1",
+        **{key: candidate[key] for key in (
+            "candidate_id", "strategy", "review_status", "focus", "action",
+            "planning")},
+        "kt_used": False,
+    }
 
 
 def _section(kind, text):
@@ -173,6 +255,13 @@ def _skill_label(row):
     return {
         "Peruslaskutoimitukset": "Arithmetic", "Hinta": "Prices",
         "Murtoluvut": "Fractions", "Prosenttilaskenta": "Percentages",
+        "Prosenttilaskuja": "Percentages",
+        "Jaollisuus, tekij\u00e4t, alkuluvut":
+            "Divisibility, factors and primes",
+        "Samanmuotoisten termien yhdist\u00e4minen":
+            "Combining like terms",
+        "Murtolukujen kerto- ja jakolasku":
+            "Fraction multiplication and division",
     }.get(row["skill_name"], row["skill_name"])
 
 
@@ -232,10 +321,24 @@ def render_message(evidence, audience, checkpoint, candidate, opening=None):
                 "Only one question assessed this content. Check a new example "
                 "before treating it as a consistent difficulty."
             )))
+        elif focus["incorrect"] == 1:
+            sections.append(_section("limited_evidence", (
+                "Only one incorrect answer was observed on this content. "
+                "Check a new example before treating it as a consistent difficulty."
+            )))
         else:
             sections.append(_section("limited_evidence", (
                 "These answers suggest content to revisit, not the cause "
                 "of an error or a confirmed misconception."
+            )))
+        if teacher:
+            parent = candidate["planning"]["parent_counts"]
+            sections.append(_section("parent_observation", (
+                f"Within {_skill_label(focus)}, {parent['correct']} of "
+                f"{parent['out_of']} answers were correct and "
+                f"{parent['incorrect']} were incorrect. The selected focus "
+                "is one assessed part of that topic, not an explanation "
+                "of the topic's incorrect answers."
             )))
         tied = [s for s in evidence["subtopics"]
                 if s["incorrect"] and candidate_priority(s) == candidate_priority(focus)]

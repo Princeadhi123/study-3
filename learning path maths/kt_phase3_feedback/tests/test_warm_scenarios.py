@@ -12,7 +12,9 @@ from pathlib import Path
 
 import phase3_paths
 from demo_service import DemoService
-from evidence_feedback import build_research_evidence, selection_payload
+from evidence_feedback import (
+    build_research_evidence, run_feedback, selection_payload)
+from evidence_feedback_policy import PRACTICE_ACTIONS
 from feedback_service import assessment_feedback_graph
 from live_diagnostics import LiveDiagnostics
 from research_runtime import load_research_bank
@@ -180,3 +182,76 @@ class WarmScenarioTests(unittest.TestCase):
         label = case_display("multiple_weak", evidence)["display_name"]
         self.assertIn("Percentages", label)
         self.assertNotIn("Arithmetic", label)
+
+    def test_warm_feedback_plan_uses_assessed_concepts_and_actions(self):
+        # Incorrect answers on one assessed graph concept; the plan must
+        # carry that concept's fixed action and recomputed parent counts.
+        target = "combine_like_terms"
+        topic = next(t for t in self.taxonomy["topics"]
+                     if any(s["id"] == target for s in t["subtopics"]))
+        subtopic = next(s for s in topic["subtopics"]
+                        if s["id"] == target)
+        concept_qids = set(subtopic["question_ids"])
+        distractor_qid = next(
+            q["question_id"] for q in self.bank["questions"]
+            if q["skill_id"] != topic["skill_id"])
+        rows = []
+        for question in self.bank["questions"]:
+            index = question["answer_index"]
+            if (question["question_id"] in concept_qids
+                    or question["question_id"] == distractor_qid):
+                index = (index + 1) % len(question["options"])
+            rows.append({"question_id": question["question_id"],
+                         "selected_index": index})
+        evidence = build_research_evidence(
+            self.bank, self.taxonomy, rows)
+        review = run_feedback(evidence, "student", "end")
+        plan = review["feedback_plan"]
+        self.assertEqual(plan["schema"],
+                         "phase3_observed_feedback_plan_v1")
+        self.assertIs(plan["kt_used"], False)
+        self.assertEqual(plan["candidate_id"], "review_" + target)
+        self.assertEqual(plan["focus"]["subtopic_id"], target)
+        # All of the concept's questions were missed, so the authored
+        # action is wrapped by the supported-review teacher prefix.
+        self.assertEqual(plan["strategy"], "supported_review")
+        self.assertTrue(plan["action"].startswith(
+            "Start with a teacher"))
+        self.assertTrue(plan["action"].endswith(PRACTICE_ACTIONS[target]))
+        parent = next(s for s in evidence["skills"]
+                      if s["skill_id"] == topic["skill_id"])
+        self.assertEqual(
+            plan["planning"]["parent_counts"],
+            {key: parent[key]
+             for key in ("correct", "incorrect", "out_of")})
+        self.assertEqual(plan["planning"]["parent_counts"],
+                         {"correct": 4, "incorrect": 6, "out_of": 10})
+        self.assertEqual(plan["planning"]["error_pattern"],
+                         "multiple_incorrect_answers"
+                         if len(concept_qids) > 1
+                         else "isolated_incorrect_answer")
+        teacher = run_feedback(evidence, "teacher", "end")
+        teacher_text = teacher["message"]["text"]
+        self.assertIn(
+            "Within Combining like terms, 4 of 10 answers were "
+            "correct and 6 were incorrect.", teacher_text)
+        self.assertNotIn("Samanmuotoisten", teacher_text)
+        # The validated selection wire carries the same planning block
+        # and nothing raw, private, or diagnostic.
+        payload = selection_payload(evidence, "student", "end")
+        opener = FakeOpener(ok_body(choice="review_" + target))
+        self.assertEqual(jev(opener).select(payload),
+                         {"candidate_id": "review_" + target})
+        wire = json.loads(opener.requests[0].data)
+        candidate = next(c for c in wire["state"]["candidates"]
+                         if c["candidate_id"] == "review_" + target)
+        self.assertEqual(candidate["planning"], plan["planning"])
+        blob = opener.requests[0].data.decode("utf-8")
+        for marker in ("question_id", "item_id", "content_text",
+                       "answer_index", "p_correct", "conformal",
+                       "support_link", "possible_error", "kt_"):
+            self.assertNotIn(marker, blob)
+        for question in self.bank["questions"]:
+            self.assertNotIn(question["question_id"], blob)
+            self.assertNotIn(question["item_id"], blob)
+            self.assertNotIn(question["text"], blob)

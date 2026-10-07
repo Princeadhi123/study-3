@@ -101,6 +101,21 @@ class SelectorRequestTests(unittest.TestCase):
         self.assertEqual(set(expected_criteria),
                          {"review_sub_sA", "review_sub_sB"})
 
+    def test_wire_carries_candidate_planning_unchanged(self):
+        opener = FakeOpener(jev_ok_body(choice="review_sub_sA"))
+        payload = selection()
+        jev(opener).select(payload)
+        wire = json.loads(opener.requests[0].data)
+        self.assertEqual(wire["state"]["candidates"],
+                         payload["candidates"])
+        for candidate in wire["state"]["candidates"]:
+            self.assertIsNotNone(candidate["planning"])
+            self.assertEqual(set(candidate["planning"]), {
+                "error_pattern", "assessment_coverage",
+                "parent_counts", "priority_group",
+                "tied_candidate_ids"})
+            self.assertNotIn("kt_used", candidate["planning"])
+
     def test_wire_carries_no_raw_or_diagnostic_fields(self):
         opener = FakeOpener(jev_ok_body(choice="review_sub_sA"))
         jev(opener).select(selection("teacher", "end"))
@@ -184,6 +199,27 @@ class SelectorValidationTests(unittest.TestCase):
         payload = selection("teacher", "end")
         payload["checkpoint"] = "midpoint"
         self.assert_rejected_without_request(payload)
+
+    def test_rejects_tampered_planning_before_request(self):
+        mutations = [
+            lambda p: p["candidates"][0]["planning"]
+            ["parent_counts"].update(incorrect=0),
+            lambda p: p["candidates"][0]["planning"]
+            .update(priority_group=9),
+            lambda p: p["candidates"][0].update(planning=None),
+            lambda p: p["candidates"][0].pop("planning"),
+            lambda p: p["candidates"][0]["planning"]
+            .update(kt_estimate=0.9),
+            lambda p: p["candidates"][0]["planning"]
+            .update(proposed_support=["divisibility"]),
+            lambda p: p["candidates"][0]["planning"]
+            ["tied_candidate_ids"].append("review_sub_sC"),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                payload = selection()
+                mutate(payload)
+                self.assert_rejected_without_request(payload)
 
 
 class SelectorFailureTests(unittest.TestCase):
