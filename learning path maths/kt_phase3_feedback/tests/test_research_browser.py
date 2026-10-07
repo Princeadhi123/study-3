@@ -194,6 +194,42 @@ class ResearchBrowserTests(unittest.TestCase):
         view = self.service.replays.result(run["id"], run["cases"][0]["scenario_id"])
         self.assertEqual(view["bank_mode"], "warm")
         self.assertNotIn("conformal", json.dumps(view["checkpoints"]))
+        # The applied feedback plan is readable in the decision panel, not
+        # only inside raw candidate JSON. The overview "What changed" block
+        # only exists on a replayed version, so it confirms the detail view
+        # has switched to the fresh replay result.
+        pane = "document.querySelector('#scenario-tab-feedback')"
+        overview = "document.querySelector('#scenario-tab-overview')"
+        b.wait(f"{overview}.textContent.includes('What changed')")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
+        b.wait(f"{pane}.textContent.includes('Applied feedback plan')")
+        kt_dd = (f"[...{pane}.querySelectorAll('.feedback-plan dt')]"
+                 ".find((n) => n.textContent === 'KT used')")
+        self.assertEqual(b.js(f"{kt_dd}.nextElementSibling.textContent"), "No")
+        # A replay with observed errors shows the full planning block.
+        b.js("document.querySelector('#scenario-search').value='Every answer incorrect';"
+             "document.querySelector('#scenario-search').dispatchEvent(new Event('input'))")
+        b.wait("document.querySelectorAll('.scenario-row').length === 1")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Replay history (2)')")
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete')")
+        # The version picker selects the new run once its detail is loaded.
+        b.wait("document.querySelector('#scenario-version').options.length === 2"
+               " && document.querySelector('#scenario-version').value !== ''")
+        b.wait(f"{overview}.textContent.includes('What changed')")
+        b.wait(f"{pane}.textContent.includes('Multiple incorrect answers')")
+        self.assertTrue(b.js(f"{pane}.textContent.includes('Multiple assessed items')"))
+        self.assertTrue(b.js(f"{pane}.textContent.includes('Percentages \\u2014 0 correct, 10 incorrect of 10')"))
+        self.assertTrue(b.js(f"{pane}.textContent.includes('1 of 5')"))
+        self.assertTrue(b.js(f"{pane}.textContent.includes('Tied candidates')"))
+        self.assertTrue(b.js(f"{pane}.textContent.includes('review_percentage_amount')"))
+        self.assertTrue(b.js(f"{pane}.querySelector('.decision-table')"
+                             ".textContent.includes('Multiple incorrect answers')"))
         b.viewport(390, 844)
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])

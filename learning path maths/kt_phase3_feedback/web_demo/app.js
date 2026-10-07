@@ -190,6 +190,25 @@ const NULL_FOCUS_LABELS = {
   neutral: "Neutral checkpoint feedback",
   optional_consolidation: "Optional consolidation"};
 
+const ERROR_PATTERN_LABELS = {
+  isolated_incorrect_answer: "Isolated incorrect answer",
+  multiple_incorrect_answers: "Multiple incorrect answers"};
+
+const COVERAGE_LABELS = {
+  single_item: "Single assessed item",
+  multiple_items: "Multiple assessed items"};
+
+function candidatePattern(planning) {
+  if (!planning) return "—";
+  const pattern = ERROR_PATTERN_LABELS[planning.error_pattern] ||
+    planning.error_pattern || "—";
+  const coverage = planning.assessment_coverage === "single_item"
+    ? "single item"
+    : planning.assessment_coverage === "multiple_items"
+      ? "multiple items" : (planning.assessment_coverage || "—");
+  return `${pattern} · ${coverage}`;
+}
+
 function focusLabel(candidate, id) {
   if (!candidate) return "Recorded candidate not found";
   const focus = candidate.focus || null;
@@ -310,6 +329,48 @@ function renderSelectionDecision(audience, review, baseline,
     put("Fallback reason", String(trace.fallback_reason));
   }
   card.appendChild(rows);
+
+  const plan = review && review.feedback_plan;
+  if (plan) {
+    card.appendChild(el("h5",
+      "Applied feedback plan — recorded before generation",
+      "plan-heading"));
+    const planRows = el("dl", null, "decision-kv feedback-plan");
+    const pput = (key, value) => {
+      planRows.appendChild(el("dt", key));
+      planRows.appendChild(el("dd", value));};
+    const planning = plan.planning || null;
+    pput("Error pattern", planning
+        ? (ERROR_PATTERN_LABELS[planning.error_pattern] ||
+           String(planning.error_pattern))
+        : "—");
+    pput("Assessment coverage", planning
+        ? (COVERAGE_LABELS[planning.assessment_coverage] ||
+           String(planning.assessment_coverage))
+        : "—");
+    const parent = planning && planning.parent_counts;
+    pput("Parent topic", parent
+        ? `${englishSkillName(plan.focus && plan.focus.skill_name) || "—"} — ` +
+          `${parent.correct} correct, ${parent.incorrect} ` +
+          `incorrect of ${parent.out_of}`
+        : "—");
+    const groups = new Set(candidates
+        .map((c) => c.planning && c.planning.priority_group)
+        .filter((v) => v !== null && v !== undefined));
+    pput("Priority group", planning
+        ? `${planning.priority_group} of ${groups.size || "?"}`
+        : "—");
+    const ties = (planning && planning.tied_candidate_ids) || [];
+    pput("Tied candidates",
+        planning ? (ties.join(", ") || "None") : "—");
+    pput("Strategy", plan.strategy || "—");
+    pput("KT used", plan.kt_used ? "Yes" : "No");
+    card.appendChild(planRows);
+    card.appendChild(el("p",
+      "The application records this plan before any generated opening. " +
+      "It is not a diagnosis and does not explain why answers were " +
+      "incorrect.", "meta small"));
+  }
   card.appendChild(el("p",
     "These are review options for this session, not simulation " +
     "profiles. Counts support offering an option; no validated " +
@@ -320,8 +381,8 @@ function renderSelectionDecision(audience, review, baseline,
   table.appendChild(el("caption",
     "Review options — applied selection vs rules baseline"));
   const head = el("tr");
-  ["Review option", "Incorrect / assessed",
-   "Applied selection", "Rules baseline"]
+  ["Review option", "Incorrect / assessed", "Observed pattern",
+   "Priority", "Applied selection", "Rules baseline"]
     .forEach((h) => head.appendChild(el("th", h)));
   table.appendChild(head);
   candidates.forEach((c) => {
@@ -330,6 +391,9 @@ function renderSelectionDecision(audience, review, baseline,
     tr.appendChild(el("td", focusLabel(c, c.candidate_id)));
     tr.appendChild(el("td", focus
         ? `${focus.incorrect} / ${focus.out_of}` : "—"));
+    tr.appendChild(el("td", candidatePattern(c.planning)));
+    tr.appendChild(el("td",
+        c.planning ? String(c.planning.priority_group) : "—"));
     tr.appendChild(el("td",
         c.candidate_id === appliedId ? "Selected" : ""));
     tr.appendChild(el("td",
