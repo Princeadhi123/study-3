@@ -19,7 +19,7 @@
   </div>
 </header>
 <main id="student-root" tabindex="-1">
-  <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Feedback is a draft requiring educator review, not approved learner advice.</p>
+  <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Final feedback is shown only after an educator reviews and releases it.</p>
   <p id="student-error" class="error" role="alert" hidden></p>
   <p id="session-bank" class="meta"></p>
   <label for="display-language">Question display</label>
@@ -31,7 +31,7 @@
   <section id="start-panel" class="card assessment-intro" hidden>
     <p class="eyebrow">EXPLORE THE ASSESSMENT EXPERIENCE</p>
     <h2>A small assessment.<br>A closer look at the evidence.</h2>
-    <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then explore the observed results and draft feedback at the end.</p>
+    <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then receive final feedback after your teacher reviews and releases it.</p>
     <div class="assessment-facts"><div><strong>40</strong><span>Ordered questions</span></div><div><strong>4</strong><span>Mathematics skills</span></div><div><strong>2</strong><span>Checkpoints</span></div></div>
     <label for="bank-mode">Assessment bank — 40 questions in one selected bank</label>
     <select id="bank-mode">
@@ -69,12 +69,13 @@
 
   <section id="end-panel" class="card" hidden>
     <h2>Assessment complete</h2>
-    <p class="meta">Provider draft status:
+    <p class="meta">Feedback status:
       <span id="job-status" class="chip"></span></p>
     <div id="end-summary"></div>
     <div id="end-sections"></div>
-    <p class="meta small">This draft has not been reviewed by an
-    educator.</p>
+    <p class="meta small">Final feedback appears once an educator has
+    reviewed and released it. Synthetic demo only — release does not
+    certify the research bank or authorize practice delivery.</p>
     <button id="new-session" class="ghost">Start a new session</button>
   </section>
 

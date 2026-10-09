@@ -62,6 +62,19 @@ SIMULATION_PROFILES = (
     "first_half_correct_second_half_wrong", "alternating")
 PUBLIC_QUESTION_KEYS = (
     "skill_id", "text", "options")
+TEMPLATE_VERSION = "phase3_student_feedback_template_v1"
+FINAL_TEMPLATE_GROUPS = (
+    ("assessment_summary", "Assessment summary",
+     ("completion", "observed_result")),
+    ("observed_strengths", "Observed strengths",
+     ("observed_highlight", "balanced_result", "support")),
+    ("review_focus", "Review focus",
+     ("review_focus", "optional_review", "limited_evidence",
+      "parent_observation", "tie", "other_options", "scope")),
+    ("next_steps", "Next steps", ("next_action",)))
+_TEMPLATE_KIND_GROUP = {
+    kind: group for group, _title, kinds in FINAL_TEMPLATE_GROUPS
+    for kind in kinds}
 
 
 class ConflictError(Exception):
@@ -388,7 +401,8 @@ class DemoService:
                     "diagnostics_job": {"status": "not_requested"},
                     "recommendation": None,
                     "recommendation_job": {"status": "not_requested"}}},
-            "reviews": []}
+            "reviews": [],
+            "feedback_release": None}
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
                        bank_mode="demo"):
@@ -463,28 +477,57 @@ class DemoService:
     def _student_feedback(self, session_id, meta, checkpoint):
         """Return the student-visible draft message for a checkpoint."""
         block = meta["checkpoints"][checkpoint]
-        review = None
-        if checkpoint == "end":
-            job = meta["provider_job"]
-            # A stored student result is safe to show even when the
-            # aggregate job fell back because the teacher leg failed.
-            if (job["status"] in ("ready", "fallback")
-                    and block.get("student_review") is not None):
-                review = block["student_review"]
-            if review is None:
-                review = block["baseline_student"]
-        else:
-            review = block["baseline_student"]
+        review = block["baseline_student"]
         if review is None:
             return None
         message = review["message"]
-        if checkpoint == "midpoint":
-            return {"sections": copy.deepcopy(message["sections"]),
-                    "text": message["text"]}
-        evidence = block.get("evidence") or {}
+        return {"sections": copy.deepcopy(message["sections"]),
+                "text": message["text"]}
+
+    def _final_preview(self, meta):
+        session = self._context_for(meta)["mcqs"].private_record(
+            meta["session_id"])
+        if session["status"] != "complete":
+            return None
+        end = meta["checkpoints"]["end"]
+        job = meta["provider_job"]
+        # A stored student result is safe to show even when the
+        # aggregate job fell back because the teacher leg failed.
+        review = None
+        if (job["status"] in ("ready", "fallback")
+                and end.get("student_review") is not None):
+            review = end["student_review"]
+        if review is None:
+            review = end.get("baseline_student")
+        evidence = end.get("evidence")
+        if review is None or evidence is None:
+            return None
+        message = review.get("message") or {}
+        raw = message.get("sections") or [
+            {"kind": "completion", "text": message.get("text", "")}]
+        grouped = {kind: [] for kind, _t, _k in FINAL_TEMPLATE_GROUPS}
+        for section in raw:
+            grouped[_TEMPLATE_KIND_GROUP.get(
+                section.get("kind"), "review_focus")].append(
+                section.get("text", ""))
+        if not grouped["next_steps"]:
+            action = (review.get("feedback_plan") or {}).get("action")
+            if action is None:
+                selected = review.get("selected_candidate_id")
+                for cand in review.get("candidates") or []:
+                    if cand.get("candidate_id") == selected:
+                        action = cand.get("action")
+                        break
+            if action:
+                grouped["next_steps"].append(action)
+        sections = [{
+            "kind": kind, "title": title,
+            "text": "\n\n".join(t for t in grouped[kind] if t)}
+            for kind, title, _k in FINAL_TEMPLATE_GROUPS]
         return {
-            "sections": copy.deepcopy(message["sections"]),
-            "text": message["text"],
+            "template_version": TEMPLATE_VERSION,
+            "sections": sections,
+            "text": "\n\n".join(s["text"] for s in sections if s["text"]),
             "total": {"correct": evidence["total"]["correct"],
                       "out_of": evidence["total"]["out_of"]},
             "skills": [
@@ -495,10 +538,25 @@ class DemoService:
                 for row in evidence["skills"]],
             "requires_educator_review": True}
 
+    @staticmethod
+    def _delivery_status(session, meta):
+        if session["status"] != "complete":
+            return "not_ready"
+        if meta.get("feedback_release"):
+            return "released"
+        return "awaiting_teacher_review"
+
     def _public_snapshot(self, session_id, meta=None):
         if meta is None:
             meta = self._load_meta(session_id)
         session = self._context_for(meta)["mcqs"].private_record(session_id)
+        status = self._delivery_status(session, meta)
+        delivery = {"status": status}
+        released = None
+        if status == "released":
+            release = meta["feedback_release"]
+            released = copy.deepcopy(release["released_feedback"])
+            delivery["released_at"] = release["released_at"]
         return {
             "session_id": session_id,
             "synthetic": True,
@@ -506,11 +564,17 @@ class DemoService:
             "bank_label": BANK_LABELS[meta.get("bank_mode", "demo")],
             "status": session["status"],
             "answered_count": len(session["responses"]),
+            "assessment_total": (
+                {"correct": sum(row["correct"]
+                                for row in session["responses"]),
+                 "out_of": len(session["responses"])}
+                if session["status"] == "complete" else None),
             "current_question": self._current_question(session, meta),
             "feedback": {
                 "midpoint": self._student_feedback(
                     session_id, meta, "midpoint"),
-                "end": self._student_feedback(session_id, meta, "end")},
+                "end": released},
+            "feedback_delivery": delivery,
             "provider_job": {
                 "status": meta["provider_job"]["status"],
                 "provider_mode": meta["provider_job"]["provider_mode"]}}
@@ -1062,6 +1126,24 @@ class DemoService:
                     and isinstance(diagnostics.get("kt"), dict)):
                 provenance["diagnostics"] = copy.deepcopy(
                     diagnostics["kt"].get("provenance", {}))
+            preview = self._final_preview(meta)
+            delivery = {
+                "status": self._delivery_status(session, meta),
+                "preview": preview,
+                "preview_sha256": (canonical_digest(preview)
+                                   if preview is not None else None),
+                "released_feedback": None,
+                "released_at": None,
+                "reviewer_label": None}
+            release = meta.get("feedback_release")
+            if release:
+                delivery.update({
+                    "released_feedback": copy.deepcopy(
+                        release["released_feedback"]),
+                    "released_at": release["released_at"],
+                    "reviewer_label": release["reviewer_label"],
+                    "released_preview_sha256":
+                        release["preview_sha256"]})
             return active_payload({
                 "session_id": session_id,
                 "bank_mode": meta.get("bank_mode", "demo"),
@@ -1084,6 +1166,7 @@ class DemoService:
                 "review_contract": self.teacher_config()["review_contract"],
                 "reviews": copy.deepcopy(meta["reviews"]),
                 "provider_job": copy.deepcopy(meta["provider_job"]),
+                "feedback_delivery": delivery,
                 "provenance": provenance})
 
     @staticmethod
@@ -1152,6 +1235,50 @@ class DemoService:
             if meta.get("replay"):
                 self.replays.sync_reviews(session_id, meta["reviews"])
             return {"recorded": True, "review": copy.deepcopy(entry)}
+
+    def release_feedback(self, session_id, body):
+        if (not isinstance(body, dict)
+                or not set(body) <= {"message_sha256", "reviewer_label"}
+                or "message_sha256" not in body):
+            raise ValueError("release body has unexpected fields")
+        digest = body["message_sha256"]
+        if (not isinstance(digest, str)
+                or len(digest) != 64 or any(
+                    ch not in "0123456789abcdef" for ch in digest)):
+            raise ValueError("message_sha256 must be a sha256 hex digest")
+        reviewer = _strict_text(
+            body.get("reviewer_label", "anonymous"), "reviewer_label", 80)
+        with self.lock:
+            meta = self._load_meta(session_id)
+            session = self._context_for(meta)["mcqs"].private_record(
+                session_id)
+            if session["status"] != "complete":
+                raise ValueError(
+                    "release requires a completed session")
+            preview = self._final_preview(meta)
+            if preview is None:
+                raise ConflictError("feedback is not ready for release")
+            current = canonical_digest(preview)
+            if current != digest:
+                raise ConflictError(
+                    "stale feedback revision", current=current)
+            existing = meta.get("feedback_release")
+            if existing and existing["preview_sha256"] == current:
+                return {"released": True,
+                        "released_at": existing["released_at"],
+                        "preview_sha256": current}
+            payload = copy.deepcopy(preview)
+            payload["requires_educator_review"] = False
+            meta["feedback_release"] = {
+                "released_feedback": payload,
+                "released_at": utc_now(),
+                "reviewer_label": reviewer,
+                "preview_sha256": current}
+            self._save_meta(meta)
+            return {"released": True,
+                    "released_at":
+                        meta["feedback_release"]["released_at"],
+                    "preview_sha256": current}
 
     # ---------------- simulation ----------------
 

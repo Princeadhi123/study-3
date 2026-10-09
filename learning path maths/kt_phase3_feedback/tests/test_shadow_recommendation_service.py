@@ -241,7 +241,18 @@ class RecommendationWiringTests(ServiceCase):
         self.assertEqual(end["recommendation"]["used_for_feedback"], False)
         self.assertIsNotNone(end["baseline_teacher"])
         self.assertEqual(len(set(texts)), 1)
-        self.assertIsNotNone(failing.snapshot(sid, token)["feedback"]["end"])
+        public = failing.snapshot(sid, token)
+        self.assertIsNone(public["feedback"]["end"])
+        self.assertEqual(public["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        self.assertNotIn("recommendation", json.dumps(public))
+        sha = failing.teacher_session(sid)[
+            "feedback_delivery"]["preview_sha256"]
+        failing.release_feedback(sid, {"message_sha256": sha})
+        released = failing.snapshot(sid, token)["feedback"]["end"]
+        self.assertIn(texts[-1].split("\n\n")[0], released["text"])
+        self.assertNotIn("recommendation",
+                         json.dumps(failing.snapshot(sid, token)))
 
     def test_forced_privacy_flags_on_injected_result(self):
         leaky = copy.deepcopy(SELECTED_RESULT)

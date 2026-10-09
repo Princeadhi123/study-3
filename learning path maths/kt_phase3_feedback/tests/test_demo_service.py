@@ -177,7 +177,9 @@ class DemoServiceTests(unittest.TestCase):
         self.assertEqual(
             service._load_meta(sid)["provider_job"]["status"],
             "pending")
-        self.assertIsNotNone(snapshot["feedback"]["end"])
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
         gate.set()
         self.assertTrue(wait_for(
             lambda: service._load_meta(sid)["provider_job"]["status"]
@@ -358,8 +360,19 @@ class DemoServiceTests(unittest.TestCase):
         snapshot = service.snapshot(sid, token)
         self.assertEqual(snapshot["provider_job"]["status"],
                          "fallback")
-        self.assertEqual(snapshot["feedback"]["end"]["text"],
-                         student_review["message"]["text"])
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        view = service.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        for section in student_review["message"]["sections"]:
+            self.assertIn(section["text"],
+                          delivery["preview"]["text"])
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["text"], delivery["preview"]["text"])
+        self.assertFalse(released["requires_educator_review"])
 
     def test_diagnostics_receive_admission_snapshot_rows(self):
         release = threading.Event()
@@ -712,6 +725,299 @@ class DemoServiceTests(unittest.TestCase):
             self.service.add_review(sid, {
                 "audience": "student", "message_sha256": digest,
                 "judgments": missing, "note": ""})
+
+    def _preview_sha(self, sid):
+        return self.service.teacher_session(sid)[
+            "feedback_delivery"]["preview_sha256"]
+
+    def test_incomplete_session_has_no_preview_or_release(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        snapshot = self.submit_n(sid, token, 20)
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "not_ready")
+        view = self.service.teacher_session(sid)
+        self.assertIsNone(view["feedback_delivery"]["preview"])
+        self.assertIsNone(view["feedback_delivery"]["preview_sha256"])
+        with self.assertRaises(ValueError):
+            self.service.release_feedback(
+                sid, {"message_sha256": "a" * 64})
+
+    def test_completed_end_hidden_until_release(self):
+        created = self.create()
+        sid2, token2 = created["session_id"], created["student_token"]
+        self.complete(sid2, token2)
+        self.wait_job(sid2)
+        snapshot = self.service.snapshot(sid2, token2)
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        blob = json.dumps(snapshot)
+        for marker in ("preview_sha256", "released_feedback",
+                       "reviewer_label", "p_correct", "answer_index"):
+            self.assertNotIn(marker, blob)
+        view = self.service.teacher_session(sid2)
+        preview = view["feedback_delivery"]["preview"]
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_template_v1")
+        self.assertTrue(preview["requires_educator_review"])
+        result = self.service.release_feedback(sid2, {
+            "message_sha256": view["feedback_delivery"]["preview_sha256"],
+            "reviewer_label": "teacher-a"})
+        self.assertTrue(result["released"])
+        snapshot = self.service.snapshot(sid2, token2)
+        end = snapshot["feedback"]["end"]
+        self.assertEqual(end["template_version"],
+                         "phase3_student_feedback_template_v1")
+        self.assertFalse(end["requires_educator_review"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "released")
+        meta = self.service._load_meta(sid2)
+        self.assertEqual(meta["feedback_release"]["reviewer_label"],
+                         "teacher-a")
+        after = self.service.teacher_session(sid2)["feedback_delivery"]
+        self.assertEqual(after["preview_sha256"],
+                         after["released_preview_sha256"])
+        self.assertNotIn("reviewer_label",
+                         json.dumps(snapshot["feedback_delivery"]))
+
+    def test_review_note_alone_never_releases(self):
+        created = self.create()
+        sid2, token2 = created["session_id"], created["student_token"]
+        self.complete(sid2, token2)
+        self.wait_job(sid2)
+        view = self.service.teacher_session(sid2)
+        self.service.add_review(sid2, {
+            "audience": "student",
+            "message_sha256": view["review_hashes"]["student"],
+            "judgments": self.judgments(), "note": "checked"})
+        snapshot = self.service.snapshot(sid2, token2)
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+
+    def test_template_four_fixed_headings_and_wording(self):
+        cases = {
+            "all_correct": responses(self.bank, count=40),
+            "all_incorrect": responses(self.bank, correct=False,
+                                       count=40)}
+        tied = responses(self.bank, count=40)
+        for index in (0, 10):
+            row = tied[index]
+            q = self.bank["questions"][index]
+            tied[index] = {"question_id": row["question_id"],
+                           "selected_index":
+                               (q["answer_index"] + 1) % 3}
+        cases["tied"] = tied
+        titles = ["Assessment summary", "Observed strengths",
+                  "Review focus", "Next steps"]
+        for name, rows in cases.items():
+            created = self.create()
+            sid, token = (created["session_id"],
+                          created["student_token"])
+            last = None
+            for row in rows:
+                last = self.service.submit_response(sid, token, row)
+            self.wait_job(sid)
+            preview = self.service.teacher_session(sid)[
+                "feedback_delivery"]["preview"]
+            self.assertEqual([s["title"] for s in preview["sections"]],
+                             titles, name)
+            self.assertTrue(all(s["text"] for s in
+                                preview["sections"]), name)
+            meta = self.service._load_meta(sid)
+            review = (meta["checkpoints"]["end"]["student_review"]
+                      or meta["checkpoints"]["end"]["baseline_student"])
+            for section in review["message"]["sections"]:
+                self.assertIn(section["text"], preview["text"], name)
+            self.assertIsNone(last["feedback"]["end"])
+
+    def test_assessment_total_absent_until_complete(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        self.assertIsNone(created["snapshot"]["assessment_total"])
+        mid = self.submit_n(sid, token, 20)
+        self.assertIsNone(mid["assessment_total"])
+        self.assertIsNone(
+            self.service.snapshot(sid, token)["assessment_total"])
+
+    def test_assessment_total_counts_observed_answers(self):
+        alternating = responses(self.bank, count=40)
+        for index in range(1, 40, 2):
+            question = self.bank["questions"][index]
+            alternating[index] = {
+                "question_id": question["question_id"],
+                "selected_index": (question["answer_index"] + 1) % 3}
+        for rows, expected in (
+                (responses(self.bank, count=40), 40),
+                (responses(self.bank, correct=False, count=40), 0),
+                (alternating, 20)):
+            created = self.create()
+            sid, token = (created["session_id"],
+                          created["student_token"])
+            last = None
+            for row in rows:
+                last = self.service.submit_response(sid, token, row)
+            self.assertEqual(last["assessment_total"],
+                             {"correct": expected, "out_of": 40})
+            self.assertIsNone(last["feedback"]["end"])
+            snap = self.service.snapshot(sid, token)
+            self.assertEqual(snap["assessment_total"],
+                             {"correct": expected, "out_of": 40})
+            blob = json.dumps(snap)
+            for marker in ("skills", "preview", "reviewer"):
+                self.assertNotIn(marker, blob)
+
+    def test_assessment_total_immediate_while_provider_pending(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        selector = BlockingSelector(gate)
+        service = self._service(
+            provider_mode="hosted",
+            selector=selector,
+            generator=FakeGenerator())
+        self.addCleanup(service.close)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        last = None
+        for row in responses(self.bank, correct=False, count=40):
+            last = service.submit_response(sid, token, row)
+        self.assertEqual(last["assessment_total"],
+                         {"correct": 0, "out_of": 40})
+        self.assertIsNone(last["feedback"]["end"])
+        self.assertTrue(wait_for(lambda: selector.calls >= 1))
+        self.assertEqual(
+            service._load_meta(sid)["provider_job"]["status"],
+            "pending")
+        view = service.teacher_session(sid)
+        service.release_feedback(sid, {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"]})
+        snap = service.snapshot(sid, token)
+        self.assertEqual(snap["assessment_total"],
+                         {"correct": 0, "out_of": 40})
+        self.assertIsNotNone(snap["feedback"]["end"])
+
+    def test_release_rejects_extra_or_stale_fields(self):
+        sid = self.finish_ready()
+        sha = self._preview_sha(sid)
+        with self.assertRaises(ValueError):
+            self.service.release_feedback(sid, {
+                "message_sha256": sha, "text": "client supplied"})
+        with self.assertRaises(ValueError):
+            self.service.release_feedback(sid, {})
+        with self.assertRaises(ValueError):
+            self.service.release_feedback(sid, {
+                "message_sha256": "zz" + "0" * 62})
+        with self.assertRaises(ConflictError) as ctx:
+            self.service.release_feedback(sid, {
+                "message_sha256": "0" * 64})
+        self.assertEqual(ctx.exception.current, sha)
+
+    def test_repeated_release_preserves_timestamp(self):
+        sid = self.finish_ready()
+        sha = self._preview_sha(sid)
+        first = self.service.release_feedback(
+            sid, {"message_sha256": sha})
+        second = self.service.release_feedback(
+            sid, {"message_sha256": sha})
+        self.assertEqual(first["released_at"], second["released_at"])
+
+    def test_baseline_release_survives_later_provider_result(self):
+        gate = threading.Event()
+        selector = BlockingSelector(gate)
+        service = self._service(
+            provider_mode="hosted", selector=selector,
+            generator=FakeGenerator())
+        self.addCleanup(service.close)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(self.bank, correct=False, count=40):
+            service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(lambda: selector.calls >= 1))
+        view = service.teacher_session(sid)
+        baseline_sha = view["feedback_delivery"]["preview_sha256"]
+        service.release_feedback(sid, {"message_sha256": baseline_sha})
+        baseline_release = service._load_meta(sid)["feedback_release"]
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "ready"))
+        snapshot = service.snapshot(sid, token)
+        self.assertEqual(snapshot["feedback"]["end"],
+                         baseline_release["released_feedback"])
+        view = service.teacher_session(sid)
+        new_sha = view["feedback_delivery"]["preview_sha256"]
+        self.assertNotEqual(new_sha, baseline_sha)
+        again = service.release_feedback(
+            sid, {"message_sha256": new_sha})
+        self.assertTrue(again["released"])
+        updated = service._load_meta(sid)["feedback_release"]
+        self.assertEqual(updated["preview_sha256"], new_sha)
+        self.assertEqual(updated["released_feedback"]["text"],
+                         view["feedback_delivery"]["preview"]["text"])
+
+    def test_release_persists_across_restart(self):
+        created = self.create()
+        sid2, token2 = created["session_id"], created["student_token"]
+        self.complete(sid2, token2)
+        self.wait_job(sid2)
+        sha = self._preview_sha(sid2)
+        self.service.release_feedback(sid2, {"message_sha256": sha})
+        released = self.service._load_meta(sid2)["feedback_release"]
+        self.service.close(wait=True)
+        restarted = self._service()
+        snapshot = restarted.snapshot(sid2, token2)
+        self.assertEqual(snapshot["feedback"]["end"],
+                         released["released_feedback"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "released")
+        self.assertEqual(restarted.teacher_session(sid2)
+                         ["feedback_delivery"]["released_at"],
+                         released["released_at"])
+        restarted.close()
+        self.service = restarted
+
+    def test_old_metadata_without_release_stays_unreleased(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        self.complete(sid, token)
+        self.wait_job(sid)
+        path = Path(self.tmp.name) / "metadata" / f"{sid}.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        del meta["feedback_release"]
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        snapshot = self.service.snapshot(sid, token)
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+
+    def test_queue_capacity_fallback_preview_can_be_released(self):
+        gate = threading.Event()
+        selector = BlockingSelector(gate)
+        service = self._service(
+            provider_mode="hosted", selector=selector,
+            generator=FakeGenerator(), max_pending_jobs=1)
+        self.addCleanup(service.close)
+        first = service.create_session()
+        for row in responses(self.bank, correct=False, count=40):
+            service.submit_response(
+                first["session_id"], first["student_token"], row)
+        self.assertTrue(wait_for(lambda: selector.calls >= 1))
+        second = service.create_session()
+        sid2, token2 = second["session_id"], second["student_token"]
+        for row in responses(self.bank, correct=False, count=40):
+            service.submit_response(sid2, token2, row)
+        view = service.teacher_session(sid2)
+        sha = view["feedback_delivery"]["preview_sha256"]
+        service.release_feedback(sid2, {"message_sha256": sha})
+        snapshot = service.snapshot(sid2, token2)
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "released")
+        self.assertIsNotNone(snapshot["feedback"]["end"])
+        gate.set()
 
     # ---------- simulation ----------
 

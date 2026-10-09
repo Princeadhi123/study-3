@@ -17,7 +17,7 @@ from demo_service import DemoService
 from research_runtime import load_research_bank
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace
 from tests.helpers import make_bank, make_taxonomy
-from tests.test_demo_service import fake_diagnostics
+from tests.test_demo_service import fake_diagnostics, wait_for
 from tests.test_scenario_replays import replay_fixture
 from warm_scenarios import write_capture
 
@@ -306,28 +306,12 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#scenario-search')")
         expected = 54 if DEFAULT_REPORT.is_file() else 4
         self.assertEqual(b.js("document.querySelectorAll('.scenario-row').length"), expected)
-        guide = "document.querySelector('#research-readiness')"
-        self.assertTrue(b.js(f"Boolean({guide})"))
-        self.assertFalse(b.js(f"{guide}.open"))
+        self.assertFalse(b.js("Boolean(document.querySelector('#research-readiness'))"))
+        self.assertEqual(b.js("document.querySelectorAll('.readiness-card').length"), 0)
         library_text = "document.querySelector('#library-pane').textContent"
         self.assertTrue(b.js(f"{library_text}.includes('Observed answer counts describe this assessment')"))
         self.assertTrue(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
-        b.js(f"{guide}.querySelector('summary').click()")
-        self.assertTrue(b.js(f"{guide}.open"))
-        for heading in ["Knowledge tracing",
-                        "Feedback focus and draft wording", "Skill map and subtopics",
-                        "Synthetic scenarios and replay", "Blind educator comparison"]:
-            self.assertTrue(b.js(f"{guide}.textContent.includes({json.dumps(heading)})"), heading)
-        self.assertEqual(b.js(f"{guide}.querySelectorAll('.readiness-card').length"), 5)
-        self.assertFalse(b.js(f"{guide}.textContent.toLowerCase().includes('conformal')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('Why research-only')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('Next step')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('Recorded predictive evaluation on ViLLE data already exists')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('fixed 40-question session setting')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('selected partly using cold-item evaluation scores')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('not a diagnosis or a readiness score')"))
-        self.assertTrue(b.js(f"{guide}.textContent.includes('Before real learner use')"))
-        self.assertFalse(b.js(f"Boolean({guide}.querySelector('svg'))"))
+        self.assertFalse(b.js("document.querySelector('#library-pane').textContent.toLowerCase().includes('conformal')"))
         self.assertFalse(b.js("Boolean(document.querySelector('.scenario-row.active'))"))
         try:
             exposure_before = b.js("sessionStorage.getItem('replay-exposure')")
@@ -335,22 +319,16 @@ class ResearchBrowserTests(unittest.TestCase):
             exposure_before = None
         self.assertNotEqual(exposure_before, "yes")
         self.assert_no_overflow()
-        b.js(f"{guide}.scrollIntoView({{block:'start'}})")
-        b.screenshot("research-readiness-open-desktop.png")
+        b.screenshot("scenario-library-without-guidance-desktop.png")
         b.viewport(390, 844)
         self.assert_no_overflow()
-        b.js(f"{guide}.scrollIntoView({{block:'start'}})")
-        b.screenshot("research-readiness-open-mobile.png")
-        b.js("[...document.querySelectorAll('#research-readiness .readiness-card')].find(c => c.textContent.includes('Skill map')).scrollIntoView({block:'center'})")
-        b.screenshot("research-readiness-skill-map-mobile.png")
+        b.screenshot("scenario-library-without-guidance-mobile.png")
         b.viewport(1440, 1100)
         b.js("document.querySelector('[data-workspace=live]').click()")
         b.wait("document.querySelector('#live-pane') && !document.querySelector('#live-pane').hidden")
         b.js("document.querySelector('[data-workspace=library]').click()")
-        b.wait(f"Boolean({guide})")
-        self.assertTrue(b.js(f"{guide}.open"))
-        b.js(f"{guide}.querySelector('summary').click()")
-        self.assertFalse(b.js(f"{guide}.open"))
+        b.wait("document.querySelector('#scenario-search')")
+        self.assertFalse(b.js("Boolean(document.querySelector('#research-readiness'))"))
         b.js("document.querySelector('.scenario-row').click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
         self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 6)
@@ -421,7 +399,81 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("!document.querySelector('#end-panel').hidden")
         b.viewport(390, 844)
         self.assert_no_overflow()
-        self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('40')"))
+        self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('your teacher is reviewing your feedback')"))
+        self.assertFalse(b.js("document.querySelector('#end-summary').textContent.includes('Observed result')"))
+        self.assertEqual(b.errors, [])
+
+    def test_teacher_release_gates_student_feedback(self):
+        b = self.browser
+        result = self.service.simulate("alternating", 5)
+        sid = result["session_id"]
+        self.navigate(result["student_url"])
+        b.wait("!document.querySelector('#end-panel').hidden")
+        summary = "document.querySelector('#end-summary').textContent"
+        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        self.assertTrue(b.js(f"{summary}.includes('You answered 20 of 40 questions correctly.')"))
+        self.assertFalse(b.js(f"{summary}.includes('Observed result')"))
+        self.assertFalse(b.js("document.querySelector('#end-summary .feedback-section')"))
+        self.assertFalse(b.js("document.querySelector('#end-summary .skill-list')"))
+        self.navigate(result["student_url"])
+        b.wait(f"{summary}.includes('You answered 20 of 40 questions correctly.')")
+        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        b.screenshot("student-total-awaiting-release.png")
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        view = self.service.teacher_session(sid)
+        self.service.release_feedback(sid, {
+            "message_sha256": view["feedback_delivery"]["preview_sha256"],
+            "reviewer_label": "browser-reviewer"})
+        b.wait(f"{summary}.includes('Assessment summary')")
+        self.assertTrue(b.js(f"{summary}.includes('reviewed and released')"))
+        student_text = b.js(
+            "[...document.querySelectorAll('#end-summary > *')]"
+            ".slice(1).map((n) => n.textContent).join('')")
+        b.screenshot("student-released-feedback.png")
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        b.wait(f"Boolean({release})")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        self.assertFalse(b.js(f"{release}.textContent.includes('changed after approval')"))
+        self.assertTrue(b.js(f"{release}.textContent.includes('browser-reviewer')"))
+        preview_text = b.js(
+            "[...document.querySelectorAll('#tab-feedback .feedback-preview > *')]"
+            ".map((n) => n.textContent).join('')")
+        self.assertEqual(preview_text, student_text)
+        const_btn = "document.querySelector('#tab-feedback .release-card button.primary')"
+        self.assertEqual(b.js(f"{const_btn}.textContent"), "Already released")
+        self.assertTrue(b.js(f"{const_btn}.disabled"))
+        b.screenshot("teacher-released-no-change.png")
+        second = self.service.simulate("all_incorrect", 6)
+        b.wait("document.querySelectorAll('#session-list button').length === 2")
+        b.js("document.querySelectorAll('#session-list button')[0].click()")
+        b.wait(f"{release}.textContent.includes('Awaiting educator review')")
+        b.js("const ri=document.querySelector('#release-reviewer'); ri.value='browser-reviewer'; ri.dispatchEvent(new Event('input'))")
+        b.wait(f"!{const_btn}.disabled")
+        b.js(f"{const_btn}.click()")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        self.assertFalse(b.js(f"{release}.textContent.includes('changed after approval')"))
+        self.navigate(second["student_url"])
+        b.wait(f"{summary}.includes('Assessment summary')")
+        b.screenshot("student-released-incorrect.png")
+        self.navigate("/teacher")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
+        b.wait("document.querySelectorAll('#scenario-tab-feedback .compare .col').length === 4")
+        self.assertFalse(b.js("Boolean(document.querySelector('#scenario-tab-feedback .release-card'))"))
         self.assertEqual(b.errors, [])
 
     def test_warm_cold_bank_ui_tokens_translation_and_teacher_context(self):
@@ -450,7 +502,13 @@ class ResearchBrowserTests(unittest.TestCase):
                           else (question["answer_index"] + 1) % len(question["options"]))
                 b.js(f"document.querySelector('#q-options input[value=\"{chosen}\"]').click(); document.querySelector('#submit-answer').click()")
             b.wait("!document.querySelector('#end-panel').hidden")
-            self.assertIn("20 of 40", b.js("document.querySelector('#end-summary').textContent"))
+            b.wait("document.querySelector('#end-summary').textContent.includes('reviewing your feedback')")
+            sid = self.service.list_sessions()[0]["session_id"]
+            view = self.service.teacher_session(sid)
+            self.service.release_feedback(sid, {
+                "message_sha256":
+                    view["feedback_delivery"]["preview_sha256"]})
+            b.wait("document.querySelector('#end-summary').textContent.includes('20 of 40')")
             b.js("document.querySelector('#new-session').click(); document.querySelector('#display-language').value='en'")
             b.wait("!document.querySelector('#start-panel').hidden")
         self.navigate("/teacher")

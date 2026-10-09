@@ -184,6 +184,8 @@ class DemoAPITests(unittest.TestCase):
         status, available, _ = self.request("GET", "/api/banks")
         self.assertEqual(status, 200)
         self.assertEqual({b["bank_mode"] for b in available["banks"]}, {"demo", "warm", "cold"})
+        _, _, unlock_meta = self.unlock()
+        cookie = self.cookie_from(unlock_meta)
         for mode in ("warm", "cold"):
             bank, _, _ = load_research_bank(mode)
             status, created, _ = self.request(
@@ -202,8 +204,24 @@ class DemoAPITests(unittest.TestCase):
                     {"question_token": question["question_token"], "selected_index": chosen},
                     headers={"X-Demo-Session-Token": token})
                 self.assertEqual(status, 200)
-            self.assertEqual(snap["feedback"]["end"]["total"], {"correct": 20, "out_of": 40})
+            self.assertIsNone(snap["feedback"]["end"])
+            self.assertEqual(snap["feedback_delivery"]["status"],
+                             "awaiting_teacher_review")
             self.assertEqual(snap["status"], "complete")
+            status, view, _ = self.teacher_get(
+                f"/api/teacher/sessions/{sid}", cookie)
+            self.assertEqual(status, 200)
+            preview_sha = view["feedback_delivery"]["preview_sha256"]
+            status, released, _ = self.request(
+                "POST", f"/api/teacher/sessions/{sid}/release",
+                {"message_sha256": preview_sha},
+                headers={"Cookie": f"demo_teacher={cookie}"})
+            self.assertEqual(status, 200)
+            status, snap, _ = self.request(
+                "GET", f"/api/sessions/{sid}",
+                headers={"X-Demo-Session-Token": token})
+            self.assertEqual(snap["feedback"]["end"]["total"], {"correct": 20, "out_of": 40})
+            self.assertEqual(snap["feedback_delivery"]["status"], "released")
         for mode in ("merged", None, [], 40):
             status, _, _ = self.request(
                 "POST", "/api/sessions", {"synthetic": True, "bank_mode": mode})
@@ -473,6 +491,92 @@ class DemoAPITests(unittest.TestCase):
                       meta.get("Content-Disposition", ""))
         self.assertNotIn("demo_teacher", json.dumps(exported))
         self.assertNotIn(cookie, json.dumps(exported))
+
+    def test_release_requires_teacher_cookie(self):
+        sid = self.finish_session()
+        for headers in ({}, {"X-Demo-Session-Token": "x"},
+                        {"X-Phase3-Role": "researcher"}):
+            status, _, _ = self.request(
+                "POST", f"/api/teacher/sessions/{sid}/release",
+                {"message_sha256": "0" * 64}, headers=headers)
+            self.assertEqual(status, 403, headers)
+
+    def test_release_flow_and_validation_over_http(self):
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": "0" * 64},
+            headers={"Cookie": "demo_teacher=" + self._fresh_cookie()})
+        self.assertEqual(status, 400)
+        self.submit_all(sid, token)
+        cookie = self._fresh_cookie()
+
+        def ready():
+            status, view, _ = self.teacher_get(
+                f"/api/teacher/sessions/{sid}", cookie)
+            if status == 200 and (
+                    view["provider_job"]["status"]
+                    in ("ready", "fallback")):
+                return view
+            return None
+
+        self.assertTrue(wait_for(ready))
+        view = ready()
+        sha = view["feedback_delivery"]["preview_sha256"]
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": "0" * 64},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 409)
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": sha, "sections": []},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 400)
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": sha, "reviewer_label": "ed-1"},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["released"])
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(snap["feedback_delivery"]["status"], "released")
+        end = snap["feedback"]["end"]
+        self.assertEqual(
+            end["template_version"],
+            "phase3_student_feedback_template_v1")
+        self.assertEqual([s["title"] for s in end["sections"]],
+                         ["Assessment summary", "Observed strengths",
+                          "Review focus", "Next steps"])
+        self.assertFalse(end["requires_educator_review"])
+        blob = json.dumps(snap)
+        for marker in ("p_correct", "preview_sha256", "ed-1",
+                       "reviewer_label"):
+            self.assertNotIn(marker, blob)
+
+    def _fresh_cookie(self):
+        _, _, meta = self.unlock()
+        return self.cookie_from(meta)
+
+    def test_completed_snapshot_shows_total_without_teacher_cookie(self):
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        payload = self.submit_all(sid, token)
+        self.assertEqual(payload["assessment_total"],
+                         {"correct": 40, "out_of": 40})
+        self.assertIsNone(payload["feedback"]["end"])
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(status, 200)
+        self.assertEqual(snap["assessment_total"],
+                         {"correct": 40, "out_of": 40})
+        self.assertIsNone(snap["feedback"]["end"])
+        self.assertEqual(snap["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
 
     def test_research_routes_require_teacher_cookie(self):
         for method, path, body in (

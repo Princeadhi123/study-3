@@ -155,55 +155,6 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     } catch (err) { library = null; failure(libraryPane, loadLibrary); }
   }
 
-  const READINESS_CARDS = [
-    ["Knowledge tracing (KT)",
-      "Predicts answer correctness using a frozen model trained on real ViLLE learner interactions. Recorded predictive evaluation on ViLLE data already exists.",
-      "Existing predictive results do not establish mastery or performance and probability calibration in this fixed 40-question session setting. The deployed checkpoint was selected partly using cold-item evaluation scores, so that split is not an untouched final test.",
-      "Audit existing ViLLE sessions for suitable held-out answers to the selected source questions, with only preceding history available to each prediction. Evaluate fixed-assessment prediction and probability calibration on an appropriate evaluation set not used for training or model selection; collect new learner data only if existing data cannot support the intended claim."],
-    ["Feedback focus and draft wording",
-      "Rules or Jev choose a review focus; Aitta can supply an opening. Observed evidence constrains the draft.",
-      "The rules ranking is a presentation heuristic. Provider choices and educator preferences do not establish educational benefit; reused captures are not independent trials.",
-      "Collect independent educator reviews of evidence support and usability, then evaluate learner outcomes in an approved supervised study. Prepare reviewed practice activities; the assessment bank is not a practice bank."],
-    ["Skill map and subtopics",
-      "Groups assessed questions into skills and descriptive subtopics.",
-      "The map does not establish prerequisites, misconceptions or an optimal learning path. Small counts cannot support broad diagnoses.",
-      "Have mathematics educators review the taxonomy and question mappings; investigate any prerequisite claims separately."],
-    ["Synthetic scenarios and replay",
-      "Resubmits synthetic answer patterns on 40 questions selected from the source mathematics inventory to inspect changes in scores, diagnostics and feedback.",
-      "The scenarios are selected stress tests, not independent students. Random seeds and increasing or decreasing simulated probabilities do not demonstrate real learning, guessing or fatigue.",
-      "Use replay for regression testing and inspection. Plan a consented, privacy-reviewed learner study before making real-world claims."],
-    ["Blind educator comparison",
-      "Collects source-masked preferences and evidence-support judgments for retained drafts.",
-      "This is a pilot protocol, not a validated benchmark. Prior exposure, writing style, repeated reviewers, correlated scenarios and reused captures can affect judgments.",
-      "Review and preregister the protocol and analysis, validate the review rubric, and recruit independent educators before making comparative claims."]];
-
-  function researchReadinessGuide() {
-    const details = el("details", null, "readiness-guide");
-    details.id = "research-readiness";
-    details.append(el("summary", "Research status & next steps"));
-    const body = el("section", null, "readiness-body");
-    body.append(el("h3", "Research status & next steps", "visually-hidden"));
-    body.append(el("p", "Project-wide guidance, not a diagnosis or a readiness score for this scenario.", "meta"));
-    const grid = el("div", null, "readiness-grid");
-    READINESS_CARDS.forEach(([title, what, why, next]) => {
-      const card = el("article", null, "readiness-card");
-      card.append(el("h4", title));
-      const fields = el("dl", null, "readiness-fields");
-      [["What it does", what], ["Why research-only", why], ["Next step", next]].forEach(([term, text]) => {
-        fields.append(el("dt", term), el("dd", text));
-      });
-      card.append(fields);
-      grid.append(card);
-    });
-    body.append(grid);
-    const closing = el("div", null, "readiness-close");
-    closing.append(el("h4", "Before real learner use"),
-      el("p", "Educator approval and privacy review are still required. Local demo authentication and JSON storage are not production security; real access controls, TLS and durable storage remain future work.", "meta"));
-    body.append(closing);
-    details.append(body);
-    return details;
-  }
-
   function renderLibrary() {
     libraryPane.replaceChildren(heading("RETAINED EXPERIMENTS", "Scenario library",
       "Inspect the retained original or replay the same answers through the current pipeline. Every new run is saved separately."));
@@ -215,8 +166,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     libraryPane.append(notice("Planning a blind review? Complete it before opening scenario drafts. Prior exposure can bias preferences."));
     libraryPane.append(
       el("p", "Observed answer counts describe this assessment. Model estimates, feedback choices and review judgments remain exploratory."),
-      el("p", "All scenarios are synthetic test cases, not real learners. Replaying them tests software changes; it does not validate learning or mastery."),
-      researchReadinessGuide());
+      el("p", "All scenarios are synthetic test cases, not real learners. Replaying them tests software changes; it does not validate learning or mastery."));
     const summary = library.summary;
     const metrics = el("div", null, "metrics-grid");
     metrics.append(metric(summary.scenarios, "Saved scenarios", "Chosen stress-test cases"),

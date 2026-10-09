@@ -404,6 +404,33 @@ function renderSelectionDecision(audience, review, baseline,
   return card;
 }
 
+function renderStructuredFeedback(container, payload) {
+  if (!payload) return;
+  if (payload.total) {
+    container.appendChild(el("p",
+      `Observed result: ${payload.total.correct} of ` +
+      `${payload.total.out_of} answers correct on this assessment.`,
+      "score"));
+  }
+  if (payload.skills && payload.skills.length) {
+    const list = el("ul", null, "skill-list");
+    payload.skills.forEach((skill) => {
+      list.appendChild(el("li",
+        `${englishSkillName(skill.skill_name)}: ${skill.correct} / ` +
+        `${skill.out_of} observed`));
+    });
+    container.appendChild(list);
+  }
+  (payload.sections || []).forEach((section) => {
+    const box = el("div", null, "feedback-section");
+    if (section.title) box.appendChild(el("h3", section.title));
+    String(section.text || "").split("\n\n").forEach((part) => {
+      if (part) box.appendChild(el("p", part, "sec"));
+    });
+    container.appendChild(box);
+  });
+}
+
 /* ============================ STUDENT ============================ */
 
 function studentPage() {
@@ -538,24 +565,31 @@ function studentPage() {
   }
 
   function renderEnd(snapshot) {
+    const delivery = snapshot.feedback_delivery || {};
     $("#job-status").textContent =
-      `${snapshot.provider_job.status} (${snapshot.provider_job.provider_mode})`;
+      delivery.status === "released" ? "Released by your teacher"
+      : delivery.status === "awaiting_teacher_review"
+        ? "Awaiting teacher review"
+        : statusLabel(snapshot.provider_job.status);
     const end = snapshot.feedback && snapshot.feedback.end;
     const summary = $("#end-summary");
     summary.replaceChildren();
+    $("#end-sections").replaceChildren();
     if (end) {
       summary.appendChild(el("p",
-        `Observed result: ${end.total.correct} of ${end.total.out_of} ` +
-        `answers correct on this assessment.`, "score"));
-      const list = el("ul", null, "skill-list");
-      end.skills.forEach((skill) => {
-        list.appendChild(el("li",
-          `${englishSkillName(skill.skill_name)}: ${skill.correct} / ${skill.out_of} observed`));
-      });
-      summary.appendChild(list);
-      renderMessage($("#end-sections"), end);
-    }
-    if (snapshot.provider_job.status === "pending") {
+        "Your teacher has reviewed and released this feedback.",
+        "boundary-note"));
+      renderStructuredFeedback(summary, end);
+    } else {
+      const total = snapshot.assessment_total;
+      if (total) {
+        summary.appendChild(el("p",
+          `You answered ${total.correct} of ${total.out_of} ` +
+          `questions correctly.`, "score"));
+      }
+      summary.appendChild(el("p",
+        "Assessment complete—your teacher is reviewing your feedback.",
+        "boundary-note"));
       schedule(POLL_MS);
     }
   }
@@ -880,6 +914,7 @@ function createDetailView(root, options = {}) {
   let detail = null, selected = null, tab = "overview", researchCp = "end", lastAudience = "student";
   let contract = null;
   const drafts = new Map();   // "sid:audience" -> draft state
+  const releaseDrafts = new Map();
   let reviewRenderKey = null; // rebuild review form only when this changes
   // scopeKey -> Map(disclosureKey -> open). Scope is derived from the
   // pane's last rendered scope so a session/checkpoint switch never
@@ -1264,9 +1299,133 @@ function createDetailView(root, options = {}) {
     pane.appendChild(card);
   }
 
+  function releaseDraftFor(sid) {
+    if (!releaseDrafts.has(sid)) {
+      releaseDrafts.set(sid, {label: "", sending: false, note: null});
+    }
+    return releaseDrafts.get(sid);
+  }
+
+  function renderReleaseCard(pane) {
+    const delivery = detail.feedback_delivery;
+    const card = el("div", null, "card-inner release-card");
+    card.appendChild(el("h3", "Student feedback — preview and release"));
+    card.appendChild(el("p",
+      "This release applies only to the synthetic demo session. It does " +
+      "not certify the research bank or authorize KT practice delivery.",
+      "warn"));
+    const statusText = {
+      not_ready: "Not ready — the assessment is incomplete",
+      awaiting_teacher_review:
+        "Awaiting educator review — hidden from the student",
+      released: "Released to the student"}[delivery.status]
+      || delivery.status;
+    card.appendChild(kv("Release status", statusText));
+    const released = delivery.released_feedback;
+    if (released) {
+      card.appendChild(kv("Released at", delivery.released_at));
+      card.appendChild(kv("Reviewer", delivery.reviewer_label));
+      const box = el("details", null, "raw");
+      box.dataset.disclosureKey = "released-feedback";
+      box.appendChild(el("summary",
+        "Released snapshot — exactly what the student sees"));
+      const inner = el("div");
+      renderStructuredFeedback(inner, released);
+      box.appendChild(inner);
+      card.appendChild(box);
+      if (delivery.preview_sha256 &&
+          delivery.released_preview_sha256 !== delivery.preview_sha256) {
+        card.appendChild(el("p",
+          "The provider result changed after approval; the student still " +
+          "sees the released version above until a new release is approved.",
+          "meta"));
+      }
+    }
+    const preview = delivery.preview;
+    if (!preview) {
+      card.appendChild(el("p",
+        "No final feedback preview yet. A preview appears once the " +
+        "assessment is complete."));
+      pane.appendChild(card);
+      return;
+    }
+    card.appendChild(el("h4",
+      "Current preview — exactly what approval would release"));
+    const shown = el("div", null, "feedback-preview");
+    renderStructuredFeedback(shown, preview);
+    card.appendChild(shown);
+    card.appendChild(el("p",
+      `Preview hash: ${delivery.preview_sha256.slice(0, 16)}…`,
+      "mono small"));
+    const draft = releaseDraftFor(selected);
+    const labelInput = document.createElement("input");
+    labelInput.id = `${prefix}release-reviewer`;
+    labelInput.maxLength = 80;
+    labelInput.value = draft.label;
+    labelInput.addEventListener("input", () => {
+      draft.label = labelInput.value;
+    });
+    const labelWrap = el("label", "Reviewer label (optional)");
+    labelWrap.htmlFor = labelInput.id;
+    card.appendChild(labelWrap);
+    card.appendChild(labelInput);
+    const status = el("p", draft.note || null, "meta");
+    const currentReleased = delivery.released_preview_sha256 &&
+      delivery.released_preview_sha256 === delivery.preview_sha256;
+    const button = el("button",
+      currentReleased ? "Already released"
+                      : "Approve and release to student",
+      "primary");
+    button.type = "button";
+    button.disabled =
+      !delivery.preview_sha256 || draft.sending || currentReleased;
+    button.addEventListener("click", async () => {
+      if (draft.sending || currentReleased) return;
+      draft.sending = true;
+      button.disabled = true;
+      status.textContent = "Releasing…";
+      try {
+        await api(`/api/teacher/sessions/${selected}/release`, {
+          body: {message_sha256: delivery.preview_sha256,
+                 reviewer_label: draft.label || "anonymous"}});
+        draft.note = "Released to the student.";
+        pollOnce();
+      } catch (err) {
+        if (err.status === 409) {
+          draft.note = "The feedback changed before release. Re-read " +
+            "the updated preview, then approve again.";
+          pollOnce();
+        } else {
+          draft.note = "Release was not accepted.";
+        }
+      } finally {
+        draft.sending = false;
+        button.disabled = currentReleased;
+      }
+      status.textContent = draft.note;
+    });
+    card.appendChild(button);
+    card.appendChild(status);
+    pane.appendChild(card);
+  }
+
   function renderFeedbackContent() {
     const pane = $("#tab-feedback");
+    const reviewer = pane.querySelector(`#${prefix}release-reviewer`);
+    const caret = (reviewer && document.activeElement === reviewer)
+      ? {start: reviewer.selectionStart, end: reviewer.selectionEnd}
+      : null;
     pane.replaceChildren();
+    if (!detail.read_only && detail.feedback_delivery) {
+      renderReleaseCard(pane);
+    }
+    if (caret) {
+      const input = pane.querySelector(`#${prefix}release-reviewer`);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(caret.start, caret.end);
+      }
+    }
     const card = el("div", null, "card-inner");
     const end = detail.checkpoints.end || {};
     card.appendChild(kv("Provider job",

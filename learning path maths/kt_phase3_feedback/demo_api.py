@@ -52,7 +52,7 @@ SESSION_RE = re.compile(
     r"\A/api/sessions/(?P<sid>[a-f0-9]{32})(?:/(?P<action>responses))?\Z")
 TEACHER_SESSION_RE = re.compile(
     r"\A/api/teacher/sessions/(?P<sid>[a-f0-9]{32})"
-    r"(?:/(?P<action>export|reviews))?\Z")
+    r"(?:/(?P<action>export|reviews|release))?\Z")
 
 
 def _host_ok(host_header, port):
@@ -276,6 +276,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
                         f'attachment; filename="demo_{sid}.json"'}
             if method == "POST" and action == "reviews":
                 return 201, self.service.add_review(
+                    sid, self._json_body()), {}
+            if method == "POST" and action == "release":
+                return 200, self.service.release_feedback(
                     sid, self._json_body()), {}
             raise FileNotFoundError("route not found")
 

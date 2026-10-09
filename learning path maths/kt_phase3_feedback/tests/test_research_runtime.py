@@ -79,6 +79,14 @@ class ResearchRuntimeTests(unittest.TestCase):
         self.assert_public(snap)
         self.assertEqual(snap["status"], "complete")
         self.assertEqual(snap["answered_count"], 40)
+        self.assertIsNone(snap["feedback"]["end"])
+        self.assertEqual(snap["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        view = service.teacher_session(sid)
+        service.release_feedback(sid, {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"]})
+        snap = service.snapshot(sid, token)
         self.assertEqual(snap["feedback"]["end"]["total"], {"correct": 20, "out_of": 40})
         self.assertTrue(wait_for(lambda: service._load_meta(sid)["provider_job"]["status"]
                                  in ("ready", "fallback")))
@@ -157,8 +165,17 @@ class ResearchRuntimeTests(unittest.TestCase):
         service = self.service()
         original = copy.deepcopy(self.banks["warm"])
         created = service.simulate("weak_fractions_only", 1, bank_mode="warm")
-        self.assertEqual(created["snapshot"]["feedback"]["end"]["total"],
-                         {"correct": 30, "out_of": 40})
+        self.assertIsNone(created["snapshot"]["feedback"]["end"])
+        self.assertEqual(created["snapshot"]["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        view = service.teacher_session(created["session_id"])
+        service.release_feedback(created["session_id"], {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"]})
+        self.assertEqual(
+            service.snapshot(created["session_id"],
+                             created["student_token"])
+            ["feedback"]["end"]["total"], {"correct": 30, "out_of": 40})
         self.assertEqual(service._bank_context("warm")["bank"], original)
 
     def test_opaque_tokens_enforce_session_order_and_retry(self):
