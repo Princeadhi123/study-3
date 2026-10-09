@@ -272,7 +272,18 @@ def validate_selection_payload(payload):
             "candidates": expected}
 
 
-def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
+def _end_message(safe, audience, checkpoint, selected, opening,
+                 practice_context):
+    if practice_context is None:
+        return render_message(safe, audience, checkpoint, selected,
+                              opening)
+    import feedback_practice
+    return feedback_practice.contextual_message(
+        safe, audience, selected, practice_context, opening)
+
+
+def run_feedback(evidence, audience, checkpoint, selector=None,
+                 generator=None, practice_context=None):
     """Return an auditable review draft with a fixed evidence-rendered body.
 
     The selector chooses an observed-error review focus, not a diagnosis.
@@ -283,6 +294,13 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
     payload = selection_payload(evidence, audience, checkpoint)
     safe = payload["evidence"]
     candidates = payload["candidates"]
+    integrated_ctx = None
+    if practice_context is not None:
+        if checkpoint != "end":
+            raise ValueError("practice context applies only at the end")
+        import feedback_practice
+        integrated_ctx = feedback_practice.validate_practice_context(
+            practice_context, safe)
     baseline = candidates[0]
     selected = baseline
     selection_source = "rules"
@@ -329,7 +347,8 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
             FULL_FEEDBACK_PROMPT_VERSION, build_full_input,
             full_message_sections, validate_full_reply)
         generation_prompt_version = FULL_FEEDBACK_PROMPT_VERSION
-        full_input = build_full_input(safe, audience, selected)
+        full_input = build_full_input(safe, audience, selected,
+                                      integrated_ctx)
         callback_payload = copy.deepcopy(full_input)
         try:
             reply = generator.generate(callback_payload)
@@ -376,9 +395,10 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
         "selected_candidate_id": selected["candidate_id"],
         "feedback_plan": feedback_plan,
         "template_baseline": render_message(safe, audience, checkpoint, baseline),
-        "message": (copy.deepcopy(full_message) if full_message is not None
-                    else render_message(safe, audience, checkpoint,
-                                        selected, opening)),
+        "message": (copy.deepcopy(full_message)
+                    if full_message is not None
+                    else _end_message(safe, audience, checkpoint, selected,
+                                      opening, integrated_ctx)),
         "requires_human_review": True,
         "trace": {
             "policy_version": POLICY_VERSION,

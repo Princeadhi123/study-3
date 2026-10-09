@@ -14,7 +14,7 @@ from scenario_replays import DEFAULT_SOURCE
 import phase3_paths
 from session_store import bank_fingerprint
 from tests.helpers import make_bank, make_taxonomy, responses
-from tests.test_demo_service import fake_diagnostics
+from tests.test_demo_service import fake_diagnostics, wait_for
 
 
 def replay_fixture(root, bank, taxonomy, count=3):
@@ -187,6 +187,53 @@ class ScenarioReplayTests(unittest.TestCase):
             final = self.wait(run["id"])
         self.assertEqual(final["status"], "cancelled")
         self.assertEqual(sum(c["status"] == "cancelled" for c in final["cases"]), 2)
+
+    def test_replay_waits_for_practice_selection_before_completion(self):
+        import copy
+        import threading
+        import feedback_practice
+        from tests.test_demo_service import BoundRecommender
+        from tests.test_feedback_practice import make_graph, make_pool
+        pool = make_pool(("sA", "sB"))
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        recommender = BoundRecommender(self.bank, pool, gate=gate)
+        self.service.recommender = recommender
+        scenario_id = self.library["scenarios"][1]["id"]
+        with patch.object(
+                feedback_practice, "load_current_practice_pool",
+                return_value=copy.deepcopy(pool)), \
+             patch.object(
+                feedback_practice, "teacher_content_context",
+                return_value=make_graph(pool)):
+            run = self.service.replays.start(
+                dict(self.request(), scenario_ids=[scenario_id]))
+            self.assertTrue(wait_for(lambda: recommender.calls >= 1))
+            time.sleep(0.3)
+            view = self.service.replays.get(run["id"])
+            self.assertEqual(view["cases"][0]["status"], "running")
+            session_id = view["cases"][0]["session_id"]
+            detail = self.service.teacher_session(session_id)
+            self.assertEqual(detail["provider_job"]["status"],
+                             "waiting_for_practice")
+            gate.set()
+            final = self.wait(run["id"])
+            self.assertEqual(final["status"], "complete")
+            case = final["cases"][0]
+            self.assertEqual(case["status"], "complete")
+            self.assertEqual(case["provider_status"], "ready")
+            detail = self.service.teacher_session(session_id)
+            end = detail["checkpoints"]["end"]
+            self.assertEqual(end["practice_context"]["status"], "selected")
+            self.assertEqual(
+                end["practice_context"]["selected_question_id"],
+                "pool_q1")
+            self.assertIsNotNone(
+                detail["feedback_delivery"]["preview"]["practice"]
+                ["question"])
+        self.assertIsNotNone(end["student_review"])
+        self.assertIsNotNone(end["teacher_review"])
+        self.assertEqual(recommender.calls, 1)
 
     def test_original_case_detail_is_read_only_and_has_all_answers(self):
         case_id = self.library["scenarios"][0]["id"]

@@ -273,7 +273,8 @@ class ScenarioReplays:
                     self.service.submit_response(session_id, token, submission)
                 while not self.stop.is_set():
                     detail = self.service.teacher_session(session_id)
-                    if (detail["provider_job"]["status"] != "pending" and
+                    if (detail["provider_job"]["status"]
+                            in ("ready", "fallback") and
                             all(c["diagnostics_job"]["status"] != "pending"
                                 for c in detail["checkpoints"].values())):
                         break

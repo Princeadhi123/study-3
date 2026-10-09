@@ -384,9 +384,17 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     container.append(history);
   }
 
+  function closeReplayDialog(dialog) {
+    if (dialog.open) dialog.close();
+    dialog.remove();
+  }
+
   function confirmReplay(ids) {
     if (!ids.length || ids.some((id) => !id)) return;
     const selectedIds = [...ids];
+    document.querySelectorAll(".replay-dialog").forEach((old) => {
+      if (!old.open) old.remove();
+    });
     const dialog = el("dialog", null, "replay-dialog");
     const form = el("form", null, "review-form");
     const title = el("h2", selectedIds.length === 1 ? "Replay this scenario?" : `Replay ${selectedIds.length} scenarios?`);
@@ -403,7 +411,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit}.`);
     const error = el("p", "", "error"); error.hidden = true; error.setAttribute("role", "alert");
     const start = el("button", "Start replay", "primary"); start.type = "submit"; start.id = "confirm-replay";
-    const cancel = button("Cancel", () => dialog.close());
+    const cancel = button("Cancel", () => closeReplayDialog(dialog));
     const actions = el("div", null, "replay-toolbar"); actions.append(start, cancel);
     form.append(title, explanation, field("Feedback execution", mode), approval,
       notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the current one finishes.", "meta small"), error, actions);
@@ -418,7 +426,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
           report_sha256: library.report_sha256, scenario_ids: selectedIds, provider_mode: mode.value,
           allow_provider_calls: mode.value === "hosted" && consent.checked}});
         if (chosen && selectedIds.includes(chosen)) selectedRun = run.id;
-        dialog.close();
+        closeReplayDialog(dialog);
         await refreshRuns();
       } catch (err) {
         error.textContent = err.status === 409 ? `Replay not started: ${err.payload?.reason || "another run is active or the source changed"}.` :

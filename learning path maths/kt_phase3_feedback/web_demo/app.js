@@ -149,6 +149,7 @@ const MAX_BACKOFF_MS = 15000;
 const SVGNS = "http://www.w3.org/2000/svg";
 const statusLabel = (value) => ({not_requested: "Not started", pending: "Processing",
   ready: "Ready", fallback: "Baseline fallback", unavailable: "Unavailable",
+  waiting_for_practice: "Waiting for practice selection",
   in_progress: "In progress", complete: "Complete", queued: "Queued", running: "Running",
   cancelling: "Finishing current case", cancelled: "Stopped", interrupted: "Interrupted",
   failed: "Failed", complete_with_errors: "Finished with errors"}[value] || String(value || "Unknown").replaceAll("_", " "));
@@ -439,6 +440,29 @@ function renderStructuredFeedback(container, payload) {
     });
     container.appendChild(box);
   });
+  const practice = payload.practice;
+  if (practice) {
+    const box = el("div", null, "feedback-section practice-activity");
+    box.appendChild(el("h3", "Practice activity"));
+    if (practice.message) {
+      box.appendChild(el("p", practice.message, "sec"));
+    }
+    const question = practice.question;
+    if (question) {
+      box.appendChild(el("p",
+        `${question.skill_name} · ${question.concept_name}`, "meta"));
+      box.appendChild(el("p", question.text, "sec"));
+      const list = el("ul", null, "practice-options");
+      (question.options || []).forEach((option) => {
+        list.appendChild(el("li", option));
+      });
+      box.appendChild(list);
+    }
+    if (practice.notice) {
+      box.appendChild(el("p", practice.notice, "meta"));
+    }
+    container.appendChild(box);
+  }
 }
 
 /* ============================ STUDENT ============================ */
@@ -757,8 +781,13 @@ function teacherPage() {
     strip.hidden = false;
     const budget = config.call_budget || {};
     const diag = config.diagnostics || {};
+    const shadow = config.shadow_practice || {};
     [
       `providers: ${config.provider_mode}`,
+      "KT practice: " + (shadow.enabled
+        ? `enabled · ${shadow.pool_question_count ?? "?"} questions` +
+          (shadow.target_band ? ` · band ${shadow.target_band.join("–")}` : "")
+        : "disabled"),
       `New provider calls this server run: ` +
       `${budget.used ?? 0} / ${budget.limit ?? "—"}`,
       `diagnostics: ${diag.status || "unknown"}`,
@@ -1321,19 +1350,30 @@ function createDetailView(root, options = {}) {
   function editDraftFor(sid, delivery) {
     if (!editDrafts.has(sid)) {
       editDrafts.set(sid, {hash: null, texts: {}, dirty: false,
-                           saving: false, note: null, stale: false});
+                           saving: false, note: null, stale: false,
+                           awaitingPreview: false, savedAt: null});
     }
     const draft = editDrafts.get(sid);
     const preview = delivery.preview;
     if (preview) {
       const current = {};
       (preview.sections || []).forEach((s) => { current[s.kind] = s.text; });
-      if (!draft.dirty || !draft.hash) {
+      if (draft.awaitingPreview) {
+        if (delivery.preview_sha256 === draft.hash) {
+          draft.awaitingPreview = false;
+          draft.texts = current;
+          draft.note = `Edited draft saved (${draft.savedAt}).`;
+        } else if (delivery.edited_at && draft.savedAt
+                   && delivery.edited_at > draft.savedAt) {
+          draft.awaitingPreview = false;
+          draft.dirty = true;
+          draft.stale = true;
+        }
+      } else if (!draft.dirty || !draft.hash) {
         draft.hash = delivery.preview_sha256;
         draft.texts = current;
-      }
-      if (draft.dirty && delivery.preview_sha256 &&
-          draft.hash !== delivery.preview_sha256) {
+      } else if (delivery.preview_sha256
+                 && draft.hash !== delivery.preview_sha256) {
         draft.stale = true;
       }
     }
@@ -1345,8 +1385,9 @@ function createDetailView(root, options = {}) {
     const card = el("div", null, "card-inner release-card");
     card.appendChild(el("h3", "Student feedback — preview and release"));
     card.appendChild(el("p",
-      "This release applies only to the synthetic demo session. It does " +
-      "not certify the research bank or authorize KT practice delivery.",
+      "This approval releases feedback and practice only within this " +
+      "synthetic demo session. It does not certify the research bank or " +
+      "authorize real-learner delivery.",
       "warn"));
     const statusText = {
       not_ready: "Not ready — the assessment is incomplete",
@@ -1378,6 +1419,7 @@ function createDetailView(root, options = {}) {
     const preview = delivery.preview;
     if (!preview) {
       card.appendChild(el("p",
+        delivery.practice_status_message ||
         "No final feedback preview yet. A preview appears once the " +
         "assessment is complete."));
       pane.appendChild(card);
@@ -1388,6 +1430,10 @@ function createDetailView(root, options = {}) {
     const shown = el("div", null, "feedback-preview");
     renderStructuredFeedback(shown, preview);
     card.appendChild(shown);
+    if (preview.practice && preview.practice.status === "disabled"
+        && delivery.practice_hint) {
+      card.appendChild(el("p", delivery.practice_hint, "meta"));
+    }
     card.appendChild(el("p",
       `Preview hash: ${delivery.preview_sha256.slice(0, 16)}…`,
       "mono small"));
@@ -1415,7 +1461,7 @@ function createDetailView(root, options = {}) {
       field.className = "edit-section";
       field.dataset.section = section.kind;
       field.maxLength = 2000;
-      field.disabled = edit.saving;
+      field.disabled = edit.saving || edit.awaitingPreview;
       field.rows = Math.max(3, Math.min(10,
         Math.ceil((section.text || "").length / 80)));
       field.value = Object.hasOwn(edit.texts, section.kind)
@@ -1453,11 +1499,13 @@ function createDetailView(root, options = {}) {
     card.appendChild(rebindBtn);
     const saveBtn = el("button", "Save edited draft", "secondary");
     saveBtn.type = "button";
-    saveBtn.disabled = edit.saving || edit.stale;
+    saveBtn.disabled = edit.saving || edit.stale || edit.awaitingPreview;
     saveBtn.addEventListener("click", async () => {
       const sid = selected;
       const baseHash = edit.hash;
-      if (edit.saving || edit.stale || !baseHash) return;
+      if (edit.saving || edit.stale || edit.awaitingPreview || !baseHash) {
+        return;
+      }
       const sections = {};
       (preview.sections || []).forEach((s) => {
         sections[s.kind] = sectionInputs[s.kind].value;
@@ -1475,9 +1523,12 @@ function createDetailView(root, options = {}) {
             body: {message_sha256: baseHash, sections: sections,
                    reviewer_label: draft.label || "anonymous"}});
         edit.hash = res.preview_sha256;
+        edit.savedAt = res.saved_at;
+        edit.awaitingPreview = true;
         edit.dirty = false;
         edit.stale = false;
-        edit.note = `Edited draft saved (${res.saved_at}).`;
+        edit.note = "Edited draft saved; waiting for the saved " +
+          "preview before approval.";
         pollOnce();
       } catch (err) {
         failed = true;
@@ -1491,8 +1542,10 @@ function createDetailView(root, options = {}) {
         }
       } finally {
         edit.saving = false;
-        saveBtn.disabled = edit.saving || edit.stale;
-        button.disabled = edit.dirty || draft.sending || currentReleased;
+        saveBtn.disabled = edit.saving || edit.stale
+          || edit.awaitingPreview;
+        button.disabled = edit.dirty || edit.saving || edit.awaitingPreview
+          || draft.sending || currentReleased;
         editStatus.textContent = edit.note;
         if (failed && selected === sid) renderFeedbackContent();
       }
@@ -1513,17 +1566,25 @@ function createDetailView(root, options = {}) {
     const status = el("p", draft.note || null, "meta");
     const currentReleased = delivery.released_preview_sha256 &&
       delivery.released_preview_sha256 === delivery.preview_sha256;
+    if (delivery.integrated && !currentReleased) {
+      card.appendChild(el("p",
+        "One approval releases this feedback and the practice activity " +
+        "shown above.", "meta"));
+    }
     const button = el("button",
       currentReleased ? "Already released"
-                      : "Approve and release to student",
+                      : (delivery.integrated
+                         ? "Approve feedback and practice"
+                         : "Approve and release to student"),
       "primary");
     button.type = "button";
     button.disabled =
       !delivery.preview_sha256 || draft.sending || currentReleased ||
-      edit.dirty || edit.saving;
+      edit.dirty || edit.saving || edit.awaitingPreview;
     button.addEventListener("click", async () => {
       const sid = selected;
-      if (draft.sending || currentReleased || edit.dirty || edit.saving) {
+      if (draft.sending || currentReleased || edit.dirty || edit.saving
+          || edit.awaitingPreview) {
         return;
       }
       draft.sending = true;
@@ -1545,7 +1606,8 @@ function createDetailView(root, options = {}) {
         }
       } finally {
         draft.sending = false;
-        button.disabled = currentReleased || edit.dirty || edit.saving;
+        button.disabled = currentReleased || edit.dirty || edit.saving
+          || edit.awaitingPreview;
       }
       status.textContent = draft.note;
     });

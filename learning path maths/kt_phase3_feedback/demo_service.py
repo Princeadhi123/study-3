@@ -27,10 +27,15 @@ import phase3_paths
 from aitta_generator import AittaGenerator
 from active_payload import active_payload
 from evidence_feedback import (
-    build_evidence, build_research_evidence, canonical_digest, run_feedback)
+    build_evidence, build_research_evidence, canonical_digest, run_feedback,
+    validate_evidence)
 from evidence_feedback_policy import (
     POLICY_VERSION, SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from evidence_providers import EvidenceJevSelector
+from feedback_practice import (
+    FEEDBACK_BUNDLE_VERSION, INTEGRATED_TEMPLATE_VERSION,
+    PRACTICE_STATUS_MESSAGES, empty_context, project_practice_context,
+    resolve_practice)
 from feedback_service import assessment_feedback_graph
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
@@ -123,6 +128,7 @@ class DemoService:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self._closing = False
         self.research = ResearchWorkspace(self.root, replay_report)
         default_bank = bank is None
         if default_bank:
@@ -263,6 +269,13 @@ class DemoService:
                             "reason": "interrupted_by_restart",
                             "used_for_student_advice": False,
                             "used_for_feedback": False}
+                        if (name == "end"
+                                and meta.get("feedback_bundle_version")
+                                == FEEDBACK_BUNDLE_VERSION
+                                and checkpoint.get("practice_context")
+                                is None):
+                            checkpoint["practice_context"] = (
+                                empty_context("unavailable"))
                         changed = True
                     diag = checkpoint.get("diagnostics")
                     if (isinstance(diag, dict)
@@ -287,12 +300,36 @@ class DemoService:
                 if job and job["status"] == "pending":
                     job["status"] = "fallback"
                     job["interrupted"] = True
+                    end_cp = meta["checkpoints"].get("end", {})
+                    if (meta.get("feedback_bundle_version")
+                            == FEEDBACK_BUNDLE_VERSION
+                            and end_cp.get("practice_context") is None):
+                        end_cp["practice_context"] = empty_context(
+                            "unavailable")
+                    self._publish_baselines(meta)
+                    changed = True
+                elif (job and job["status"] == "waiting_for_practice"
+                      and meta.get("feedback_bundle_version")
+                      == FEEDBACK_BUNDLE_VERSION):
+                    job["status"] = "fallback"
+                    job["interrupted"] = True
+                    try:
+                        evidence = meta["checkpoints"]["end"].get(
+                            "evidence")
+                        if evidence is not None:
+                            self._terminal_practice(meta, evidence)
+                    except Exception:
+                        meta["checkpoints"]["end"][
+                            "practice_context"] = empty_context(
+                                "unavailable")
                     self._publish_baselines(meta)
                     changed = True
                 if changed:
                     self._save_meta(meta)
 
     def close(self, wait=False):
+        with self.lock:
+            self._closing = True
         self.replays.close(wait=True)
         self.provider_pool.shutdown(wait=wait)
         self.diag_pool.shutdown(wait=wait)
@@ -391,10 +428,12 @@ class DemoService:
                     "graph": None, "diagnostics": None,
                     "diagnostics_job": {"status": "not_requested"},
                     "recommendation": None,
-                    "recommendation_job": {"status": "not_requested"}}},
+                    "recommendation_job": {"status": "not_requested"},
+                    "practice_context": None}},
             "reviews": [],
             "feedback_release": None,
-            "feedback_edit": None}
+            "feedback_edit": None,
+            "feedback_bundle_version": FEEDBACK_BUNDLE_VERSION}
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
                        bank_mode="demo"):
@@ -481,10 +520,14 @@ class DemoService:
             meta["session_id"])
         if session["status"] != "complete":
             return None
+        end = meta["checkpoints"]["end"]
+        integrated = (meta.get("feedback_bundle_version")
+                      == FEEDBACK_BUNDLE_VERSION)
+        if integrated and end.get("practice_context") is None:
+            return None
         edit = meta.get("feedback_edit")
         if edit is not None:
             return copy.deepcopy(edit["preview"])
-        end = meta["checkpoints"]["end"]
         job = meta["provider_job"]
         # A stored student result is safe to show even when the
         # aggregate job fell back because the teacher leg failed.
@@ -498,8 +541,9 @@ class DemoService:
         if review is None or evidence is None:
             return None
         sections = structured_sections(review)
-        return {
-            "template_version": TEMPLATE_VERSION,
+        preview = {
+            "template_version": (INTEGRATED_TEMPLATE_VERSION if integrated
+                                 else TEMPLATE_VERSION),
             "sections": sections,
             "text": "\n\n".join(s["text"] for s in sections if s["text"]),
             "total": {"correct": evidence["total"]["correct"],
@@ -511,6 +555,16 @@ class DemoService:
                  "out_of": row["out_of"]}
                 for row in evidence["skills"]],
             "requires_educator_review": True}
+        if integrated:
+            try:
+                preview["practice"] = resolve_practice(
+                    end["practice_context"], evidence)["card"]
+            except Exception:
+                preview["practice"] = {
+                    "status": "unavailable",
+                    "message": PRACTICE_STATUS_MESSAGES["unavailable"],
+                    "notice": None, "question": None}
+        return preview
 
     @staticmethod
     def _delivery_status(session, meta):
@@ -637,6 +691,59 @@ class DemoService:
         end["graph"] = assessment_feedback_graph(
             context["bank"], context["taxonomy"], rows)
         mode = meta["provider_job"]["provider_mode"]
+        integrated = (meta.get("feedback_bundle_version")
+                      == FEEDBACK_BUNDLE_VERSION)
+        self._admit_diagnostics(session_id, meta, "end", rows)
+        self._admit_recommendation(session_id, meta, rows)
+        if integrated and end["recommendation_job"]["status"] == "pending":
+            meta["provider_job"] = {
+                "status": "waiting_for_practice", "provider_mode": mode,
+                "queued_at": utc_now()}
+        else:
+            if integrated:
+                self._terminal_practice(meta, evidence, rows)
+            self._admit_provider_job(session_id, meta, evidence)
+        end["provider_job"] = copy.deepcopy(meta["provider_job"])
+
+    def _terminal_practice(self, meta, evidence, rows=None):
+        end = meta["checkpoints"]["end"]
+        if end.get("practice_context") is not None:
+            return end["practice_context"]
+        result = end.get("recommendation")
+        if rows is None:
+            rows = self._rows(meta["session_id"])
+        context = self._context_for(meta)
+        try:
+            ctx, reason = project_practice_context(
+                result, context["bank"], rows, evidence, self.recommender)
+        except Exception:
+            ctx = empty_context("unavailable")
+            reason = "practice_context_validation_failed"
+        end["practice_context"] = ctx
+        if reason:
+            end["practice_context_reason"] = reason
+        for audience in ("student", "teacher"):
+            end[f"baseline_{audience}"] = run_feedback(
+                evidence, audience, "end", practice_context=ctx)
+        return ctx
+
+    def _admit_provider_job(self, session_id, meta, evidence):
+        end = meta["checkpoints"]["end"]
+        mode = meta["provider_job"]["provider_mode"]
+        ctx = (end.get("practice_context")
+               if meta.get("feedback_bundle_version")
+               == FEEDBACK_BUNDLE_VERSION else None)
+        if self._closing:
+            meta["provider_job"] = {
+                "status": "fallback",
+                "provider_mode": mode,
+                "queued_at": utc_now(), "finished_at": utc_now(),
+                "reason": "service_closing"}
+            for audience in ("student", "teacher"):
+                end[f"{audience}_review"] = self._baseline_review(
+                    evidence, audience, "service_closing", ctx)
+            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            return
         if self._pending_provider >= self.max_pending_jobs:
             meta["provider_job"] = {
                 "status": "fallback",
@@ -645,16 +752,27 @@ class DemoService:
                 "reason": "demo_provider_queue_capacity"}
             for audience in ("student", "teacher"):
                 end[f"{audience}_review"] = self._baseline_review(
-                    evidence, audience, "demo_provider_queue_capacity")
+                    evidence, audience, "demo_provider_queue_capacity",
+                    ctx)
         else:
             self._pending_provider += 1
             meta["provider_job"] = {
                 "status": "pending", "provider_mode": mode,
                 "queued_at": utc_now()}
-            self.provider_pool.submit(self._run_provider_job, session_id)
+            try:
+                self.provider_pool.submit(
+                    self._run_provider_job, session_id)
+            except RuntimeError:
+                self._pending_provider -= 1
+                meta["provider_job"] = {
+                    "status": "fallback",
+                    "provider_mode": mode,
+                    "queued_at": utc_now(), "finished_at": utc_now(),
+                    "reason": "service_closing"}
+                for audience in ("student", "teacher"):
+                    end[f"{audience}_review"] = self._baseline_review(
+                        evidence, audience, "service_closing", ctx)
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
-        self._admit_diagnostics(session_id, meta, "end", rows)
-        self._admit_recommendation(session_id, meta, rows)
 
     def _admit_diagnostics(self, session_id, meta, checkpoint, rows):
         block = meta["checkpoints"][checkpoint]
@@ -788,23 +906,34 @@ class DemoService:
                 end = meta["checkpoints"]["end"]
                 end["recommendation"] = result
                 end["recommendation_job"] = job
+                if (meta.get("feedback_bundle_version")
+                        == FEEDBACK_BUNDLE_VERSION):
+                    evidence = end.get("evidence") or self._evidence(
+                        meta, rows)
+                    self._terminal_practice(meta, evidence, rows)
+                    if (meta["provider_job"]["status"]
+                            == "waiting_for_practice"):
+                        self._admit_provider_job(session_id, meta, evidence)
                 self._save_meta(meta)
         finally:
             with self.lock:
                 self._pending_diag = max(0, self._pending_diag - 1)
 
-    def _baseline_review(self, evidence, audience, reason):
-        review = run_feedback(evidence, audience, "end")
+    def _baseline_review(self, evidence, audience, reason,
+                         practice_context=None):
+        review = run_feedback(evidence, audience, "end",
+                              practice_context=practice_context)
         review = copy.deepcopy(review)
         review["trace"]["fallback_reason"] = reason
         return review
 
-    def _audience_result(self, evidence, audience, provider_mode=None):
+    def _audience_result(self, evidence, audience, provider_mode=None,
+                         practice_context=None):
         """One audience through providers; isolated failures per audience."""
         executions = {"selector": None, "generator": None}
         if (provider_mode or self.provider_mode) == "rules":
             review = self._baseline_review(
-                evidence, audience, None)
+                evidence, audience, None, practice_context)
             review["trace"]["fallback_reason"] = None
             executions["selector"] = {"status": "rules_mode_no_providers"}
             executions["generator"] = {"status": "rules_mode_no_providers"}
@@ -815,7 +944,8 @@ class DemoService:
             if hasattr(self.generator, "execution"):
                 self.generator.execution = None
             review = run_feedback(evidence, audience, "end",
-                                  self.selector, self.generator)
+                                  self.selector, self.generator,
+                                  practice_context=practice_context)
             executions["selector"] = copy.deepcopy(
                 getattr(self.selector, "execution", None))
             executions["generator"] = copy.deepcopy(
@@ -837,7 +967,8 @@ class DemoService:
             # Keep any completed stage record; only the stage that never
             # ran is marked budget_exhausted.
             review = self._baseline_review(
-                evidence, audience, "demo_call_budget_exhausted")
+                evidence, audience, "demo_call_budget_exhausted",
+                practice_context)
             executions = {
                 "selector": copy.deepcopy(
                     getattr(self.selector, "execution", None))
@@ -847,7 +978,7 @@ class DemoService:
                 or {"status": "budget_exhausted"}}
         except Exception:
             review = self._baseline_review(
-                evidence, audience, "provider_error")
+                evidence, audience, "provider_error", practice_context)
             executions = {
                 "selector": copy.deepcopy(
                     getattr(self.selector, "execution", None))
@@ -864,11 +995,14 @@ class DemoService:
                     rows = self._rows(session_id)
                     meta = self._load_meta(session_id)
                     mode = meta["provider_job"]["provider_mode"]
+                    practice_context = (meta["checkpoints"]["end"]
+                                        .get("practice_context"))
                 evidence = self._evidence(meta, rows)
                 results = {}
                 for audience in ("student", "teacher"):
                     review, executions = self._audience_result(
-                        evidence, audience, mode)
+                        evidence, audience, mode,
+                        practice_context=practice_context)
                     results[audience] = {"review": review,
                                          "executions": executions}
                 any_fallback = any(
@@ -886,11 +1020,43 @@ class DemoService:
                     return
                 end = meta["checkpoints"]["end"]
                 if results is None:
-                    evidence = self._evidence(meta, self._rows(session_id))
+                    stored = end.get("evidence")
+                    try:
+                        evidence = (validate_evidence(stored) if stored
+                                    else self._evidence(
+                                        meta, self._rows(session_id)))
+                    except Exception:
+                        evidence = self._evidence(
+                            meta, self._rows(session_id))
+                    integrated = (meta.get("feedback_bundle_version")
+                                  == FEEDBACK_BUNDLE_VERSION)
+                    ctx = (end.get("practice_context")
+                           if integrated else None)
+                    try:
+                        baselines = {
+                            audience: self._baseline_review(
+                                evidence, audience, "provider_error",
+                                ctx)
+                            for audience in ("student", "teacher")}
+                    except Exception:
+                        if integrated:
+                            ctx = empty_context("unavailable")
+                            end["practice_context"] = ctx
+                            end["practice_context_reason"] = (
+                                "provider_fallback_context_unavailable")
+                        baselines = {}
+                        for audience in ("student", "teacher"):
+                            review = run_feedback(
+                                evidence, audience, "end",
+                                practice_context=ctx)
+                            review["trace"]["fallback_reason"] = (
+                                "provider_error")
+                            baselines[audience] = review
+                        for audience in ("student", "teacher"):
+                            end[f"baseline_{audience}"] = copy.deepcopy(
+                                baselines[audience])
                     for audience in ("student", "teacher"):
-                        end[f"{audience}_review"] = (
-                            self._baseline_review(
-                                evidence, audience, "provider_error"))
+                        end[f"{audience}_review"] = baselines[audience]
                     meta["provider_job"].update(
                         {"status": "fallback", "finished_at": finished,
                          "executions": {
@@ -906,7 +1072,12 @@ class DemoService:
                             for audience in results},
                         "prompt_versions": {
                             "selection": SELECTION_PROMPT_VERSION,
-                            "generation": PROMPT_VERSION},
+                            "generation": (
+                                FULL_FEEDBACK_PROMPT_VERSION
+                                if getattr(
+                                    self.generator,
+                                    "supports_full_feedback", False)
+                                else PROMPT_VERSION)},
                         "policy_version": POLICY_VERSION})
                 end["provider_job"] = copy.deepcopy(
                     meta["provider_job"])
@@ -929,16 +1100,26 @@ class DemoService:
             evidence = self._evidence(meta, rows)
             if end.get("evidence") is None:
                 end["evidence"] = evidence
-            if end.get("baseline_student") is None:
+            ctx = (end.get("practice_context")
+                   if meta.get("feedback_bundle_version")
+                   == FEEDBACK_BUNDLE_VERSION else None)
+            if ctx is not None:
                 end["baseline_student"] = run_feedback(
-                    evidence, "student", "end")
-            if end.get("baseline_teacher") is None:
+                    evidence, "student", "end", practice_context=ctx)
                 end["baseline_teacher"] = run_feedback(
-                    evidence, "teacher", "end")
+                    evidence, "teacher", "end", practice_context=ctx)
+            else:
+                if end.get("baseline_student") is None:
+                    end["baseline_student"] = run_feedback(
+                        evidence, "student", "end")
+                if end.get("baseline_teacher") is None:
+                    end["baseline_teacher"] = run_feedback(
+                        evidence, "teacher", "end")
             for audience in ("student", "teacher"):
                 if end.get(f"{audience}_review") is None:
                     end[f"{audience}_review"] = self._baseline_review(
-                        evidence, audience, "interrupted_by_restart")
+                        evidence, audience, "interrupted_by_restart",
+                        ctx)
         except Exception:
             return
 
@@ -964,8 +1145,7 @@ class DemoService:
             "diagnostics": self.diagnostics.state,
             "replay_bank_mode": self.replay_bank_mode,
             "replay_bank_label": BANK_LABELS[self.replay_bank_mode],
-            "shadow_practice": {"enabled": self.recommender is not None,
-                                "mode": "shadow_only"},
+            "shadow_practice": self._shadow_config(),
             "bank_sha256": bank_fingerprint(self.bank),
             "taxonomy_sha256": canonical_digest(self.taxonomy),
             "policy_version": POLICY_VERSION,
@@ -1109,6 +1289,10 @@ class DemoService:
             preview = self._final_preview(meta)
             delivery = {
                 "status": self._delivery_status(session, meta),
+                "integrated": (meta.get("feedback_bundle_version")
+                               == FEEDBACK_BUNDLE_VERSION),
+                "practice_status": None,
+                "practice_status_message": None,
                 "preview": preview,
                 "preview_sha256": (canonical_digest(preview)
                                    if preview is not None else None),
@@ -1127,6 +1311,19 @@ class DemoService:
                     preview_source = review_trace.get(
                         "phrasing_source") or "deterministic"
                 delivery["preview_source"] = preview_source
+            if delivery["integrated"]:
+                ctx = end.get("practice_context")
+                if ctx is None:
+                    delivery["practice_status"] = "pending"
+                    delivery["practice_status_message"] = (
+                        PRACTICE_STATUS_MESSAGES["pending"])
+                else:
+                    delivery["practice_status"] = ctx["status"]
+                    delivery["practice_status_message"] = (
+                        PRACTICE_STATUS_MESSAGES[ctx["status"]])
+                    if ctx["status"] == "disabled":
+                        delivery["practice_hint"] = (
+                            self._shadow_config()["disabled_hint"])
             release = meta.get("feedback_release")
             if release:
                 delivery.update({
@@ -1160,6 +1357,26 @@ class DemoService:
                 "provider_job": copy.deepcopy(meta["provider_job"]),
                 "feedback_delivery": delivery,
                 "provenance": provenance})
+
+    def _shadow_config(self):
+        config = {"enabled": self.recommender is not None,
+                  "mode": "shadow_only",
+                  "target_band": None,
+                  "pool_question_count": None,
+                  "disabled_hint": None}
+        if self.recommender is not None:
+            band = getattr(self.recommender, "band", None)
+            if band is not None:
+                config["target_band"] = list(band)
+            pool = getattr(self.recommender, "pool", None)
+            if isinstance(pool, dict) and isinstance(
+                    pool.get("questions"), list):
+                config["pool_question_count"] = len(pool["questions"])
+        else:
+            config["disabled_hint"] = (
+                "Start the demo with the current practice pool and an "
+                "explicit target band to enable KT practice selection.")
+        return config
 
     @staticmethod
     def _teacher_context(bank_mode):

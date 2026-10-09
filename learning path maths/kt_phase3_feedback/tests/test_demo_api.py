@@ -547,7 +547,7 @@ class DemoAPITests(unittest.TestCase):
         end = snap["feedback"]["end"]
         self.assertEqual(
             end["template_version"],
-            "phase3_student_feedback_template_v1")
+            "phase3_student_feedback_template_v2")
         self.assertEqual([s["title"] for s in end["sections"]],
                          ["Assessment summary", "Observed strengths",
                           "Review focus", "Next steps"])
@@ -766,6 +766,94 @@ class DemoAPITests(unittest.TestCase):
             "POST", "/api/teacher/simulations",
             {"profile": "all_correct", "seed": 1})
         self.assertEqual(status, 403)
+
+
+class IntegratedPracticeAPITests(DemoAPITests):
+    def setUp(self):
+        import copy
+        import feedback_practice
+        from unittest import mock
+        from tests.test_demo_service import BoundRecommender
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.pool = make_pool(("sA", "sB"))
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(self.pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+        super().setUp()
+        self._recommender_cls = BoundRecommender
+
+    def _submit_mixed(self, sid, token, count=40):
+        payload = None
+        for index in range(count):
+            snap = self.service.snapshot(sid, token)
+            question = self.bank["questions"][index]
+            chosen = question["answer_index"]
+            if question["skill_id"] == "sA":
+                chosen = (chosen + 1) % len(question["options"])
+            status, payload, _ = self.request(
+                "POST", f"/api/sessions/{sid}/responses",
+                {"question_token": snap["current_question"]
+                 ["question_token"],
+                 "selected_index": chosen},
+                headers={"X-Demo-Session-Token": token})
+            self.assertEqual(status, 200)
+        return payload
+
+    def _wait_terminal(self, sid):
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["checkpoints"]["end"]
+            ["recommendation_job"]["status"] != "pending"))
+
+    def test_unified_release_payload_privacy(self):
+        self.service.recommender = self._recommender_cls(
+            self.bank, self.pool)
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        self._submit_mixed(sid, token)
+        self._wait_terminal(sid)
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(status, 200)
+        blob = json.dumps(snap)
+        for needle in ("pool_q", "Pool practice prompt", "p_correct",
+                       "answer_index", "practice_context"):
+            self.assertNotIn(needle, blob)
+        self.assertIsNone(snap["feedback"]["end"])
+        self.assertEqual(snap["assessment_total"],
+                         {"correct": 30, "out_of": 40})
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        status, view, _ = self.teacher_get(
+            f"/api/teacher/sessions/{sid}", cookie)
+        self.assertEqual(status, 200)
+        delivery = view["feedback_delivery"]
+        self.assertTrue(delivery["integrated"])
+        card = delivery["preview"]["practice"]
+        self.assertEqual(card["status"], "selected")
+        self.assertEqual(card["question"]["text"],
+                         "Pool practice prompt 1?")
+        status, res, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": delivery["preview_sha256"]},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["released"])
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        end = snap["feedback"]["end"]
+        self.assertEqual(end["practice"], card)
+        blob = json.dumps(snap)
+        for needle in ("pool_q", "p_correct", "answer_index",
+                       "pool_sha256", "item_id", "recommendation"):
+            self.assertNotIn(needle, blob)
 
 
 if __name__ == "__main__":

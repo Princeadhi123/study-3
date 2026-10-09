@@ -240,7 +240,8 @@ class RecommendationWiringTests(ServiceCase):
                          "future_recommendation_failed")
         self.assertEqual(end["recommendation"]["used_for_feedback"], False)
         self.assertIsNotNone(end["baseline_teacher"])
-        self.assertEqual(len(set(texts)), 1)
+        self.assertEqual(
+            len({t.rsplit("\n\n", 1)[0] for t in texts}), 1)
         public = failing.snapshot(sid, token)
         self.assertIsNone(public["feedback"]["end"])
         self.assertEqual(public["feedback_delivery"]["status"],
@@ -280,12 +281,18 @@ class RecommendationWiringTests(ServiceCase):
         service = self._service(recommender=fake)
         sid, _ = self._complete(service)
         self._wait_done(service, sid)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
         meta = service._load_meta(sid)
         end = meta["checkpoints"]["end"]
         end["recommendation_job"] = {"status": "pending"}
-        end["recommendation"] = {"status": "pending"}
+        end["recommendation"] = None
+        end["practice_context"] = None
+        meta["provider_job"] = {"status": "waiting_for_practice",
+                                "provider_mode": "rules"}
         service._save_meta(meta)
-        service.close()
+        service.close(wait=True)
         restarted = self._service(recommender=fake)
         recovered = restarted._load_meta(sid)["checkpoints"]["end"]
         self.assertEqual(recovered["recommendation_job"]["status"],
@@ -294,6 +301,14 @@ class RecommendationWiringTests(ServiceCase):
                          "interrupted_by_restart")
         self.assertEqual(recovered["recommendation"]["reason"],
                          "interrupted_by_restart")
+        self.assertEqual(recovered["practice_context"]["status"],
+                         "unavailable")
+        self.assertEqual(restarted._load_meta(sid)
+                         ["provider_job"]["status"], "fallback")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertIsNotNone(
+            restarted.teacher_session(sid)
+            ["feedback_delivery"]["preview"])
 
 
 class FutureKTPoolPathTests(ServiceCase):
@@ -326,11 +341,18 @@ class FutureKTPoolPathTests(ServiceCase):
 
     def test_teacher_config_exposes_enabled_shadow_only(self):
         service = self._service()
-        self.assertEqual(service.teacher_config()["shadow_practice"],
-                         {"enabled": False, "mode": "shadow_only"})
+        config = service.teacher_config()["shadow_practice"]
+        self.assertEqual(config["enabled"], False)
+        self.assertEqual(config["mode"], "shadow_only")
+        self.assertIsInstance(config["disabled_hint"], str)
+        self.assertIsNone(config["target_band"])
+        self.assertIsNone(config["pool_question_count"])
         shadowed = self._service(recommender=FakeRecommender())
-        self.assertEqual(shadowed.teacher_config()["shadow_practice"],
-                         {"enabled": True, "mode": "shadow_only"})
+        self.assertEqual(
+            shadowed.teacher_config()["shadow_practice"],
+            {"enabled": True, "mode": "shadow_only",
+             "target_band": None, "pool_question_count": None,
+             "disabled_hint": None})
 
 
 class CliPairingTests(unittest.TestCase):

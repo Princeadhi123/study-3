@@ -251,8 +251,10 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=evidence]').click(); document.querySelector('#replay-selected').click()")
         b.wait("document.querySelector('dialog[open]')")
         self.assertTrue(b.js("document.querySelector('#replay-provider-mode').options[1].disabled"))
+        b.js("window.__suppressReplayClose = true; document.addEventListener('close', (e) => { if (window.__suppressReplayClose && e.target && e.target.classList && e.target.classList.contains('replay-dialog')) e.stopImmediatePropagation(); }, true)")
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("!document.querySelector('dialog[open]')")
+        self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 0)
         b.wait("document.querySelector('#replay-history').textContent.includes('1/1')")
         b.wait("document.querySelector('#scenario-tab-overview').textContent.includes('What changed')")
         self.assertFalse(b.js("document.querySelector('#scenario-tab-evidence').hidden"))
@@ -273,16 +275,23 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#scenario-tab-review').textContent.includes('read-only')")
         b.js("document.querySelector('#scenario-search').value='Every answer'; document.querySelector('#scenario-search').dispatchEvent(new Event('input')); document.querySelector('#replay-filtered').click()")
         b.wait("document.querySelector('dialog[open]')")
+        self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 1)
+        self.assertEqual(b.js("document.querySelectorAll('#confirm-replay').length"), 1)
         self.assertIn("2 scenarios", b.js("document.querySelector('dialog h2').textContent"))
         b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 0)
         b.wait("document.querySelector('#replay-history').textContent.includes('2/2')")
         # The counter can reach its total before the worker closes the batch.
         # A subsequent replay must wait for the terminal status, not just counts.
         b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete')")
         b.js("document.querySelector('#replay-all').click()")
         b.wait("document.querySelector('dialog[open]')")
+        self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 1)
+        self.assertEqual(b.js("document.querySelectorAll('#confirm-replay').length"), 1)
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("!document.querySelector('dialog[open]')")
+        self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 0)
         b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete') && document.querySelector('.run-history > summary').textContent.includes('4/4')",
                timeout=60)
         self.assertEqual(len(self.service.replays.list()["runs"]), 3)
@@ -474,6 +483,178 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         b.wait("document.querySelectorAll('#scenario-tab-feedback .compare .col').length === 4")
         self.assertFalse(b.js("Boolean(document.querySelector('#scenario-tab-feedback .release-card'))"))
+        self.assertEqual(b.errors, [])
+
+    def test_integrated_feedback_practice_flow(self):
+        import copy
+        from unittest import mock
+        import feedback_practice
+        from tests.test_demo_service import BoundRecommender
+        from tests.test_feedback_practice import make_graph, make_pool
+        bank = self.service.bank
+        pool = make_pool(("sA", "sB"))
+        b = self.browser
+        disabled = self.service.simulate("all_incorrect", 4)
+        with mock.patch.object(feedback_practice,
+                               "load_current_practice_pool",
+                               return_value=copy.deepcopy(pool)), \
+             mock.patch.object(feedback_practice,
+                               "teacher_content_context",
+                               return_value=make_graph(pool)):
+            self.service.recommender = BoundRecommender(bank, pool)
+            result = self.service.simulate("all_incorrect", 7)
+            sid = result["session_id"]
+            self.assertTrue(wait_for(
+                lambda: self.service._load_meta(sid)
+                ["checkpoints"]["end"]["recommendation_job"]["status"]
+                != "pending"))
+            self.navigate(result["student_url"])
+            summary = "document.querySelector('#end-summary').textContent"
+            b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+            self.assertTrue(b.js(f"{summary}.includes('You answered 0 of 40 questions correctly.')"))
+            self.assertFalse(b.js(f"{summary}.includes('Pool practice prompt')"))
+            self.assertFalse(b.js(f"{summary}.includes('Practice activity')"))
+            self.navigate("/teacher")
+            b.wait("document.querySelector('#unlock-panel')")
+            b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('#session-list button')")
+            rows0 = "[...document.querySelectorAll('#session-list button')]"
+            b.js(f"{rows0}[0].click()")
+            release = "document.querySelector('#tab-feedback .release-card')"
+            b.wait(f"Boolean({release})")
+            b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+            preview = "document.querySelector('#tab-feedback .feedback-preview')"
+            b.wait(f"Boolean({preview}) && {preview}.textContent.includes('Practice activity')")
+            card = "document.querySelector('#tab-feedback .practice-activity')"
+            self.assertTrue(b.js(f"{card}.textContent.includes('Pool practice prompt 1?')"))
+            self.assertTrue(b.js(f"{card}.textContent.includes('Skill sA')"))
+            self.assertTrue(b.js(f"{card}.textContent.includes('Concept sA')"))
+            self.assertTrue(b.js(f"{card}.textContent.includes('does not establish mastery')"))
+            self.assertFalse(b.js(f"{card}.textContent.includes('p_correct')"))
+            self.assertFalse(b.js(f"{card}.textContent.includes('pool_q1')"))
+            approve = "document.querySelector('#tab-feedback .release-card button.primary')"
+            preview_card = "document.querySelector('#tab-feedback .feedback-preview .practice-activity')"
+            self.assertEqual(b.js(f"{approve}.textContent"),
+                             "Approve feedback and practice")
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('One approval releases this feedback and the practice activity')"))
+            sections = "[...document.querySelectorAll('#tab-feedback .release-card textarea.edit-section')]"
+            self.assertEqual(b.js(f"{sections}.length"), 4)
+            b.js(f"{sections}[0].value='Approved with practice.'; {sections}[0].dispatchEvent(new Event('input'))")
+            b.js("const sb=[...document.querySelectorAll('#tab-feedback .release-card button')].find((n) => n.textContent.includes('Save edited draft')); sb.click()")
+            b.wait(f"{release}.textContent.includes('Edited draft saved')")
+            b.wait(f"!{approve}.disabled")
+            b.js(f"{approve}.click()")
+            b.wait(f"{release}.textContent.includes('Released to the student')")
+            b.js("document.querySelector('#tab-feedback .feedback-preview .practice-activity').scrollIntoView({block:'center'})")
+            b.screenshot("teacher-practice-activity-visible.png")
+            b.screenshot("teacher-approved-feedback-practice.png")
+            card_text_teacher = b.js(f"{preview_card}.textContent")
+            self.navigate(result["student_url"])
+            b.wait(f"{summary}.includes('Practice activity')")
+            released_text = b.js(summary)
+            self.assertIn("Approved with practice.", released_text)
+            self.assertIn("Pool practice prompt 1?", released_text)
+            for needle in ("pool_q1", "p_correct", "answer_index"):
+                self.assertNotIn(needle, released_text)
+            card_text_student = b.js(
+                "document.querySelector('#end-summary .practice-activity').textContent")
+            self.assertEqual(card_text_student, card_text_teacher)
+            b.js("document.querySelector('#end-summary .practice-activity').scrollIntoView({block:'center'})")
+            b.screenshot("student-practice-activity-visible.png")
+            b.screenshot("student-released-feedback-practice.png")
+            self.navigate(result["student_url"])
+            b.wait(f"{summary}.includes('Practice activity')")
+            self.assertIn("Pool practice prompt 1?",
+                          b.js(summary))
+            sid_disabled = disabled["session_id"]
+            self.assertTrue(wait_for(
+                lambda: self.service._load_meta(sid_disabled)
+                ["checkpoints"]["end"]["recommendation_job"]["status"]
+                != "pending"))
+            self.navigate("/teacher")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            rows = "[...document.querySelectorAll('#session-list button')]"
+            count = b.js(f"{rows}.length")
+            self.assertGreaterEqual(count, 2)
+            b.js(f"{rows}[{count} - 1].click()")
+            b.wait(f"Boolean({release})")
+            b.wait(f"{preview} && {preview}.textContent.includes('Practice activity')")
+            self.assertTrue(b.js(
+                f"{card}.textContent.includes('not enabled for this session')"))
+            self.assertFalse(b.js(
+                f"Boolean(document.querySelector('#tab-feedback .practice-activity ul'))"))
+            self.assertEqual(b.errors, [])
+
+    def test_save_ack_blocks_approval_until_saved_preview_shown(self):
+        b = self.browser
+        result = self.service.simulate("alternating", 5)
+        sid = result["session_id"]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        approve = "document.querySelector('#tab-feedback .release-card button.primary')"
+        preview = "document.querySelector('#tab-feedback .feedback-preview')"
+        b.wait(f"Boolean({release}) && Boolean({preview})")
+        b.js(
+            "window.__held = []; window.__releasePosts = [];"
+            "window.__origFetch = window.fetch;"
+            "window.fetch = (u, o) => {"
+            " const url = String(u); const init = o || {};"
+            " if (init.method === 'POST' && url.endsWith('/release')) {"
+            "  window.__releasePosts.push(JSON.parse(init.body)); }"
+            " const response = window.__origFetch(url, init);"
+            " if ((!init.method || init.method === 'GET')"
+            "  && /\\/api\\/teacher\\/sessions\\/[a-f0-9]{32}$/.test(url)) {"
+            "  return response.then((res) => new Promise((resolve) => {"
+            "   window.__held.push({res, resolve}); })); }"
+            " return response; };")
+        b.wait("window.__held.length >= 1")
+        unique = "Unique summary wording for the approval race."
+        b.js("const f=document.querySelector('#tab-feedback "
+             "textarea.edit-section'); "
+             f"f.value={json.dumps(unique)}; "
+             "f.dispatchEvent(new Event('input'))")
+        b.js("const btns=[...document.querySelectorAll("
+             "'#tab-feedback .release-card button')]; "
+             "btns.find((n) => n.textContent === 'Save edited draft')"
+             ".click()")
+        b.wait(f"{release}.textContent.includes('Edited draft saved')")
+        self.assertTrue(b.js(f"{release}.textContent.includes("
+                             "'waiting for the saved preview')"))
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        self.assertTrue(b.js(
+            "[...document.querySelectorAll('#tab-feedback "
+            "textarea.edit-section')].every((f) => f.disabled)"))
+        self.assertEqual(b.js("window.__releasePosts.length"), 0)
+        saved_hash = self.service.teacher_session(
+            sid)["feedback_delivery"]["preview_sha256"]
+        b.js("window.__held.splice(0).forEach((h) => h.resolve(h.res));"
+             "window.fetch = (u, o) => {"
+             " const url = String(u); const init = o || {};"
+             " if (init.method === 'POST' && url.endsWith('/release')) {"
+             "  window.__releasePosts.push(JSON.parse(init.body)); }"
+             " return window.__origFetch(url, init); };")
+        b.wait(f"{preview}.textContent.includes({json.dumps(unique)})"
+               f" && !{approve}.disabled")
+        b.js(f"{approve}.click()")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        posts = b.js("window.__releasePosts")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["message_sha256"], saved_hash)
+        self.navigate(result["student_url"])
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes({json.dumps(unique)})")
         self.assertEqual(b.errors, [])
 
     def test_teacher_feedback_editing_flow(self):

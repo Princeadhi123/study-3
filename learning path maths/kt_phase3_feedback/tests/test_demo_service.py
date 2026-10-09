@@ -4,6 +4,7 @@ No network, credentials, or real model files: providers are injected
 test doubles and diagnostics use the FakeKT adapter from the
 existing adapter tests.
 """
+import copy
 import json
 import threading
 import time
@@ -761,7 +762,7 @@ class DemoServiceTests(unittest.TestCase):
         preview = view["feedback_delivery"]["preview"]
         self.assertEqual(
             preview["template_version"],
-            "phase3_student_feedback_template_v1")
+            "phase3_student_feedback_template_v2")
         self.assertTrue(preview["requires_educator_review"])
         result = self.service.release_feedback(sid2, {
             "message_sha256": view["feedback_delivery"]["preview_sha256"],
@@ -770,7 +771,7 @@ class DemoServiceTests(unittest.TestCase):
         snapshot = self.service.snapshot(sid2, token2)
         end = snapshot["feedback"]["end"]
         self.assertEqual(end["template_version"],
-                         "phase3_student_feedback_template_v1")
+                         "phase3_student_feedback_template_v2")
         self.assertFalse(end["requires_educator_review"])
         self.assertEqual(snapshot["feedback_delivery"]["status"],
                          "released")
@@ -1225,6 +1226,410 @@ class DemoServiceTests(unittest.TestCase):
                       delivery["preview"]["text"])
         snap = service.snapshot(sid, token)
         self.assertIsNone(snap["feedback"]["end"])
+
+
+class BoundRecommender:
+    def __init__(self, bank, pool, qid="pool_q1", p_correct=0.6,
+                 gate=None):
+        self.bank = bank
+        self._pool = pool
+        self.qid = qid
+        self.p_correct = p_correct
+        self.gate = gate
+        self.calls = 0
+
+    def recommend(self, bank, taxonomy, rows):
+        self.calls += 1
+        if self.gate is not None:
+            self.gate.wait(timeout=20)
+        from tests.test_feedback_practice import selected_result
+        return selected_result(self.bank, rows, self._pool, self.qid,
+                               p_correct=self.p_correct)
+
+
+class StaticRecommender:
+    def __init__(self, result=None, error=None, gate=None):
+        self.result = result
+        self.error = error
+        self.gate = gate
+        self.calls = 0
+
+    def recommend(self, bank, taxonomy, rows):
+        self.calls += 1
+        if self.gate is not None:
+            self.gate.wait(timeout=20)
+        if self.error is not None:
+            raise self.error
+        return dict(self.result)
+
+
+class IntegratedPracticeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        import feedback_practice
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.pool = make_pool(("sA", "sB"))
+        from unittest import mock
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(self.pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _service(self, **kwargs):
+        kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
+        service = DemoService(root=Path(self.tmp.name),
+                              bank=self.bank, taxonomy=self.taxonomy,
+                              **kwargs)
+        self.addCleanup(service.close, wait=True)
+        return service
+
+    def _rows_wrong(self, skills=("sA",)):
+        rows = []
+        for q in self.bank["questions"]:
+            index = q["answer_index"]
+            if q["skill_id"] in skills:
+                index = (index + 1) % len(q["options"])
+            rows.append({"question_id": q["question_id"],
+                         "selected_index": index})
+        return rows
+
+    def _complete(self, service, rows=None):
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in (rows if rows is not None else self._rows_wrong()):
+            service.submit_response(sid, token, row)
+        return sid, token
+
+    def _end(self, service, sid):
+        return service.teacher_session(sid)["checkpoints"]["end"]
+
+    def _wait_terminal(self, service, sid):
+        self.assertTrue(wait_for(
+            lambda: self._end(service, sid)
+            ["recommendation_job"]["status"] != "pending"))
+
+    def _delivery(self, service, sid):
+        return service.teacher_session(sid)["feedback_delivery"]
+
+    def test_selected_practice_released_with_feedback(self):
+        service = self._service(recommender=BoundRecommender(
+            self.bank, self.pool))
+        sid, token = self._complete(service)
+        self._wait_terminal(service, sid)
+        end = self._end(service, sid)
+        self.assertEqual(end["practice_context"]["status"], "selected")
+        self.assertEqual(end["practice_context"]
+                         ["selected_question_id"], "pool_q1")
+        public = service.snapshot(sid, token)
+        blob = json.dumps(public)
+        for needle in ("pool_q", "Pool practice prompt", "p_correct",
+                       "answer_index", "practice_context"):
+            self.assertNotIn(needle, blob)
+        self.assertIsNone(public["feedback"]["end"])
+        self.assertEqual(public["assessment_total"],
+                         {"correct": 30, "out_of": 40})
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v2")
+        card = preview["practice"]
+        self.assertEqual(card["status"], "selected")
+        self.assertEqual(set(card["question"]),
+                         {"skill_name", "concept_name", "text",
+                          "options"})
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["practice"], card)
+        blob = json.dumps(released)
+        for needle in ("pool_q", "p_correct", "answer_index",
+                       "pool_sha256", "item_id"):
+            self.assertNotIn(needle, blob)
+        meta = service._load_meta(sid)
+        self.assertEqual(
+            meta["feedback_release"]["preview_sha256"],
+            __import__("evidence_feedback").canonical_digest(preview))
+
+    def test_abstained_unavailable_disabled_contexts(self):
+        service = self._service(recommender=StaticRecommender(
+            result={"status": "abstained"}))
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        ctx = self._end(service, sid)["practice_context"]
+        self.assertEqual(ctx["status"], "abstained")
+        self.assertIsNone(ctx["selected_question_id"])
+        self.assertIsNone(self._delivery(service, sid)
+                          ["preview"]["practice"]["question"])
+
+        service = self._service(recommender=StaticRecommender(
+            error=RuntimeError("missing model")))
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        self.assertEqual(self._end(service, sid)
+                         ["practice_context"]["status"], "unavailable")
+        self.assertIsNotNone(self._delivery(service, sid)["preview"])
+
+        service = self._service()
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        self.assertEqual(self._end(service, sid)
+                         ["practice_context"]["status"], "disabled")
+
+    def test_shallow_legacy_result_becomes_unavailable(self):
+        service = self._service(recommender=StaticRecommender(
+            result={"status": "selected",
+                    "selected_question_id": "pool_q1"}))
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        end = self._end(service, sid)
+        self.assertEqual(end["recommendation"]["status"], "selected")
+        self.assertEqual(end["practice_context"]["status"], "unavailable")
+        card = self._delivery(service, sid)["preview"]["practice"]
+        self.assertIsNone(card["question"])
+        self.assertEqual(end["practice_context_reason"],
+                         "practice_context_validation_failed")
+
+    def test_pending_recommendation_gates_preview_and_jobs(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        calls = {"generate": 0, "contexts": [], "candidates": []}
+        sections = {"assessment_summary": "Summary.",
+                    "observed_strengths": "Strengths.",
+                    "review_focus": "Focus.",
+                    "next_steps": "Steps."}
+
+        class FocusSelector:
+            def __init__(self):
+                self.execution = None
+                self.calls = 0
+
+            def select(self, payload):
+                self.calls += 1
+                focus = next(c for c in payload["candidates"]
+                             if c["focus"]
+                             and c["focus"]["skill_id"] == "sB")
+                self.execution = {"status": "fake_completed"}
+                return {"candidate_id": focus["candidate_id"]}
+
+        class CountingFull:
+            supports_full_feedback = True
+
+            def generate(self, payload):
+                calls["generate"] += 1
+                calls["contexts"].append(payload["practice_context"])
+                calls["candidates"].append(
+                    payload["selected_candidate"]["candidate_id"])
+                return {"candidate_id":
+                        payload["selected_candidate"]["candidate_id"],
+                        "sections": dict(sections)}
+
+        selector = FocusSelector()
+        recommender = BoundRecommender(self.bank, self.pool, gate=gate)
+        service = self._service(recommender=recommender,
+                                provider_mode="hosted",
+                                selector=selector,
+                                generator=CountingFull())
+        sid, token = self._complete(
+            service, rows=self._rows_wrong(("sA", "sB")))
+        self.assertTrue(wait_for(lambda: recommender.calls >= 1))
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["provider_job"]["status"],
+                         "waiting_for_practice")
+        public = service.snapshot(sid, token)
+        self.assertEqual(public["assessment_total"],
+                         {"correct": 20, "out_of": 40})
+        self.assertIsNone(public["feedback"]["end"])
+        delivery = self._delivery(service, sid)
+        self.assertIsNone(delivery["preview"])
+        self.assertEqual(delivery["practice_status"], "pending")
+        self.assertEqual(calls["generate"], 0)
+        self.assertEqual(selector.calls, 0)
+        with self.assertRaises(ConflictError):
+            service.release_feedback(sid, {"message_sha256": "0" * 64})
+        with self.assertRaises(ConflictError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": "0" * 64,
+                "sections": sections})
+        service.snapshot(sid, token)
+        self._delivery(service, sid)
+        self.assertEqual(recommender.calls, 1)
+        gate.set()
+        self._wait_terminal(service, sid)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        self.assertEqual(recommender.calls, 1)
+        self.assertEqual(selector.calls, 2)
+        self.assertEqual(calls["generate"], 2)
+        for ctx in calls["contexts"]:
+            self.assertEqual(ctx["status"], "selected")
+            self.assertEqual(ctx["selected_question_id"], "pool_q1")
+        for candidate_id in calls["candidates"]:
+            self.assertEqual(candidate_id, "review_sub_sB")
+        view = self._delivery(service, sid)
+        self.assertEqual(view["preview"]["practice"]["question"]
+                         ["skill_name"], "Skill sA")
+        self.assertEqual(self._end(service, sid)["student_review"]
+                         ["selected_candidate_id"], "review_sub_sB")
+        service.snapshot(sid, token)
+        self._delivery(service, sid)
+        self.assertEqual(recommender.calls, 1)
+        self.assertEqual(calls["generate"], 2)
+        from full_feedback import FULL_FEEDBACK_PROMPT_VERSION
+        self.assertEqual(
+            service._load_meta(sid)["provider_job"]
+            ["prompt_versions"]["generation"],
+            FULL_FEEDBACK_PROMPT_VERSION)
+
+    def test_close_during_blocked_recommendation_saves_result(self):
+        gate = threading.Event()
+        recommender = BoundRecommender(self.bank, self.pool, gate=gate)
+        service = self._service(recommender=recommender)
+        sid, _ = self._complete(service)
+        self.assertTrue(wait_for(lambda: recommender.calls >= 1))
+        service.close(wait=False)
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["checkpoints"]["end"]
+            ["recommendation_job"]["status"] != "pending"))
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        self.assertEqual(end["recommendation"]["status"], "selected")
+        self.assertEqual(end["practice_context"]["status"], "selected")
+        self.assertEqual(end["practice_context"]
+                         ["selected_question_id"], "pool_q1")
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        self.assertIsNotNone(end["student_review"])
+        restarted = self._service()
+        self.assertIsNotNone(
+            restarted.teacher_session(sid)
+            ["feedback_delivery"]["preview"])
+
+    def test_restart_pending_recommendation_unavailable(self):
+        recommender = BoundRecommender(self.bank, self.pool)
+        service = self._service(recommender=recommender)
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        end["recommendation_job"] = {"status": "pending"}
+        end["recommendation"] = None
+        end["practice_context"] = None
+        meta["provider_job"] = {"status": "waiting_for_practice",
+                                "provider_mode": "rules"}
+        service._save_meta(meta)
+        service.close(wait=True)
+        restarted = self._service(recommender=BoundRecommender(
+            self.bank, self.pool))
+        end = restarted._load_meta(sid)["checkpoints"]["end"]
+        self.assertEqual(end["recommendation"]["status"], "unavailable")
+        self.assertEqual(end["practice_context"]["status"], "unavailable")
+        self.assertEqual(
+            restarted._load_meta(sid)["provider_job"]["status"],
+            "fallback")
+        self.assertIsNotNone(
+            restarted.teacher_session(sid)
+            ["feedback_delivery"]["preview"])
+
+    def test_edit_preserves_practice(self):
+        service = self._service(recommender=BoundRecommender(
+            self.bank, self.pool))
+        sid, token = self._complete(service)
+        self._wait_terminal(service, sid)
+        delivery = self._delivery(service, sid)
+        card = delivery["preview"]["practice"]
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": {"assessment_summary": "Edited summary.",
+                         "observed_strengths": "Edited strengths.",
+                         "review_focus": "Edited focus.",
+                         "next_steps": "Edited steps."},
+            "reviewer_label": "ms-test"})
+        delivery = self._delivery(service, sid)
+        self.assertEqual(delivery["preview"]["practice"], card)
+        self.assertEqual(delivery["preview_sha256"],
+                         res["preview_sha256"])
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["practice"], card)
+        self.assertIn("Edited summary.", released["text"])
+
+    def test_provider_worker_failure_falls_back_without_practice(self):
+        from unittest import mock
+        from feedback_practice import PRACTICE_NEXT_STEP_UNAVAILABLE
+        service = self._service(recommender=BoundRecommender(
+            self.bank, self.pool))
+        original_baseline = service._baseline_review
+
+        def failing_baseline(evidence, audience, reason, ctx=None):
+            if ctx is not None and ctx.get("status") == "selected":
+                raise ValueError("injected fallback failure")
+            return original_baseline(
+                evidence, audience, reason, ctx)
+
+        with mock.patch.object(
+                service, "_audience_result",
+                side_effect=RuntimeError("injected provider failure")), \
+                mock.patch.object(
+                    service, "_baseline_review",
+                    side_effect=failing_baseline):
+            sid, token = self._complete(service)
+            self._wait_terminal(service, sid)
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid)
+                ["provider_job"]["status"] in ("ready", "fallback")))
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        self.assertEqual(service._pending_provider, 0)
+        self.assertEqual(end["practice_context"]["status"],
+                         "unavailable")
+        self.assertEqual(end["practice_context_reason"],
+                         "provider_fallback_context_unavailable")
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertIsNone(preview["practice"]["question"])
+        next_steps = next(s["text"] for s in preview["sections"]
+                          if s["kind"] == "next_steps")
+        self.assertIn(PRACTICE_NEXT_STEP_UNAVAILABLE, next_steps)
+        for needle in ("Pool practice prompt", "pool_q1"):
+            self.assertNotIn(needle, json.dumps(preview))
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertIsNone(released["practice"]["question"])
+        self.assertEqual(released["total"],
+                         {"correct": 30, "out_of": 40})
+
+    def test_old_session_without_bundle_stays_v1(self):
+        service = self._service()
+        sid, token = self._complete(service)
+        self.assertTrue(wait_for(
+            lambda: self._end(service, sid)
+            ["diagnostics_job"]["status"] != "pending"))
+        meta = service._load_meta(sid)
+        meta.pop("feedback_bundle_version")
+        service._save_meta(meta)
+        delivery = self._delivery(service, sid)
+        self.assertEqual(delivery["preview"]["template_version"],
+                         "phase3_student_feedback_template_v1")
+        self.assertNotIn("practice", delivery["preview"])
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertNotIn("practice", released)
 
 
 if __name__ == "__main__":

@@ -82,6 +82,9 @@ class ResearchRuntimeTests(unittest.TestCase):
         self.assertIsNone(snap["feedback"]["end"])
         self.assertEqual(snap["feedback_delivery"]["status"],
                          "awaiting_teacher_review")
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["checkpoints"]["end"]
+            ["recommendation_job"]["status"] != "pending"))
         view = service.teacher_session(sid)
         service.release_feedback(sid, {
             "message_sha256":

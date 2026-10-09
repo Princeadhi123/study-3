@@ -16,7 +16,10 @@ from full_feedback import (
     build_full_input, full_message_sections, validate_full_input,
     validate_full_reply)
 from replay_provider_scenarios import CaptureCache
+import feedback_practice
 from tests.helpers import make_bank, make_taxonomy, responses
+from tests.test_feedback_practice import make_graph, make_pool
+from unittest import mock
 
 API_KEY = "test-aitta-key-0123456789abcdef"
 BASE_URL = "https://aitta.example.test"
@@ -112,7 +115,10 @@ class FullFeedbackTests(unittest.TestCase):
         self.assertEqual(
             set(context), {"schema", "prompt_version", "audience",
                            "checkpoint", "evidence", "selected_candidate",
-                           "feedback_plan", "baseline_sections"})
+                           "feedback_plan", "baseline_sections",
+                           "practice_context"})
+        self.assertEqual(context["practice_context"],
+                         {"status": "disabled", "selection": None})
         self.assertEqual(context["prompt_version"],
                          FULL_FEEDBACK_PROMPT_VERSION)
         self.assertEqual(set(context["evidence"]),
@@ -374,6 +380,119 @@ class FullFeedbackTests(unittest.TestCase):
     def test_validate_full_input_accepts_built_payload(self):
         normalized = validate_full_input(copy.deepcopy(self.full_input))
         self.assertEqual(normalized["selected_candidate"], self.selected)
+
+    def _practice_ctx(self, pool, qid="pool_q1"):
+        return {"schema": feedback_practice.PRACTICE_CONTEXT_SCHEMA,
+                "status": "selected", "selected_question_id": qid,
+                "pool_sha256": canonical_digest(pool)}
+
+    def _patched_pool(self):
+        pool = make_pool(("sA", "sB"))
+        patches = [
+            mock.patch.object(feedback_practice,
+                              "load_current_practice_pool",
+                              return_value=copy.deepcopy(pool)),
+            mock.patch.object(feedback_practice,
+                              "teacher_content_context",
+                              return_value=make_graph(pool))]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return pool
+
+    def test_wire_practice_descriptor_only(self):
+        pool = self._patched_pool()
+        full_input = build_full_input(
+            self.evidence, "student", self.selected,
+            self._practice_ctx(pool))
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.selected_id))
+        self._generator(opener).generate(full_input)
+        body = opener.calls[0]["body"]
+        context = json.loads(body["messages"][1]["content"])
+        practice = context["practice_context"]
+        self.assertEqual(set(practice), {"status", "selection"})
+        self.assertEqual(practice["status"], "selected")
+        self.assertEqual(
+            set(practice["selection"]),
+            {"skill_name", "concept_name", "mathematical_task"})
+        self.assertEqual(practice["selection"]["concept_name"],
+                         "Concept sA")
+        self.assertEqual(practice["selection"]["mathematical_task"],
+                         "Task for sA")
+        raw = json.dumps(practice)
+        for forbidden in ("pool_q", "Pool practice prompt",
+                          "p_correct", "answer_index", "options",
+                          "item_id", "sha256"):
+            self.assertNotIn(forbidden, raw)
+
+    def test_jev_selection_payload_has_no_practice(self):
+        seen = []
+
+        selected_id = self.selected_id
+
+        class Spy:
+            def select(self, payload):
+                seen.append(copy.deepcopy(payload))
+                return {"candidate_id": selected_id}
+
+        class Quiet:
+            supports_full_feedback = True
+
+            def generate(self, payload):
+                raise RuntimeError("offline")
+
+        pool = self._patched_pool()
+        review = run_feedback(
+            self.evidence, "student", "end", selector=Spy(),
+            generator=Quiet(),
+            practice_context=self._practice_ctx(pool))
+        self.assertNotIn("practice_context", seen[0])
+        self.assertNotIn("practice", json.dumps(seen[0]))
+        self.assertEqual(review["selected_candidate_id"],
+                         self.selected_id)
+
+    def test_cache_key_differs_by_practice_context(self):
+        pool = self._patched_pool()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), 4)
+            opener = RecordingOpener(
+                wire_reply(candidate_id=self.selected_id))
+            native = self._generator(opener)
+            cached = CachedFullFeedbackGenerator(
+                native, cache, MODEL, "endpointhash" * 8)
+            cached.generate(self.full_input)
+            other = build_full_input(
+                self.evidence, "student", self.selected,
+                self._practice_ctx(pool))
+            cached.generate(other)
+            self.assertEqual(len(opener.calls), 2)
+            self.assertEqual(
+                len(list(Path(tmp).glob("aitta_full_*.json"))), 2)
+
+    def test_fallback_next_steps_include_practice_labels(self):
+        pool = self._patched_pool()
+        ctx = self._practice_ctx(pool)
+        review = run_feedback(
+            self.evidence, "student", "end",
+            practice_context=ctx)
+        next_steps = next(s for s in review["message"]["sections"]
+                          if s["kind"] == "next_steps")
+        expected = feedback_practice.PRACTICE_NEXT_STEP_SELECTED.format(
+            concept_name="Concept sA", skill_name="Skill sA")
+        self.assertIn(expected, next_steps["text"])
+        card = feedback_practice.resolve_practice(ctx,
+                                                  self.evidence)["card"]
+        self.assertEqual(card["question"]["text"],
+                         "Pool practice prompt 1?")
+        self.assertEqual(card["question"]["options"],
+                         ["one", "two", "three"])
+
+    def test_practice_context_requires_end_checkpoint(self):
+        pool = self._patched_pool()
+        with self.assertRaises(ValueError):
+            run_feedback(self.evidence, "student", "midpoint",
+                         practice_context=self._practice_ctx(pool))
 
 
 if __name__ == "__main__":
