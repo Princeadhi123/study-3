@@ -320,7 +320,31 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
     # and it is never included in the narrow generator payload.
     feedback_plan = copy.deepcopy(build_feedback_plan(selected))
     opening = None
-    if generator is not None and not selector_failed:
+    full_message = None
+    generation_prompt_version = None
+    if (generator is not None and not selector_failed
+            and getattr(generator, "supports_full_feedback", False)
+            and checkpoint == "end"):
+        from full_feedback import (
+            FULL_FEEDBACK_PROMPT_VERSION, build_full_input,
+            full_message_sections, validate_full_reply)
+        generation_prompt_version = FULL_FEEDBACK_PROMPT_VERSION
+        full_input = build_full_input(safe, audience, selected)
+        callback_payload = copy.deepcopy(full_input)
+        try:
+            reply = generator.generate(callback_payload)
+        except (Exception, SystemExit):
+            fallback_reason = "generator_error"
+        else:
+            checked = validate_full_reply(reply, selected["candidate_id"])
+            if callback_payload != full_input or checked is None:
+                fallback_reason = "invalid_generation"
+            else:
+                full_message = {"sections": full_message_sections(checked)}
+                full_message["text"] = "\n\n".join(
+                    s["text"] for s in full_message["sections"])
+                phrasing_source = "injected_generator_full_sections"
+    elif generator is not None and not selector_failed:
         generation = {
             "schema": GENERATION_SCHEMA, "audience": audience,
             "checkpoint": checkpoint,
@@ -352,7 +376,9 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
         "selected_candidate_id": selected["candidate_id"],
         "feedback_plan": feedback_plan,
         "template_baseline": render_message(safe, audience, checkpoint, baseline),
-        "message": render_message(safe, audience, checkpoint, selected, opening),
+        "message": (copy.deepcopy(full_message) if full_message is not None
+                    else render_message(safe, audience, checkpoint,
+                                        selected, opening)),
         "requires_human_review": True,
         "trace": {
             "policy_version": POLICY_VERSION,
@@ -362,6 +388,10 @@ def run_feedback(evidence, audience, checkpoint, selector=None, generator=None):
             "fallback_reason": fallback_reason,
             "selection_matches_baseline":
                 baseline["candidate_id"] == selected["candidate_id"],
-            "validation": ("shape_and_heuristic_opening_checks_only"
-                           if opening else "deterministic_evidence_and_draft_actions"),
+            "generation_prompt_version": generation_prompt_version,
+            "validation": (
+                "shape_and_numeric_guardrails_not_semantic_verification"
+                if full_message is not None
+                else "shape_and_heuristic_opening_checks_only"
+                if opening else "deterministic_evidence_and_draft_actions"),
             "provider_advantage_demonstrated": False}}

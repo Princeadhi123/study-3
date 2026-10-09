@@ -32,8 +32,12 @@ from evidence_feedback_policy import (
     POLICY_VERSION, SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from evidence_providers import EvidenceJevSelector
 from feedback_service import assessment_feedback_graph
-from integrated_synthetic_pipeline import (
-    CachedReviewOpening, CachedReviewSelector)
+from full_feedback import (
+    CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
+    FULL_FEEDBACK_INSTRUCTIONS, FULL_FEEDBACK_PROMPT_VERSION,
+    FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_TITLES,
+    structured_sections)
+from integrated_synthetic_pipeline import CachedReviewSelector
 from jev_selector import _read_env_file
 from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
@@ -48,8 +52,7 @@ from schemas import SESSION_SCHEMA
 from session_store import SessionStore, bank_fingerprint, utc_now
 from shadow_practice import (
     ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
-from synthetic_feedback import GENERATION_INSTRUCTIONS, PROMPT_VERSION
-from transport_diagnostics import InstrumentedEvidenceAittaGenerator
+from synthetic_feedback import PROMPT_VERSION
 
 DEFAULT_ROOT = phase3_paths.ARTIFACTS / "live_demo_runtime"
 SESSION_ID_RE = re.compile(r"\A[a-f0-9]{32}\Z")
@@ -63,18 +66,6 @@ SIMULATION_PROFILES = (
 PUBLIC_QUESTION_KEYS = (
     "skill_id", "text", "options")
 TEMPLATE_VERSION = "phase3_student_feedback_template_v1"
-FINAL_TEMPLATE_GROUPS = (
-    ("assessment_summary", "Assessment summary",
-     ("completion", "observed_result")),
-    ("observed_strengths", "Observed strengths",
-     ("observed_highlight", "balanced_result", "support")),
-    ("review_focus", "Review focus",
-     ("review_focus", "optional_review", "limited_evidence",
-      "parent_observation", "tie", "other_options", "scope")),
-    ("next_steps", "Next steps", ("next_action",)))
-_TEMPLATE_KIND_GROUP = {
-    kind: group for group, _title, kinds in FINAL_TEMPLATE_GROUPS
-    for kind in kinds}
 
 
 class ConflictError(Exception):
@@ -232,15 +223,15 @@ class DemoService:
             _read_env_file(Path(jev_env_file)), timeout=timeout)
         inner = AittaGenerator.from_env()
         inner._timeout = timeout
-        native_generator = InstrumentedEvidenceAittaGenerator(inner)
+        native_generator = FullFeedbackAittaGenerator(inner)
         captures = self.root / "provider_captures"
         captures.mkdir(exist_ok=True)
         self.cache = CaptureCache(captures, call_budget)
         endpoint_hash = hashlib.sha256(
             inner._endpoint.encode("utf-8")).hexdigest()
         return (CachedReviewSelector(native_selector, self.cache),
-                CachedReviewOpening(native_generator, self.cache,
-                                    inner._model, endpoint_hash))
+                CachedFullFeedbackGenerator(native_generator, self.cache,
+                                            inner._model, endpoint_hash))
 
     def _recover_interrupted(self):
         """Mark jobs orphaned by a prior process; never rerun providers."""
@@ -402,7 +393,8 @@ class DemoService:
                     "recommendation": None,
                     "recommendation_job": {"status": "not_requested"}}},
             "reviews": [],
-            "feedback_release": None}
+            "feedback_release": None,
+            "feedback_edit": None}
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
                        bank_mode="demo"):
@@ -489,6 +481,9 @@ class DemoService:
             meta["session_id"])
         if session["status"] != "complete":
             return None
+        edit = meta.get("feedback_edit")
+        if edit is not None:
+            return copy.deepcopy(edit["preview"])
         end = meta["checkpoints"]["end"]
         job = meta["provider_job"]
         # A stored student result is safe to show even when the
@@ -502,28 +497,7 @@ class DemoService:
         evidence = end.get("evidence")
         if review is None or evidence is None:
             return None
-        message = review.get("message") or {}
-        raw = message.get("sections") or [
-            {"kind": "completion", "text": message.get("text", "")}]
-        grouped = {kind: [] for kind, _t, _k in FINAL_TEMPLATE_GROUPS}
-        for section in raw:
-            grouped[_TEMPLATE_KIND_GROUP.get(
-                section.get("kind"), "review_focus")].append(
-                section.get("text", ""))
-        if not grouped["next_steps"]:
-            action = (review.get("feedback_plan") or {}).get("action")
-            if action is None:
-                selected = review.get("selected_candidate_id")
-                for cand in review.get("candidates") or []:
-                    if cand.get("candidate_id") == selected:
-                        action = cand.get("action")
-                        break
-            if action:
-                grouped["next_steps"].append(action)
-        sections = [{
-            "kind": kind, "title": title,
-            "text": "\n\n".join(t for t in grouped[kind] if t)}
-            for kind, title, _k in FINAL_TEMPLATE_GROUPS]
+        sections = structured_sections(review)
         return {
             "template_version": TEMPLATE_VERSION,
             "sections": sections,
@@ -996,7 +970,8 @@ class DemoService:
             "taxonomy_sha256": canonical_digest(self.taxonomy),
             "policy_version": POLICY_VERSION,
             "selection_instructions": SELECTION_INSTRUCTIONS,
-            "generation_instructions": GENERATION_INSTRUCTIONS,
+            "generation_instructions": FULL_FEEDBACK_INSTRUCTIONS,
+            "generation_prompt_version": FULL_FEEDBACK_PROMPT_VERSION,
             "questions": copy.deepcopy(self.bank["questions"]),
             "skill_names": copy.deepcopy(self.bank["skill_names"]),
             "taxonomy": copy.deepcopy(self.taxonomy),
@@ -1121,6 +1096,11 @@ class DemoService:
                 "policy_version": meta["policy_version"],
                 "selection_prompt_version": SELECTION_PROMPT_VERSION,
                 "generation_prompt_version": PROMPT_VERSION}
+            review_trace = ((end.get("student_review") or {}).get("trace")
+                            or {})
+            if review_trace.get("generation_prompt_version"):
+                provenance["generation_prompt_version"] = review_trace[
+                    "generation_prompt_version"]
             diagnostics = end.get("diagnostics") or {}
             if (isinstance(diagnostics, dict)
                     and isinstance(diagnostics.get("kt"), dict)):
@@ -1135,6 +1115,18 @@ class DemoService:
                 "released_feedback": None,
                 "released_at": None,
                 "reviewer_label": None}
+            edit = meta.get("feedback_edit")
+            if edit is not None:
+                delivery["preview_source"] = "teacher_edited"
+                delivery["edited_at"] = edit["saved_at"]
+                delivery["edit_reviewer_label"] = edit["reviewer_label"]
+            else:
+                preview_source = "deterministic"
+                if (meta["provider_job"]["status"] in ("ready", "fallback")
+                        and end.get("student_review") is not None):
+                    preview_source = review_trace.get(
+                        "phrasing_source") or "deterministic"
+                delivery["preview_source"] = preview_source
             release = meta.get("feedback_release")
             if release:
                 delivery.update({
@@ -1279,6 +1271,65 @@ class DemoService:
                     "released_at":
                         meta["feedback_release"]["released_at"],
                     "preview_sha256": current}
+
+    def save_feedback_edit(self, session_id, body):
+        if (not isinstance(body, dict)
+                or not set(body) <= {
+                    "message_sha256", "sections", "reviewer_label"}
+                or "message_sha256" not in body
+                or "sections" not in body):
+            raise ValueError("feedback edit body has unexpected fields")
+        digest = body["message_sha256"]
+        if (not isinstance(digest, str)
+                or len(digest) != 64 or any(
+                    ch not in "0123456789abcdef" for ch in digest)):
+            raise ValueError("message_sha256 must be a sha256 hex digest")
+        submitted = body["sections"]
+        if (not isinstance(submitted, dict)
+                or set(submitted) != set(FULL_FEEDBACK_SECTION_KEYS)):
+            raise ValueError(
+                "sections must contain exactly assessment_summary, "
+                "observed_strengths, review_focus, next_steps")
+        texts = {}
+        for key in FULL_FEEDBACK_SECTION_KEYS:
+            text = _strict_text(submitted[key], f"sections.{key}", 2000)
+            if not text.strip():
+                raise ValueError(f"sections.{key} must be nonempty")
+            texts[key] = text
+        reviewer = _strict_text(
+            body.get("reviewer_label", "anonymous"), "reviewer_label", 80)
+        titles = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
+                          FULL_FEEDBACK_SECTION_TITLES))
+        with self.lock:
+            meta = self._load_meta(session_id)
+            session = self._context_for(meta)["mcqs"].private_record(
+                session_id)
+            if session["status"] != "complete":
+                raise ValueError(
+                    "feedback editing requires a completed session")
+            preview = self._final_preview(meta)
+            if preview is None:
+                raise ConflictError("feedback is not ready for editing")
+            current = canonical_digest(preview)
+            if current != digest:
+                raise ConflictError(
+                    "stale feedback revision", current=current)
+            edited = copy.deepcopy(preview)
+            edited["sections"] = [
+                {"kind": kind, "title": titles[kind],
+                 "text": texts[kind]}
+                for kind in FULL_FEEDBACK_SECTION_KEYS]
+            edited["text"] = "\n\n".join(
+                s["text"] for s in edited["sections"] if s["text"])
+            meta["feedback_edit"] = {
+                "preview": copy.deepcopy(edited),
+                "source_preview_sha256": current,
+                "saved_at": utc_now(),
+                "reviewer_label": reviewer}
+            self._save_meta(meta)
+            return {"saved": True,
+                    "preview_sha256": canonical_digest(edited),
+                    "saved_at": meta["feedback_edit"]["saved_at"]}
 
     # ---------------- simulation ----------------
 

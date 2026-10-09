@@ -257,6 +257,16 @@ function selectionProvenance(review, job, selExec) {
 function aittaProvenance(review, genExec) {
   if (!review) return null;
   const trace = review.trace || {};
+  if (trace.phrasing_source === "injected_generator_full_sections") {
+    if (hostedConfirmed(genExec, "aitta_")) {
+      const kind = genExec.reused === true ? "cached hosted response"
+        : genExec.reused === false ? "fresh hosted response"
+        : "hosted response (reuse status unavailable)";
+      return `Aitta - ${kind} (full structured feedback)`;
+    }
+    return "Injected full-feedback generator - hosted provenance " +
+      "unavailable";
+  }
   if (trace.phrasing_source === "injected_generator_opening_only") {
     if (hostedConfirmed(genExec, "aitta_")) {
       const kind = genExec.reused === true ? "cached hosted response"
@@ -1299,11 +1309,35 @@ function createDetailView(root, options = {}) {
     pane.appendChild(card);
   }
 
+  const editDrafts = new Map();
+
   function releaseDraftFor(sid) {
     if (!releaseDrafts.has(sid)) {
       releaseDrafts.set(sid, {label: "", sending: false, note: null});
     }
     return releaseDrafts.get(sid);
+  }
+
+  function editDraftFor(sid, delivery) {
+    if (!editDrafts.has(sid)) {
+      editDrafts.set(sid, {hash: null, texts: {}, dirty: false,
+                           saving: false, note: null, stale: false});
+    }
+    const draft = editDrafts.get(sid);
+    const preview = delivery.preview;
+    if (preview) {
+      const current = {};
+      (preview.sections || []).forEach((s) => { current[s.kind] = s.text; });
+      if (!draft.dirty || !draft.hash) {
+        draft.hash = delivery.preview_sha256;
+        draft.texts = current;
+      }
+      if (draft.dirty && delivery.preview_sha256 &&
+          draft.hash !== delivery.preview_sha256) {
+        draft.stale = true;
+      }
+    }
+    return draft;
   }
 
   function renderReleaseCard(pane) {
@@ -1336,9 +1370,9 @@ function createDetailView(root, options = {}) {
       if (delivery.preview_sha256 &&
           delivery.released_preview_sha256 !== delivery.preview_sha256) {
         card.appendChild(el("p",
-          "The provider result changed after approval; the student still " +
-          "sees the released version above until a new release is approved.",
-          "meta"));
+          "The current draft differs from the released version; the " +
+          "student still sees the released version above until a new " +
+          "release is approved.", "meta"));
       }
     }
     const preview = delivery.preview;
@@ -1358,6 +1392,113 @@ function createDetailView(root, options = {}) {
       `Preview hash: ${delivery.preview_sha256.slice(0, 16)}…`,
       "mono small"));
     const draft = releaseDraftFor(selected);
+    const edit = editDraftFor(selected, delivery);
+    if (delivery.preview_source === "teacher_edited") {
+      card.appendChild(kv("Preview source",
+        `Teacher-edited draft (saved ${delivery.edited_at || "—"}, ` +
+        `${delivery.edit_reviewer_label || "anonymous"})`));
+    }
+    const editStatus = el("p", edit.note || null, "meta");
+    const sectionInputs = {};
+    card.appendChild(el("p",
+      "Narrative editing only—scores and skill counts are fixed.",
+      "boundary-note"));
+    if (edit.dirty && edit.stale) {
+      card.appendChild(el("p",
+        "The feedback draft changed on the server since these edits " +
+        "were started. Review the latest preview, then re-apply your " +
+        "edits to it with the button below.", "warn"));
+    }
+    (preview.sections || []).forEach((section) => {
+      const field = document.createElement("textarea");
+      field.id = `${prefix}edit-${section.kind}`;
+      field.className = "edit-section";
+      field.dataset.section = section.kind;
+      field.maxLength = 2000;
+      field.disabled = edit.saving;
+      field.rows = Math.max(3, Math.min(10,
+        Math.ceil((section.text || "").length / 80)));
+      field.value = Object.hasOwn(edit.texts, section.kind)
+        ? edit.texts[section.kind] : (section.text || "");
+      const wrap = el("label",
+        `${section.title} (${edit.dirty ? "unsaved edits" : "saved draft"})`);
+      wrap.htmlFor = field.id;
+      field.addEventListener("input", () => {
+        edit.texts[section.kind] = field.value;
+        edit.dirty = true;
+        button.disabled = true;
+        wrap.textContent = `${section.title} (unsaved edits)`;
+        if (!edit.stale && !edit.note) {
+          editStatus.textContent =
+            "Unsaved edits — save the edited draft before releasing.";
+        }
+      });
+      card.appendChild(wrap);
+      card.appendChild(field);
+      sectionInputs[section.kind] = field;
+    });
+    const rebindBtn = el("button",
+      "Use latest revision with my edits", "secondary");
+    rebindBtn.type = "button";
+    rebindBtn.hidden = !(edit.dirty && edit.stale);
+    rebindBtn.addEventListener("click", () => {
+      edit.hash = delivery.preview_sha256;
+      edit.stale = false;
+      rebindBtn.hidden = true;
+      saveBtn.disabled = false;
+      edit.note = null;
+      editStatus.textContent =
+        "Edits kept; the next save targets the latest revision.";
+    });
+    card.appendChild(rebindBtn);
+    const saveBtn = el("button", "Save edited draft", "secondary");
+    saveBtn.type = "button";
+    saveBtn.disabled = edit.saving || edit.stale;
+    saveBtn.addEventListener("click", async () => {
+      const sid = selected;
+      const baseHash = edit.hash;
+      if (edit.saving || edit.stale || !baseHash) return;
+      const sections = {};
+      (preview.sections || []).forEach((s) => {
+        sections[s.kind] = sectionInputs[s.kind].value;
+      });
+      edit.texts = sections;
+      edit.dirty = true;
+      edit.saving = true;
+      saveBtn.disabled = true;
+      button.disabled = true;
+      Object.values(sectionInputs).forEach((f) => { f.disabled = true; });
+      let failed = false;
+      try {
+        const res = await api(
+          `/api/teacher/sessions/${sid}/feedback-edits`, {
+            body: {message_sha256: baseHash, sections: sections,
+                   reviewer_label: draft.label || "anonymous"}});
+        edit.hash = res.preview_sha256;
+        edit.dirty = false;
+        edit.stale = false;
+        edit.note = `Edited draft saved (${res.saved_at}).`;
+        pollOnce();
+      } catch (err) {
+        failed = true;
+        if (err.status === 409) {
+          edit.stale = true;
+          edit.note = "The displayed feedback changed before saving. " +
+            "Review the latest revision, then use it with your edits.";
+          pollOnce();
+        } else {
+          edit.note = "The edited draft was not saved.";
+        }
+      } finally {
+        edit.saving = false;
+        saveBtn.disabled = edit.saving || edit.stale;
+        button.disabled = edit.dirty || draft.sending || currentReleased;
+        editStatus.textContent = edit.note;
+        if (failed && selected === sid) renderFeedbackContent();
+      }
+    });
+    card.appendChild(saveBtn);
+    card.appendChild(editStatus);
     const labelInput = document.createElement("input");
     labelInput.id = `${prefix}release-reviewer`;
     labelInput.maxLength = 80;
@@ -1378,14 +1519,18 @@ function createDetailView(root, options = {}) {
       "primary");
     button.type = "button";
     button.disabled =
-      !delivery.preview_sha256 || draft.sending || currentReleased;
+      !delivery.preview_sha256 || draft.sending || currentReleased ||
+      edit.dirty || edit.saving;
     button.addEventListener("click", async () => {
-      if (draft.sending || currentReleased) return;
+      const sid = selected;
+      if (draft.sending || currentReleased || edit.dirty || edit.saving) {
+        return;
+      }
       draft.sending = true;
       button.disabled = true;
       status.textContent = "Releasing…";
       try {
-        await api(`/api/teacher/sessions/${selected}/release`, {
+        await api(`/api/teacher/sessions/${sid}/release`, {
           body: {message_sha256: delivery.preview_sha256,
                  reviewer_label: draft.label || "anonymous"}});
         draft.note = "Released to the student.";
@@ -1400,7 +1545,7 @@ function createDetailView(root, options = {}) {
         }
       } finally {
         draft.sending = false;
-        button.disabled = currentReleased;
+        button.disabled = currentReleased || edit.dirty || edit.saving;
       }
       status.textContent = draft.note;
     });
@@ -1411,16 +1556,20 @@ function createDetailView(root, options = {}) {
 
   function renderFeedbackContent() {
     const pane = $("#tab-feedback");
-    const reviewer = pane.querySelector(`#${prefix}release-reviewer`);
-    const caret = (reviewer && document.activeElement === reviewer)
-      ? {start: reviewer.selectionStart, end: reviewer.selectionEnd}
+    const active = document.activeElement;
+    const focusedId = (active && pane.contains(active) && active.id
+      && (active.id === `${prefix}release-reviewer`
+          || active.classList.contains("edit-section")))
+      ? active.id : null;
+    const caret = focusedId
+      ? {start: active.selectionStart, end: active.selectionEnd}
       : null;
     pane.replaceChildren();
     if (!detail.read_only && detail.feedback_delivery) {
       renderReleaseCard(pane);
     }
-    if (caret) {
-      const input = pane.querySelector(`#${prefix}release-reviewer`);
+    if (focusedId) {
+      const input = pane.querySelector(`#${focusedId}`);
       if (input) {
         input.focus();
         input.setSelectionRange(caret.start, caret.end);

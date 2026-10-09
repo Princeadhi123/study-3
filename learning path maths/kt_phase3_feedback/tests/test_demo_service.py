@@ -1046,6 +1046,186 @@ class DemoServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.simulate("weak_fractions_only", 7)
 
+    def _completed(self, correct=True, count=40):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(self.bank, correct=correct, count=count):
+            self.service.submit_response(sid, token, row)
+        return sid, token
+
+    def _edit_sections(self, marker="Teacher rephrased narrative."):
+        return {
+            "assessment_summary":
+                f"Assessment summary. {marker}",
+            "observed_strengths":
+                f"Observed strengths. {marker}",
+            "review_focus": f"Review focus. {marker}",
+            "next_steps": f"Next steps. {marker}"}
+
+    def test_edit_requires_completed_session(self):
+        created = self.create()
+        sid = created["session_id"]
+        self.submit_n(sid, created["student_token"], 20)
+        with self.assertRaises(ValueError):
+            self.service.save_feedback_edit(sid, {
+                "message_sha256": "0" * 64,
+                "sections": self._edit_sections()})
+
+    def test_edit_stale_hash_and_extra_fields_rejected(self):
+        sid, _ = self._completed()
+        view = self.service.teacher_session(sid)
+        sha = view["feedback_delivery"]["preview_sha256"]
+        with self.assertRaises(ConflictError) as ctx:
+            self.service.save_feedback_edit(sid, {
+                "message_sha256": "f" * 64,
+                "sections": self._edit_sections()})
+        self.assertEqual(ctx.exception.current, sha)
+        for extra in ({"total": {"correct": 1, "out_of": 40}},
+                      {"skills": []},
+                      {"template_version": "x"},
+                      {"feedback": {"end": "x"}}):
+            with self.assertRaises(ValueError):
+                self.service.save_feedback_edit(sid, {
+                    "message_sha256": sha,
+                    "sections": self._edit_sections(), **extra})
+        bad_sections = self._edit_sections()
+        bad_sections["next_steps"] = 123
+        with self.assertRaises(ValueError):
+            self.service.save_feedback_edit(sid, {
+                "message_sha256": sha, "sections": bad_sections})
+        bad_sections = self._edit_sections()
+        bad_sections["extra"] = "x"
+        with self.assertRaises(ValueError):
+            self.service.save_feedback_edit(sid, {
+                "message_sha256": sha, "sections": bad_sections})
+
+    def test_edit_saved_private_total_unchanged_no_release(self):
+        sid, token = self._completed()
+        view = self.service.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        original = delivery["preview"]
+        res = self.service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": self._edit_sections(),
+            "reviewer_label": "ms-test"})
+        self.assertTrue(res["saved"])
+        self.assertNotEqual(res["preview_sha256"],
+                            delivery["preview_sha256"])
+        view = self.service.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        self.assertEqual(delivery["preview_sha256"],
+                         res["preview_sha256"])
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        self.assertEqual(delivery["edit_reviewer_label"], "ms-test")
+        self.assertEqual(delivery["preview"]["total"],
+                         original["total"])
+        self.assertEqual(delivery["preview"]["skills"],
+                         original["skills"])
+        self.assertTrue(
+            delivery["preview"]["requires_educator_review"])
+        self.assertEqual(delivery["preview"]["sections"][0]["text"],
+                         "Assessment summary. Teacher rephrased "
+                         "narrative.")
+        snap = self.service.snapshot(sid, token)
+        self.assertIsNone(snap["feedback"]["end"])
+        self.assertEqual(snap["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        self.assertNotIn("preview_source",
+                         snap["feedback_delivery"])
+
+    def test_release_after_edit_uses_edited_preview(self):
+        sid, token = self._completed()
+        view = self.service.teacher_session(sid)
+        self.service.save_feedback_edit(sid, {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"],
+            "sections": self._edit_sections()})
+        view = self.service.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        self.service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        snap = self.service.snapshot(sid, token)
+        end = snap["feedback"]["end"]
+        self.assertEqual(end["sections"],
+                         delivery["preview"]["sections"])
+        self.assertFalse(end["requires_educator_review"])
+        self.assertIn("Teacher rephrased narrative.", end["text"])
+
+    def test_edit_after_release_keeps_student_snapshot(self):
+        sid, token = self._completed()
+        view = self.service.teacher_session(sid)
+        sha = view["feedback_delivery"]["preview_sha256"]
+        self.service.release_feedback(
+            sid, {"message_sha256": sha})
+        released_text = self.service.snapshot(
+            sid, token)["feedback"]["end"]["text"]
+        self.service.save_feedback_edit(sid, {
+            "message_sha256": sha,
+            "sections": self._edit_sections("Second draft.")})
+        snap = self.service.snapshot(sid, token)
+        self.assertEqual(snap["feedback"]["end"]["text"],
+                         released_text)
+        self.assertEqual(snap["feedback_delivery"]["status"],
+                         "released")
+        view = self.service.teacher_session(sid)
+        self.assertNotEqual(
+            view["feedback_delivery"]["preview_sha256"], sha)
+
+    def test_edit_persists_across_restart(self):
+        sid, token = self._completed()
+        view = self.service.teacher_session(sid)
+        res = self.service.save_feedback_edit(sid, {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"],
+            "sections": self._edit_sections(),
+            "reviewer_label": "ms-test"})
+        restarted = self._service()
+        self.addCleanup(restarted.close)
+        view = restarted.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        self.assertEqual(delivery["preview_sha256"],
+                         res["preview_sha256"])
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        restarted.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        snap = restarted.snapshot(sid, token)
+        self.assertIn("Teacher rephrased narrative.",
+                      snap["feedback"]["end"]["text"])
+
+    def test_pending_provider_edit_survives_provider_result(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        selector = BlockingSelector(gate)
+        service = self._service(provider_mode="hosted",
+                                selector=selector,
+                                generator=FakeGenerator())
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(self.bank, correct=False, count=40):
+            service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(lambda: selector.calls >= 1))
+        self.assertEqual(service._load_meta(sid)["provider_job"]
+                         ["status"], "pending")
+        view = service.teacher_session(sid)
+        res = service.save_feedback_edit(sid, {
+            "message_sha256":
+                view["feedback_delivery"]["preview_sha256"],
+            "sections": self._edit_sections(),
+            "reviewer_label": "ms-test"})
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            != "pending"))
+        view = service.teacher_session(sid)
+        delivery = view["feedback_delivery"]
+        self.assertEqual(delivery["preview_sha256"],
+                         res["preview_sha256"])
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        self.assertIn("Teacher rephrased narrative.",
+                      delivery["preview"]["text"])
+        snap = service.snapshot(sid, token)
+        self.assertIsNone(snap["feedback"]["end"])
+
 
 if __name__ == "__main__":
     unittest.main()

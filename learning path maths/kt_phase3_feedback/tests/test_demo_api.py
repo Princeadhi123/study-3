@@ -557,6 +557,67 @@ class DemoAPITests(unittest.TestCase):
                        "reviewer_label"):
             self.assertNotIn(marker, blob)
 
+    def test_feedback_edits_route_validation_and_save(self):
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        self.submit_all(sid, token)
+        sections = {
+            "assessment_summary": "Assessment summary. Edited draft.",
+            "observed_strengths": "Observed strengths. Edited draft.",
+            "review_focus": "Review focus. Edited draft.",
+            "next_steps": "Next steps. Edited draft."}
+        for headers in ({}, {"X-Demo-Session-Token": "x"}):
+            status, _, _ = self.request(
+                "POST",
+                f"/api/teacher/sessions/{sid}/feedback-edits",
+                {"message_sha256": "0" * 64, "sections": sections},
+                headers=headers)
+            self.assertEqual(status, 403)
+        cookie = self._fresh_cookie()
+
+        def ready():
+            status, view, _ = self.teacher_get(
+                f"/api/teacher/sessions/{sid}", cookie)
+            if status == 200 and (
+                    view["provider_job"]["status"]
+                    in ("ready", "fallback")):
+                return view
+            return None
+
+        self.assertTrue(wait_for(ready))
+        sha = ready()["feedback_delivery"]["preview_sha256"]
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/feedback-edits",
+            {"message_sha256": "0" * 64, "sections": sections},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 409)
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/feedback-edits",
+            {"message_sha256": sha, "sections": sections,
+             "total": {"correct": 40, "out_of": 40}},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 400)
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/feedback-edits",
+            {"message_sha256": sha, "sections": sections,
+             "reviewer_label": "ed-1"},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["saved"])
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": result["preview_sha256"]},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(snap["feedback_delivery"]["status"],
+                         "released")
+        self.assertIn("Edited draft.",
+                      snap["feedback"]["end"]["text"])
+        self.assertNotIn("ed-1", json.dumps(snap))
+
     def _fresh_cookie(self):
         _, _, meta = self.unlock()
         return self.cookie_from(meta)

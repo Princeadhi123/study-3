@@ -443,7 +443,7 @@ class ResearchBrowserTests(unittest.TestCase):
         release = "document.querySelector('#tab-feedback .release-card')"
         b.wait(f"Boolean({release})")
         b.wait(f"{release}.textContent.includes('Released to the student')")
-        self.assertFalse(b.js(f"{release}.textContent.includes('changed after approval')"))
+        self.assertFalse(b.js(f"{release}.textContent.includes('differs from the released version')"))
         self.assertTrue(b.js(f"{release}.textContent.includes('browser-reviewer')"))
         preview_text = b.js(
             "[...document.querySelectorAll('#tab-feedback .feedback-preview > *')]"
@@ -461,7 +461,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait(f"!{const_btn}.disabled")
         b.js(f"{const_btn}.click()")
         b.wait(f"{release}.textContent.includes('Released to the student')")
-        self.assertFalse(b.js(f"{release}.textContent.includes('changed after approval')"))
+        self.assertFalse(b.js(f"{release}.textContent.includes('differs from the released version')"))
         self.navigate(second["student_url"])
         b.wait(f"{summary}.includes('Assessment summary')")
         b.screenshot("student-released-incorrect.png")
@@ -474,6 +474,126 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         b.wait("document.querySelectorAll('#scenario-tab-feedback .compare .col').length === 4")
         self.assertFalse(b.js("Boolean(document.querySelector('#scenario-tab-feedback .release-card'))"))
+        self.assertEqual(b.errors, [])
+
+    def test_teacher_feedback_editing_flow(self):
+        b = self.browser
+        result = self.service.simulate("alternating", 5)
+        sid = result["session_id"]
+        self.service.simulate("all_incorrect", 6)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        pick_alt = ("[...document.querySelectorAll('#session-list button')]"
+                    ".find((n) => n.textContent.includes('alternate'))")
+        pick_inc = ("[...document.querySelectorAll('#session-list button')]"
+                    ".find((n) => n.textContent.includes("
+                    "'Every answer incorrect'))")
+        b.wait(f"Boolean({pick_alt})")
+        b.js(f"{pick_alt}.click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        b.wait(f"Boolean({release})")
+        approve = "document.querySelector('#tab-feedback .release-card button.primary')"
+        sections = "[...document.querySelectorAll('#tab-feedback .release-card textarea.edit-section')]"
+        b.wait(f"{sections}.length === 4")
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback .release-card input[type=number]')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback .release-card input.score')"))
+        self.assertTrue(b.js(
+            f"{release}.textContent.includes('scores and skill counts are fixed')"))
+        self.assertFalse(b.js(f"{approve}.disabled"))
+        b.js("const f=document.querySelector('#tab-feedback textarea.edit-section'); "
+             "f.value='Teacher rephrased summary for the class.'; "
+             "f.dispatchEvent(new Event('input'))")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        b.js("const f2=document.querySelectorAll('#tab-feedback textarea.edit-section')[1]; "
+             "f2.value=''; f2.dispatchEvent(new Event('input'))")
+        b.js(f"{pick_inc}.click()")
+        b.wait(f"Boolean({release})")
+        b.js(f"{pick_alt}.click()")
+        b.wait(f"{release}.textContent.includes('Awaiting educator review')")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        self.assertEqual(b.js(
+            "document.querySelector('#tab-feedback textarea.edit-section').value"),
+            "Teacher rephrased summary for the class.")
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback textarea.edit-section')[1].value"),
+            "")
+        b.js("window.__origFetch = window.fetch; window.fetch = (u, o) => "
+             "(typeof u === 'string' && u.includes('feedback-edits')) "
+             "? new Promise((r) => setTimeout(() => r("
+             "window.__origFetch(u, o)), 400)) : window.__origFetch(u, o)")
+        b.js("const btns0=[...document.querySelectorAll('#tab-feedback .release-card button')]; "
+             "btns0.find((n) => n.textContent === 'Save edited draft').click()")
+        self.assertTrue(b.js(
+            "[...document.querySelectorAll('#tab-feedback textarea.edit-section')]"
+            ".every((f) => f.disabled)"))
+        b.js("window.fetch = window.__origFetch")
+        b.wait(f"{release}.textContent.includes('was not saved')")
+        self.assertTrue(b.js(
+            "[...document.querySelectorAll('#tab-feedback textarea.edit-section')]"
+            ".every((f) => !f.disabled)"))
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback textarea.edit-section')[1].value"),
+            "")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        b.js("const f2b=document.querySelectorAll('#tab-feedback textarea.edit-section')[1]; "
+             "f2b.value='Observed strengths stay supportive.'; "
+             "f2b.dispatchEvent(new Event('input'))")
+        b.js("const btns=[...document.querySelectorAll('#tab-feedback .release-card button')]; "
+             "btns.find((n) => n.textContent === 'Save edited draft').click()")
+        b.wait(f"{release}.textContent.includes('Edited draft saved')")
+        b.wait(f"{release}.textContent.includes('Teacher-edited draft')")
+        self.assertFalse(b.js(f"{approve}.disabled"))
+        edited = b.js(
+            "document.querySelector('#tab-feedback .feedback-preview')"
+            ".textContent")
+        self.assertIn("Teacher rephrased summary for the class.", edited)
+        b.screenshot("teacher-edited-feedback.png")
+        b.js(f"{approve}.click()")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        self.navigate(result["student_url"])
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Teacher rephrased summary for the class.')")
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('20 of 40')"))
+        b.screenshot("student-released-edited.png")
+        self.navigate(result["student_url"])
+        b.wait(f"{summary}.textContent.includes('Teacher rephrased summary for the class.')")
+        self.navigate("/teacher")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait(f"Boolean({pick_alt})")
+        b.js(f"{pick_alt}.click()")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        b.wait(f"Boolean({release})")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        b.js("const f3=document.querySelector('#tab-feedback textarea.edit-section'); "
+             "f3.value='A follow-up edit after release.'; "
+             "f3.dispatchEvent(new Event('input'))")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        b.js("const btns2=[...document.querySelectorAll('#tab-feedback .release-card button')]; "
+             "btns2.find((n) => n.textContent === 'Save edited draft').click()")
+        b.wait(f"{release}.textContent.includes('Edited draft saved')")
+        b.wait(f"{release}.textContent.includes('differs from the released version')")
+        self.assertFalse(b.js(f"{release}.textContent.includes('provider result changed')"))
+        self.assertEqual(
+            b.js("aittaProvenance({trace: {phrasing_source: "
+                 "'injected_generator_full_sections'}}, "
+                 "{capture_file: 'aitta_full_x.json', reused: false, "
+                 "metadata: {status: 'completed'}})"),
+            "Aitta - fresh hosted response (full structured feedback)")
+        self.assertEqual(
+            b.js("aittaProvenance({trace: {phrasing_source: "
+                 "'injected_generator_full_sections'}}, {})"),
+            "Injected full-feedback generator - hosted provenance "
+            "unavailable")
         self.assertEqual(b.errors, [])
 
     def test_warm_cold_bank_ui_tokens_translation_and_teacher_context(self):
