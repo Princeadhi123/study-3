@@ -10,8 +10,9 @@ The issue was conflating that task with explaining an already observed error.
 ```text
 Completed answers (20 / 40)
   -> deterministic scoring and descriptive content graph
-  -> observed evidence -> permitted Jev focus -> Aitta opening
-  -> feedback draft (existing branch, unchanged)
+  -> observed evidence -> candidate planning -> permitted Jev focus
+  -> validated feedback plan -> Aitta opening
+  -> feedback draft
 
 Completed answers (40 only) + hash-bound 24-question v2 practice pool
   -> same observed history + one unanswered candidate query at a time
@@ -38,8 +39,8 @@ They do not wait for Jev/Aitta completion or use their generated text.
 | Component | Input | Authority |
 |---|---|---|
 | Scoring/content graph | Submitted indices, private keys, matching taxonomy | Observed counts and descriptive grouping |
-| Jev classifier | Allow-listed aggregate evidence and permitted candidates | Select a permitted observed-evidence feedback focus |
-| Deterministic renderer | Validated evidence and selected focus | Render factual counts and authored review actions |
+| Jev classifier | Allow-listed aggregate evidence and permitted candidates with planning blocks | Select a permitted observed-evidence feedback focus |
+| Deterministic renderer | Validated evidence and selected focus | Record the validated feedback plan; render factual counts and authored review actions |
 | Aitta | Narrow communication context and selected candidate identity | Opening only; no replacement of the evidence-rendered body |
 | Future KT | Forty observed responses plus one unanswered query | Estimate candidate response correctness |
 | Shadow practice policy | Observed topic errors, explicit pool, probabilities, explicit band | Record an experimental recommendation and baseline for research |
@@ -319,71 +320,52 @@ assessed graph concepts, and a single isolated incorrect answer — including
 a 0/1 one-question case — is now `focused_review` rather than
 `supported_review`, which requires multiple incorrect answers and zero
 correct. No hosted calls were made for this change. The Aitta contract is
-byte-for-byte
-unchanged: it still receives only the narrow opening context, so plans,
+byte-for-byte unchanged: it still receives only the narrow opening context,
+so plans,
 evidence and KT never reach it. KT remains separate teacher-only practice
 research and is never provider feedback evidence. Retained captures and the
 warm report are not rewritten; to see the new plan fields, run a fresh
-rules replay instead of reading the retained baseline. The teacher draft
-message already shows the parent counts and isolated-answer note, so no UI
-redesign was needed.
+rules replay instead of reading the retained baseline.
 
-Recorded requirements retained for context:
+The teacher "Selection decision" panel now renders the applied plan without
+opening raw candidate JSON: error pattern (isolated vs multiple incorrect
+answers), assessment coverage (single vs multiple items), parent-topic
+totals, priority group, tied candidate ids, strategy and `KT used: No`. The
+review-option table adds observed-pattern and priority columns. Live
+sessions and scenario replays share this panel (`renderSelectionDecision` in
+`web_demo/app.js`); neutral and optional-consolidation plans show no
+fabricated planning fields, and payloads predating `feedback_plan` simply
+omit the block.
 
-1. **Use the 24-question practice pool for new work.** The accepted pool is
-   `practice_pool_v2_private.json` with 6/6/6/6 topic counts and four
-   user-review-accepted synthetic divisibility questions. Do not delete the
-   original 20-question pool; it is frozen evidence for the completed smoke
-   run, not the current practice source. KT use of the v2 pool requires the
-   augmented embedding table, not the original frozen embedding table.
-   - Frozen KT weights and preprocessing remain unchanged; no retraining is
-     authorized. The augmented table only appends four exact text embeddings
-     for the synthetic prompts/options.
-   - The four synthetic `item_id` values are not in the learned item
-     vocabulary and therefore use the model's cold/unknown-item
-     representation. This makes them queryable, not historically observed
-     items.
-   - Any KT-assisted v2-pool run must explicitly select
-     `kt_phase2_inference/artifacts/text_embeddings_v2_synthetic_practice_20261007.npz`
-     through `KT_PHASE2_TEXT_EMBEDDINGS`; the original frozen embedding table
-     remains the default and unchanged.
-   - `kt_embedding_check.json` proves input compatibility only. Its
-     probabilities are a scripted smoke result, not difficulty,
-     appropriateness, learning-benefit or performance validation.
-2. **Remove conformal from the active prototype.** Stop computing and
-   displaying live conformal diagnostics in `demo_service.py`,
-   `live_diagnostics.py` and `web_demo/`. Keep historical Phase 4 conformal
-   outputs as preserved research evidence; do not erase prior reports or
-   claim that removing the UI path invalidates them.
-3. **Add a research-bank session mode.** Keep the demo bank preserved, but
-   allow the prototype to run either the warm bank or the cold bank as one
-   40-question assessment. Do not merge warm and cold into an 80-question
-   assessment or mark them approved. The current strict serving validator
-   requires a separate research-mode path because the banks are
-   `independently_math_checked; educator_approval_pending`.
-   - Keep the bank's declared KT item regime in provenance. Cold-bank item
-     IDs use the frozen model's unknown-item representation; that is the
-     intended cold-item input, not a recovered historical item identity.
-   - Both frozen banks use their original exact text embeddings. Only the
-     four synthetic practice rows require the augmented embedding table.
-   - KT probabilities remain research diagnostics and practice-draft inputs;
-     they are not mastery, difficulty or learning-gain claims.
-4. **Create matching research taxonomies.** Derive warm-bank and cold-bank
-   taxonomies from the graph v3 assessed concepts so observed evidence and
-   feedback labels match the selected bank. Keep them descriptive and pending
-   formal educator review.
-5. **Update the student and teacher UI.** Add/select the research bank,
-   update Finnish/English skill and question display handling, distinguish
-   demo/warm/cold sessions, and show graph-based task descriptions without
-   exposing answer keys, internals, pending support links or possible-error
-   interpretations to students.
-6. **Connect v3 evidence to the feedback draft.** Use graph v3 task/concept
-   descriptions and the 24-question practice pool for teacher-facing feedback
-   and KT-assisted practice drafts. Keep provider wording constrained and do
-   not diagnose mastery, misconceptions or causes of selected answers.
-7. **Complete review and release boundaries.** Record formal educator review
-   separately before any student-facing claim or release. Teacher review of a
-   draft is not yet learner-delivery approval.
-8. **Update tests and status docs.** Cover the 24-question source, warm/cold
-   session separation, no active conformal surface, bank-specific taxonomy,
-   privacy fields and the unchanged preserved pools/captures.
+### Remaining requirement and standing constraints
+
+The previously recorded transition items are implemented: the 24-question
+v2 practice pool, conformal removal from the active runtime/UI, warm/cold
+research-bank sessions with graph-v3 taxonomies, the student/teacher UI
+updates, graph-v3 evidence in feedback drafts, and the covering tests.
+One requirement remains open:
+
+- **Complete review and release boundaries.** Record formal educator review
+  separately before any student-facing claim or release. Teacher review of a
+  draft is not yet learner-delivery approval.
+
+Standing constraints from the completed work:
+
+- Do not delete the original 20-question pool; it is frozen evidence for the
+  completed smoke run, not the current practice source. Do not merge warm
+  and cold banks into one assessment or mark them approved.
+- KT use of the v2 pool requires the augmented embedding table
+  `kt_phase2_inference/artifacts/text_embeddings_v2_synthetic_practice_20261007.npz`,
+  selected explicitly through `KT_PHASE2_TEXT_EMBEDDINGS`; the original
+  frozen embedding table remains the default and unchanged. Frozen KT
+  weights and preprocessing remain unchanged — the augmented table only
+  appends four exact text embeddings for the synthetic prompts/options.
+- The four synthetic `item_id` values are not in the learned item vocabulary
+  and use the model's cold/unknown-item representation — queryable, not
+  historically observed items. Cold-bank item IDs likewise use the
+  unknown-item representation by design.
+- `kt_embedding_check.json` proves input compatibility only; its
+  probabilities are a scripted smoke result, not difficulty, learning-benefit
+  or performance validation. KT probabilities remain research diagnostics
+  and practice-draft inputs, not mastery, difficulty or learning-gain
+  claims.

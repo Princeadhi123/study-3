@@ -9,7 +9,7 @@ assessment. The current project is an interactive localhost prototype with:
 - a descriptive assessment graph;
 - optional hosted Jev candidate selection;
 - optional hosted Aitta opening phrasing;
-- private frozen KT and conformal research diagnostics;
+- private frozen KT research diagnostics;
 - educator review records and JSON export.
 
 All sessions are synthetic and all generated feedback is a draft requiring
@@ -46,7 +46,7 @@ Pending:
 - independent educator recruitment, protocol review, and preference evaluation;
 - richer, bounded evidence-grounded feedback composition;
 - a reviewed practice-question/worked-solution bank;
-- calibrated KT/conformal validity for this fixed assessment;
+- calibrated KT validity for this fixed assessment;
 - production authentication, storage, privacy review, and deployment.
 
 The detailed architecture, retained metrics, verification evidence, and
@@ -131,9 +131,10 @@ renderer (including separate review-draft and disclosure state):
 1. Summary — session status, counts, job state, provenance, and replay changes;
 2. Answers & scores — observed skill/subtopic totals and private question records;
 3. Skill map — descriptive hierarchy and observed counts;
-4. Model diagnostics — KT probability charts and conformal checkpoint tables;
+4. Model diagnostics — KT probability charts plus raw trace and provenance detail;
 5. Feedback drafts — baseline versus selected drafts, candidate selection,
-   execution provenance, and halfway student feedback;
+   the applied feedback plan, execution provenance, and halfway student
+   feedback;
 6. Educator review — version-bound review fields, notes, and saved review ledger.
 
 Names describe the answer pattern, for example “Errors in Fractions only” or
@@ -176,8 +177,8 @@ this assessment only, and all scenarios are synthetic test cases — followed by
 collapsed **Research status & next steps** disclosure (`#research-readiness`).
 It is static project-wide guidance, not a per-scenario diagnosis or readiness
 score, and opening it reveals no drafts, candidate IDs, or scenario mappings.
-Six cards summarize, for each component — knowledge tracing, conformal
-prediction, feedback focus/wording, the skill map, synthetic replay, and the
+Five cards summarize, for each component — knowledge tracing, feedback
+focus/draft wording, the skill map and subtopics, synthetic replay, and the
 blind educator comparison — what it does, why it remains research-only, and the
 validation still needed. KT already has recorded predictive evaluation on real
 ViLLE interactions and the 40-question bank is source-derived, but existing
@@ -196,8 +197,7 @@ review, real access controls, TLS, and durable storage are required before any
 real learner use. The research diagnostics tab similarly states that KT was
 trained and predictively evaluated on real ViLLE data, that it estimates
 correctness rather than mastery, that simulated sessions are not additional
-real-learner validation, and that conformal ranges are not guarantees for this
-assessment.
+real-learner validation.
 
 ### Replay scenarios after a change
 
@@ -214,7 +214,7 @@ assessment.
 4. Follow Replay history. One batch runs at a time, one case at a time. Each case
    resubmits its exact original 40 question/option-index pairs through `DemoService`,
    recomputing scores, observed evidence, maps, feedback, and requesting fresh
-   frozen-model/conformal diagnostics at 20 and 40 answers. No retraining occurs.
+   frozen-model diagnostics at 20 and 40 answers. No retraining occurs.
    Fallbacks, unavailable diagnostics, and failed cases remain visibly labelled.
 5. Select **Result version** to switch between the retained original and new runs.
    Summary shows score changes, changed candidate/text per audience, before/after
@@ -287,12 +287,12 @@ DemoService (demo_service.py)
         +-- feedback branch
         |       deterministic baseline
         |       -> optional Jev candidate selection
+        |       -> validated feedback plan (kt_used: false)
         |       -> optional Aitta opening
         |       -> draft requiring educator review
         |
         +-- research branch
         |       frozen KT inference
-        |       -> historical conformal application
         |       -> private teacher diagnostics
         |
         +-- optional shadow practice branch (end checkpoint only,
@@ -342,10 +342,14 @@ descriptive drafts pending educator review, no routing or student use).
 Jev:
 
 - chooses only among permitted observed-evidence-supported candidates;
-- receives allow-listed aggregate skill/subtopic evidence and candidates;
+- receives allow-listed aggregate skill/subtopic evidence and candidates,
+  each with an application-owned planning block (error pattern, item
+  coverage, parent-topic totals, priority group, tied ids);
 - does not receive raw responses, question text, answer keys, session IDs, or
   research probabilities;
 - is bypassed locally when only one candidate is permitted;
+- has its validated selection recorded as a `feedback_plan` with
+  `kt_used: false` before any Aitta call;
 - failure falls back to the deterministic baseline.
 
 Aitta:
@@ -384,9 +388,9 @@ cookie issued by PIN unlock. `artifacts/` contains private key-derived and
 provider-capture data and must remain local/private.
 
 KT uses the frozen variant-D model (`skill_item_content_option`) and does not
-retrain. Conformal applies existing historical calibration data. Both remain
-`exploratory_only_not_fixed_bank_validated` and are not used for student
-advice.
+retrain; it remains `exploratory_only_not_fixed_bank_validated` and is not
+used for student advice. Conformal is not computed in the active runtime —
+its historical outputs are preserved offline artifacts only.
 
 ## 8. Demo API surface
 
@@ -591,20 +595,21 @@ coordinate the server before a memory-heavy full test run.
 
 ## 14. Next work
 
-1. Implement the recorded transition backlog in
-   [FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md): use the 24-question
-   v2 practice pool for new work with the augmented KT text-embedding table,
-   remove conformal from the active runtime/UI, add warm/cold research-bank
-   sessions with matching taxonomies, update student/teacher UI, and connect
-   graph v3 evidence to teacher-facing feedback/practice drafts.
-2. Review the implemented comparison protocol with educators; preregister the
+The recorded transition backlog in
+[FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md) is implemented:
+24-question v2 practice pool, conformal removal from the active runtime/UI,
+warm/cold research-bank sessions with graph-v3 taxonomies, student/teacher
+UI updates, graph-v3 evidence in feedback drafts, and structured feedback
+planning surfaced in the decision panel. Remaining work:
+
+1. Review the implemented comparison protocol with educators; preregister the
    evaluation questions, sampling, duplicate handling, and analysis before data collection.
-3. Run independent educator reviews using the source-masked workflow; inspect
+2. Run independent educator reviews using the source-masked workflow; inspect
    evidence-support judgments as well as preferences, stratified by exposure and execution provenance.
-4. Expand feedback carefully with bounded, evidence-grounded composition.
-5. Maintain the reviewed practice-activity pool and worked explanations under
+3. Expand feedback carefully with bounded, evidence-grounded composition.
+4. Maintain the reviewed practice-activity pool and worked explanations under
    formal educator review.
-6. Validate KT behavior for the selected fixed assessment before any use in
-   advice; conformal is planned for removal from the active prototype.
-7. Only after educator and privacy review, consider a supervised pilot and
+5. Validate KT behavior for the selected fixed assessment before any use in
+   advice.
+6. Only after educator and privacy review, consider a supervised pilot and
    production hardening.

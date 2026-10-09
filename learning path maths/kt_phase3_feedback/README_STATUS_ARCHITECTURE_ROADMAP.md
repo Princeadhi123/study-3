@@ -89,7 +89,9 @@ DemoService (demo_service.py)
   content text, source paths and answer keys. Submissions use opaque
   session/position tokens plus an option index. Jev receives allow-listed
   aggregate observed skill/subtopic counts and permitted candidates only —
-  never raw responses, question texts, session IDs, or research probabilities.
+  each carrying an application-owned planning block (error pattern, item
+  coverage, parent-topic totals, priority group, tied ids) — never raw
+  responses, question texts, session IDs, or research probabilities.
 
 ## 4. Student and teacher experience
 
@@ -107,7 +109,10 @@ DemoService (demo_service.py)
   patterns, not diagnoses.
 - **Selection decision panel** (Feedback tab): shows applied focus, candidate
   ID, observed incorrect/out-of counts, baseline comparison, per-candidate
-  Selected/Baseline marks, selection provenance (Jev cached/fresh/local
+  Selected/Baseline marks plus observed-pattern and priority columns, and the
+  applied feedback plan (error pattern, assessment coverage, parent-topic
+  totals, priority group, tied candidate ids, strategy, `KT used: No`).
+  Also shown: selection provenance (Jev cached/fresh/local
   fallback/unverified), Aitta provenance, and selector model version only for
   confirmed hosted executions.
 - **Review tab**: five unscored fields from `educator_review_contract.py` —
@@ -216,9 +221,13 @@ claims are generated. Completed reviews are not learner-delivery approval.
   including replay exports, omit conformal/calibration output without
   rewriting saved captures.
 - Jev selects a permitted observed-error focus; a single permitted candidate
-  bypasses Jev locally. Candidate priority: highest incorrect count, then
+  bypasses Jev locally. Each candidate carries an application-owned planning
+  block (isolated vs multiple errors, item coverage, parent-topic totals,
+  priority group, tied ids). Candidate priority: highest incorrect count, then
   highest incorrect fraction, then stable taxonomy order — an unvalidated
-  presentation heuristic. All-correct yields "optional consolidation."
+  presentation heuristic. All-correct yields "optional consolidation." The
+  validated selection is recorded as a deep-copied `feedback_plan` with
+  `kt_used: false` before Aitta runs.
 - The app controls facts and most wording; **Aitta supplies the opening
   sentence only** (verified in `integrated_synthetic_pipeline.aitta_request` /
   `evidence_providers.EvidenceAittaGenerator`). The effective hosted wire for
@@ -460,6 +469,21 @@ introduced. See `FEEDBACK_AND_PRACTICE.md` for the current launch command and
   constrained, use the 24-question pool for KT-assisted practice drafts,
   retain teacher review and implement a separate release gate before any
   learner delivery.
+
+### Structured feedback planning (implemented 2026-10-09)
+
+Each permitted Jev candidate carries an application-owned planning block —
+isolated vs multiple incorrect answers, single vs multi-item coverage,
+parent-topic totals, display priority group and exact tied candidate ids.
+`run_feedback` returns the validated selection as a deep-copied
+`feedback_plan` (`phase3_observed_feedback_plan_v1`, `kt_used=False`) before
+Aitta runs; the Aitta payload is unchanged. All eight assessed graph
+concepts have authored review actions, and a single incorrect answer no
+longer triggers the stronger supported-review action. The Feedback tab
+decision panel renders the plan directly (error pattern, coverage, parent
+totals, priority, ties, `KT used: No`) — see `FEEDBACK_AND_PRACTICE.md`.
+Jev does not yet select practice questions; that remains a separate
+contract.
 
 1. **Educator protocol and evaluation** — review the implemented source-masked
    comparison protocol, preregister sampling/analysis and duplicate handling,
