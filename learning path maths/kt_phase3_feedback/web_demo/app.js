@@ -227,6 +227,27 @@ function hostedConfirmed(exec, prefix) {
     && (exec.metadata || {}).status === "completed";
 }
 
+const FAILURE_KIND_LABELS = new Set(
+  ["timeout", "http_error", "network_error", "transport_error"]);
+const FAILURE_STAGE_LABELS = new Set([
+  "open_failed", "body_read_failed", "close_failed", "not_called",
+  "open_started", "response_received", "body_read_started",
+  "body_received", "response_contract_or_full_feedback_validation",
+  "response_contract_or_opening_validation"]);
+
+function captureProvenanceKind(execution, failed = false) {
+  const exec = execution || {};
+  if (exec.reused === true) {
+    return failed ? "cached failure" : "cached hosted response";
+  }
+  if (exec.retry_of_failed_capture === true) {
+    return failed ? "fresh hosted retry failed" : "fresh hosted retry";
+  }
+  if (failed) return "fresh hosted call failed";
+  if (exec.reused === false) return "fresh hosted response";
+  return "hosted response (reuse status unavailable)";
+}
+
 function selectionProvenance(review, job, selExec) {
   if (!review) {
     return (job && job.status === "pending")
@@ -246,9 +267,7 @@ function selectionProvenance(review, job, selExec) {
   }
   if (source === "injected_selector") {
     if (hostedConfirmed(selExec, "jev_")) {
-      if (selExec.reused === true) return "Jev - cached hosted response";
-      if (selExec.reused === false) return "Jev - fresh hosted response";
-      return "Jev - hosted response (reuse status unavailable)";
+      return `Jev - ${captureProvenanceKind(selExec)}`;
     }
     return "Injected selector - hosted provenance unavailable";
   }
@@ -258,26 +277,36 @@ function selectionProvenance(review, job, selExec) {
 function aittaProvenance(review, genExec) {
   if (!review) return null;
   const trace = review.trace || {};
+  const exec = genExec || {};
+  const metadata = exec.metadata || {};
+  const transport = metadata.transport || {};
+  if (metadata.status === "failed"
+      && typeof exec.capture_file === "string"
+      && exec.capture_file.startsWith("aitta_")) {
+    const detail = [
+      FAILURE_KIND_LABELS.has(transport.failure_kind)
+        ? transport.failure_kind : null,
+      FAILURE_STAGE_LABELS.has(metadata.failure_stage)
+        ? metadata.failure_stage : null]
+      .filter(Boolean).join(", ");
+    return `Aitta - ${captureProvenanceKind(exec, true)}` +
+      `${detail ? ` (${detail})` : ""} - deterministic feedback used`;
+  }
   if (trace.phrasing_source === "injected_generator_full_sections") {
-    if (hostedConfirmed(genExec, "aitta_")) {
-      const kind = genExec.reused === true ? "cached hosted response"
-        : genExec.reused === false ? "fresh hosted response"
-        : "hosted response (reuse status unavailable)";
-      return `Aitta - ${kind} (full structured feedback)`;
+    if (hostedConfirmed(exec, "aitta_")) {
+      return `Aitta - ${captureProvenanceKind(exec)}` +
+        " (full structured feedback)";
     }
     return "Injected full-feedback generator - hosted provenance " +
       "unavailable";
   }
   if (trace.phrasing_source === "injected_generator_opening_only") {
-    if (hostedConfirmed(genExec, "aitta_")) {
-      const kind = genExec.reused === true ? "cached hosted response"
-        : genExec.reused === false ? "fresh hosted response"
-        : "hosted response (reuse status unavailable)";
-      return `Aitta - ${kind} (opening only)`;
+    if (hostedConfirmed(exec, "aitta_")) {
+      return `Aitta - ${captureProvenanceKind(exec)} (opening only)`;
     }
     return "Injected opening generator - hosted provenance unavailable";
   }
-  return "Deterministic opening";
+  return "Deterministic feedback";
 }
 
 function renderSelectionDecision(audience, review, baseline,

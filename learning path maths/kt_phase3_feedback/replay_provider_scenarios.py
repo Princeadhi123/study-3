@@ -4,10 +4,13 @@ Identical provider requests share captured responses. This tests integration
 coverage, not independent rerun stability, educational quality, or learning.
 """
 import argparse
+import contextlib
+import contextvars
 import copy
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -120,38 +123,90 @@ def generation_request(payload, model):
 class CaptureCache:
     def __init__(self, root, budget):
         self.root, self.budget, self.new_calls = root, budget, 0
+        self._lock = threading.RLock()
+        self._retry_failed = contextvars.ContextVar(
+            f"retry_failed_{id(self)}", default=False)
+
+    @contextlib.contextmanager
+    def retry_failed_scope(self, enabled):
+        if type(enabled) is not bool:
+            raise ValueError("retry scope requires a boolean")
+        token = self._retry_failed.set(enabled)
+        try:
+            yield
+        finally:
+            self._retry_failed.reset(token)
 
     def path(self, provider, request):
         return self.root / f"{provider}_{digest(request)}.json"
 
+    def _attempt_path(self, base, number):
+        return base.with_name(f"{base.stem}_attempt_{number:09d}.json")
+
+    def _attempts(self, base):
+        prefix = f"{base.stem}_attempt_"
+        found = []
+        for candidate in base.parent.glob(f"{prefix}*.json"):
+            suffix = candidate.stem[len(prefix):]
+            if suffix.isdecimal() and int(suffix) >= 2:
+                found.append((int(suffix), candidate))
+        return sorted(found)
+
+    def _latest_record(self, provider, request):
+        base = self.path(provider, request)
+        latest, number = base, 1
+        for suffix, candidate in self._attempts(base):
+            if suffix > number:
+                latest, number = candidate, suffix
+        if latest.exists() and not latest.is_file():
+            raise ValueError("capture path is not a file")
+        if not latest.is_file():
+            return latest, None, number
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        if record["provider"] != provider or record["request"] != request:
+            raise ValueError("cache request does not match its capture")
+        return latest, record, number
+
     def obtain(self, provider, request, callback, adapter):
-        path = self.path(provider, request)
-        reused = path.exists()
-        if reused:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if record["provider"] != provider or record["request"] != request:
-                raise ValueError("cache request does not match its capture")
-        else:
-            if self.budget is not None and self.new_calls >= self.budget:
-                raise SystemExit("new-call budget exhausted; captures retained for resume")
-            self.new_calls += 1
-            start = time.perf_counter()
-            try:
-                reply = callback()
-                ok = True
-            except Exception:
-                reply, ok = None, False
-            record = {"provider": provider, "request": request, "ok": ok,
-                      "reply": reply, "metadata": adapter.last_metadata,
-                      "original_call_latency_ms":
-                          round((time.perf_counter() - start) * 1000, 3),
-                      "origin": "hosted_replay"}
-            write_new(path, record)
-            print(f"Captured {provider} call {self.new_calls}: "
-                  f"{'completed' if ok else 'failed'}", flush=True)
+        with self._lock:
+            base = self.path(provider, request)
+            path, record, number = self._latest_record(provider, request)
+            previous = path.name
+            reused = record is not None and (
+                record["ok"] or not self._retry_failed.get())
+            if not reused:
+                retry = record is not None
+                if retry:
+                    path = self._attempt_path(base, number + 1)
+                if self.budget is not None and self.new_calls >= self.budget:
+                    raise SystemExit("new-call budget exhausted; captures retained for resume")
+                self.new_calls += 1
+                start = time.perf_counter()
+                try:
+                    reply = callback()
+                    ok = True
+                except Exception:
+                    reply, ok = None, False
+                record = {"provider": provider, "request": request, "ok": ok,
+                          "reply": reply, "metadata": adapter.last_metadata,
+                          "original_call_latency_ms":
+                              round((time.perf_counter() - start) * 1000, 3),
+                          "origin": "hosted_replay"}
+                if retry:
+                    record.update({
+                        "attempt_number": number + 1,
+                        "retry_of_failed_capture": True,
+                        "previous_capture_file": previous})
+                write_new(path, record)
+                print(f"Captured {provider} call {self.new_calls}: "
+                      f"{'completed' if ok else 'failed'}", flush=True)
         execution = {"capture_file": path.name, "reused": reused,
                      "origin": record["origin"], "metadata": record["metadata"],
                      "original_call_latency_ms": record["original_call_latency_ms"]}
+        for key in ("attempt_number", "retry_of_failed_capture",
+                    "previous_capture_file"):
+            if key in record:
+                execution[key] = record[key]
         if not record["ok"]:
             return None, execution
         return copy.deepcopy(record["reply"]), execution

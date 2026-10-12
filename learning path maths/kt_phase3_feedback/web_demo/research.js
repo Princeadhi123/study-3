@@ -34,6 +34,14 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     return el("p", message, className);
   }
 
+  function replayProviderLabel(run) {
+    if (run.provider_mode === "rules") return "Rules only";
+    if (run.retry_failed_provider_calls) {
+      return "Configured providers · retry failed calls enabled";
+    }
+    return "Configured providers · capture reuse";
+  }
+
   function failure(container, retry) {
     container.replaceChildren(heading("CONNECTION", "This view could not be loaded.",
       "Check the local server. If your access expired, reload and unlock the workspace."),
@@ -257,7 +265,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     versionPicker.append(original);
     runs.filter((run) => run.cases.some((c) => c.scenario_id === chosen)).forEach((run) => {
       const row = run.cases.find((c) => c.scenario_id === chosen);
-      const option = el("option", `${new Date(run.created_at).toLocaleString()} · ${run.provider_mode === "rules" ? "Rules only" : "Configured providers"} · ${statusLabel(row.status)}`);
+      const option = el("option", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)} · ${statusLabel(row.status)}`);
       option.value = run.id; versionPicker.append(option);
     });
     if (![...versionPicker.options].some((o) => o.value === selectedRun)) selectedRun = "";
@@ -344,7 +352,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       const section = el("details", null, "run-record");
       section.dataset.runId = run.id;
       section.open = open.get(run.id) ?? ["running", "queued", "cancelling"].includes(run.status);
-      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${run.provider_mode === "rules" ? "Rules only" : "Configured providers"} · ${statusLabel(run.status)} · ${run.completed}/${run.total}`));
+      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)} · ${statusLabel(run.status)} · ${run.completed}/${run.total}`));
       const progress = el("progress"); progress.max = run.total;
       progress.value = run.cases.filter((c) => !["running", "queued"].includes(c.status)).length;
       progress.setAttribute("aria-label", "Replay cases processed");
@@ -406,16 +414,26 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const approval = el("label", null, "attestation");
     const budget = getConfig().call_budget;
     approval.append(consent, el("span", budget.limit === null
-      ? "I approve hosted calls for this run. The server sets no local cap on new calls; provider charges may apply. Matching requests may reuse captures."
-      : "I approve hosted calls for this run within the server's remaining call budget. Matching requests may reuse captures."));
+      ? "I approve hosted calls for this run. The server sets no local cap on new calls; provider charges may apply. Successful captures are reused; failed calls are retried only when the retry option is on."
+      : "I approve hosted calls for this run within the server's remaining call budget. Successful captures are reused; failed calls are retried only when the retry option is on."));
     approval.hidden = true;
-    mode.addEventListener("change", () => { approval.hidden = mode.value !== "hosted"; consent.required = mode.value === "hosted"; });
+    const retry = el("input"); retry.type = "checkbox"; retry.id = "replay-retry-failed"; retry.checked = true;
+    const retryApproval = el("label", null, "attestation");
+    retryApproval.append(retry, el("span", "Retry failed provider calls; reuse successful captures."));
+    retryApproval.hidden = true;
+    const retryNote = notice("Each failed call may make one new attempt per scenario, using the existing call budget. Previous failures are preserved. A retry can still fail or time out.", "meta small");
+    retryNote.hidden = true;
+    mode.addEventListener("change", () => {
+      const hosted = mode.value === "hosted";
+      approval.hidden = !hosted; consent.required = hosted;
+      retryApproval.hidden = !hosted; retryNote.hidden = !hosted;
+    });
     const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit ?? "unlimited"}.`);
     const error = el("p", "", "error"); error.hidden = true; error.setAttribute("role", "alert");
     const start = el("button", "Start replay", "primary"); start.type = "submit"; start.id = "confirm-replay";
     const cancel = button("Cancel", () => closeReplayDialog(dialog));
     const actions = el("div", null, "replay-toolbar"); actions.append(start, cancel);
-    form.append(title, explanation, field("Feedback execution", mode), approval,
+    form.append(title, explanation, field("Feedback execution", mode), approval, retryApproval, retryNote,
       notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the current one finishes.", "meta small"), error, actions);
     dialog.append(form); document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
@@ -426,7 +444,8 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       try {
         const run = await api("/api/teacher/replays", {body: {request_id: requestId,
           report_sha256: library.report_sha256, scenario_ids: selectedIds, provider_mode: mode.value,
-          allow_provider_calls: mode.value === "hosted" && consent.checked}});
+          allow_provider_calls: mode.value === "hosted" && consent.checked,
+          retry_failed_provider_calls: mode.value === "hosted" && retry.checked}});
         if (chosen && selectedIds.includes(chosen)) selectedRun = run.id;
         closeReplayDialog(dialog);
         await refreshRuns();

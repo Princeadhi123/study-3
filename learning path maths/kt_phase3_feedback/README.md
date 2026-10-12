@@ -270,6 +270,11 @@ real-learner validation.
    is configured for hosted providers. Hosted replay requires explicit consent,
    shares the server's existing call budget and serialized provider worker, and
    retains effective-request cache reuse. It does not force fresh independent calls.
+   The hosted panel also offers **Retry failed provider calls; reuse successful
+   captures** (on by default): each scenario gets at most one new attempt per
+   matching failed provider request in that run — it can still fail or time
+   out — while
+   successful captures are always reused. Uncheck it to reuse failures as before.
 4. Follow Replay history. One batch runs at a time, one case at a time. Each case
    resubmits its exact original 40 question/option-index pairs through `DemoService`,
    recomputing scores, observed evidence, maps, feedback, and requesting fresh
@@ -472,12 +477,26 @@ Aligned KT practice (same 40-answer end checkpoint):
 `CaptureCache` reuses a recorded response only when the effective provider
 request matches — the cached body includes the prompt, so the new multi
 prompt versions isolate old single-mode captures without deleting them.
-Reuse is real captured provider output but is not a fresh or independent
-provider trial. The default per-process cap is 12 new calls;
+Successful matching captures are always reused; failed captures are also
+reused by default so offline, batch, and older-API behavior is unchanged.
+The hosted replay UI and API (`retry_failed_provider_calls`, default off
+for API callers, on in the dialog) may opt a single replay run into
+retrying the latest failed capture: the scope is that run's sessions only,
+never a global switch, and there is no automatic retry loop — each scenario
+in a flagged run makes at most one new attempt per matching failed provider
+request, still inside the
+existing call budget and explicit consent. A retry appends an immutable
+`..._attempt_NNNNNNNNN.json` record next to the base capture; failed
+history is never overwritten, deleted, or renamed, and a successful retry
+becomes the reused capture for later calls, including after a restart —
+no fresh cache root is needed. Reuse is real captured provider output but
+is not a fresh or independent provider trial. The default per-process cap
+is 12 new calls;
 `--unlimited-calls` removes it (mutually exclusive with `--call-budget`).
 Normally at most one Jev call plus one Aitta call run per completed
 scenario — not one per focus. The dashboard distinguishes fresh hosted,
-cached hosted, local resolution, deterministic fallback, and unverified
+fresh hosted retry, cached hosted, local resolution, deterministic
+fallback, and unverified
 provenance; terminal "Captured" logs show only new calls.
 
 The UI's English labels and question translations are display-layer prototype

@@ -956,8 +956,7 @@ class DemoService:
                 "queued_at": utc_now()}
             try:
                 self.provider_pool.submit(
-                    self._run_multi_provider_job if multi
-                    else self._run_provider_job, session_id)
+                    self._run_provider_job_with_cache_policy, session_id)
             except RuntimeError:
                 self._pending_provider -= 1
                 meta["provider_job"] = {
@@ -1305,6 +1304,21 @@ class DemoService:
                     getattr(self.generator, "execution", None))
                 or {"status": "worker_error"}}
         return review, executions
+
+    def _run_provider_job_with_cache_policy(self, session_id):
+        with self.lock:
+            meta = self._load_meta(session_id)
+            retry = (meta["provider_job"]["provider_mode"] == "hosted"
+                     and (meta.get("replay") or {}).get(
+                         "retry_failed_provider_calls") is True)
+            multi = self._is_multi(meta)
+        worker = (self._run_multi_provider_job if multi
+                  else self._run_provider_job)
+        if self.cache is not None:
+            with self.cache.retry_failed_scope(retry):
+                worker(session_id)
+        else:
+            worker(session_id)
 
     def _run_provider_job(self, session_id):
         try:

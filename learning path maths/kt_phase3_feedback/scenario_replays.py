@@ -171,8 +171,13 @@ class ScenarioReplays:
         return detail
 
     def start(self, body):
-        if set(body) != {"request_id", "report_sha256", "scenario_ids", "provider_mode", "allow_provider_calls"}:
+        keys = {"request_id", "report_sha256", "scenario_ids",
+                "provider_mode", "allow_provider_calls"}
+        if set(body) != keys and set(body) != keys | {"retry_failed_provider_calls"}:
             raise ValueError("invalid replay request")
+        retry_failed = body.get("retry_failed_provider_calls", False)
+        if type(retry_failed) is not bool:
+            raise ValueError("invalid replay selection")
         self._path(body["request_id"])
         ids = body["scenario_ids"]
         if (not isinstance(ids, list) or not 1 <= len(ids) <= 54
@@ -183,6 +188,9 @@ class ScenarioReplays:
         if body["provider_mode"] == "hosted" and (
                 self.service.provider_mode != "hosted" or not body["allow_provider_calls"]):
             raise ValueError("hosted replay requires configuration and explicit consent")
+        if retry_failed and (
+                body["provider_mode"] != "hosted" or not body["allow_provider_calls"]):
+            raise ValueError("retrying failed calls requires hosted mode with provider consent")
         with self.lock:
             if self._path(body["request_id"]).exists():
                 existing = self._read(body["request_id"])
@@ -208,6 +216,7 @@ class ScenarioReplays:
                       "request": copy.deepcopy(body), "created_at": utc_now(), "status": "queued",
                       "report_sha256": body["report_sha256"], "source": library["source"],
                       "code_sha256": self.code, "provider_mode": body["provider_mode"],
+                      "retry_failed_provider_calls": retry_failed,
                       "diagnostics_mode": "fresh_frozen_model_inference", "cancel_requested": False,
                       "cases": [{"scenario_id": i, "name": index[i]["name"],
                                  "display_name": index[i]["display_name"], "status": "queued",
@@ -261,7 +270,9 @@ class ScenarioReplays:
                 self._save(record)
             try:
                 replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
-                          "scenario_name": row["name"], "report_sha256": record["report_sha256"]}
+                          "scenario_name": row["name"], "report_sha256": record["report_sha256"],
+                          "retry_failed_provider_calls":
+                              record.get("retry_failed_provider_calls", False)}
                 created = self.service.create_session(label=row["display_name"], replay=replay,
                                                       provider_mode=record["provider_mode"],
                                                       bank_mode=record.get("bank_mode", "demo"))
