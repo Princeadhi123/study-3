@@ -311,6 +311,17 @@ class DemoServiceTests(unittest.TestCase):
         self.assertEqual(review["trace"]["fallback_reason"],
                          "demo_call_budget_exhausted")
 
+    def test_teacher_config_unlimited_limit_serializes_null(self):
+        service = self._service(
+            provider_mode="hosted", call_budget=None,
+            selector=BlockingSelector(threading.Event()),
+            generator=FakeGenerator())
+        self.addCleanup(service.close)
+        config = service.teacher_config()
+        self.assertIsNone(config["call_budget"]["limit"])
+        self.assertEqual(config["call_budget"]["used"], 0)
+        self.assertIn('"limit": null', json.dumps(config))
+
     def test_single_candidate_emits_local_status(self):
         service = self._service(
             provider_mode="hosted",

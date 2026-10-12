@@ -489,7 +489,9 @@ def main(argv=None):
     parser.add_argument("--providers", choices=("rules", "hosted"),
                         default="rules")
     parser.add_argument("--jev-env-file", type=Path)
-    parser.add_argument("--call-budget", type=int, default=12)
+    budget = parser.add_mutually_exclusive_group()
+    budget.add_argument("--call-budget", type=int, default=12)
+    budget.add_argument("--unlimited-calls", action="store_true")
     parser.add_argument("--provider-timeout", type=float, default=120.0)
     parser.add_argument("--teacher-pin")
     parser.add_argument("--replay-bank-mode", choices=("demo", "warm"),
@@ -518,7 +520,8 @@ def main(argv=None):
     pin = args.teacher_pin or f"{secrets.randbelow(1_000_000):06d}"
     service = DemoService(
         root=args.root, provider_mode=args.providers,
-        jev_env_file=args.jev_env_file, call_budget=args.call_budget,
+        jev_env_file=args.jev_env_file,
+        call_budget=None if args.unlimited_calls else args.call_budget,
         provider_timeout=args.provider_timeout, replay_report=args.replay_report,
         replay_source=args.replay_source,
         practice_pool=practice_pool,

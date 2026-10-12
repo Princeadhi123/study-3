@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
+import demo_api
 from demo_api import make_server
 from demo_service import DemoService
 from tests.helpers import make_bank, make_taxonomy, responses
@@ -23,6 +24,7 @@ from tests.test_research_workspace import make_report, judgment
 from tests.test_scenario_replays import replay_fixture
 from research_workspace import ResearchWorkspace
 import secrets
+from unittest import mock
 
 PIN = "246810"
 
@@ -854,6 +856,29 @@ class IntegratedPracticeAPITests(DemoAPITests):
         for needle in ("pool_q", "p_correct", "answer_index",
                        "pool_sha256", "item_id", "recommendation"):
             self.assertNotIn(needle, blob)
+
+
+class DemoApiCliTests(unittest.TestCase):
+    def run_main(self, argv):
+        with mock.patch.object(demo_api, "DemoService") as service_cls, \
+                mock.patch.object(demo_api, "make_server") as make:
+            make.return_value.server_address = ("127.0.0.1", 0)
+            demo_api.main(argv)
+        return service_cls
+
+    def test_call_budget_flag_forwarding(self):
+        self.assertEqual(
+            self.run_main([]).call_args.kwargs["call_budget"], 12)
+        self.assertIsNone(
+            self.run_main(["--unlimited-calls"])
+            .call_args.kwargs["call_budget"])
+        self.assertEqual(
+            self.run_main(["--call-budget", "20"])
+            .call_args.kwargs["call_budget"], 20)
+
+    def test_budget_flags_are_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            demo_api.main(["--unlimited-calls", "--call-budget", "5"])
 
 
 if __name__ == "__main__":

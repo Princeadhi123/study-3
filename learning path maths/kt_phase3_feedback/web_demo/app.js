@@ -789,7 +789,7 @@ function teacherPage() {
           (shadow.target_band ? ` · band ${shadow.target_band.join("–")}` : "")
         : "disabled"),
       `New provider calls this server run: ` +
-      `${budget.used ?? 0} / ${budget.limit ?? "—"}`,
+      `${budget.used ?? 0} / ${budget.limit ?? "unlimited"}`,
       `diagnostics: ${diag.status || "unknown"}`,
       `policy ${config.policy_version}`,
       "synthetic only — drafts require educator review",

@@ -120,6 +120,52 @@ class ProviderReplayTests(unittest.TestCase):
                     evidence_for(snapshot["cases"][0], "student", "end"), selector)
             self.assertEqual(opener.requests, [])
 
+    def test_unlimited_budget_obtains_then_reuses(self):
+        adapter = JevSelector("fake-key", opener=FakeOpener(ok_body()))
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), None)
+            for index in range(15):
+                reply, execution = cache.obtain(
+                    "jev", {"request": index},
+                    lambda index=index: calls.append(index) or {"ok": index},
+                    adapter)
+                self.assertEqual(reply, {"ok": index})
+                self.assertFalse(execution["reused"])
+            self.assertEqual(cache.new_calls, 15)
+            self.assertEqual(len(calls), 15)
+            reply, execution = cache.obtain(
+                "jev", {"request": 0},
+                lambda: calls.append(0) or {"ok": 0}, adapter)
+            self.assertEqual(reply, {"ok": 0})
+            self.assertTrue(execution["reused"])
+            self.assertEqual(cache.new_calls, 15)
+            self.assertEqual(len(calls), 15)
+            self.assertEqual(len(list(Path(tmp).glob("*.json"))), 15)
+
+    def test_finite_budget_blocks_second_distinct_request(self):
+        adapter = JevSelector("fake-key", opener=FakeOpener(ok_body()))
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), 1)
+            reply, execution = cache.obtain(
+                "jev", {"request": "first"},
+                lambda: calls.append("first") or {"ok": True}, adapter)
+            self.assertTrue(reply["ok"])
+            self.assertFalse(execution["reused"])
+            with self.assertRaises(SystemExit):
+                cache.obtain("jev", {"request": "second"},
+                             lambda: calls.append("second"), adapter)
+            self.assertEqual(calls, ["first"])
+            self.assertEqual(cache.new_calls, 1)
+            reply, execution = cache.obtain(
+                "jev", {"request": "first"},
+                lambda: calls.append("again"), adapter)
+            self.assertTrue(reply["ok"])
+            self.assertTrue(execution["reused"])
+            self.assertEqual(calls, ["first"])
+            self.assertEqual(cache.new_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

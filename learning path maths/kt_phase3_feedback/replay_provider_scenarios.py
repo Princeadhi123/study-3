@@ -132,7 +132,7 @@ class CaptureCache:
             if record["provider"] != provider or record["request"] != request:
                 raise ValueError("cache request does not match its capture")
         else:
-            if self.new_calls >= self.budget:
+            if self.budget is not None and self.new_calls >= self.budget:
                 raise SystemExit("new-call budget exhausted; captures retained for resume")
             self.new_calls += 1
             start = time.perf_counter()

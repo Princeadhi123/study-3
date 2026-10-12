@@ -404,11 +404,13 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     mode.options[1].disabled = getConfig().provider_mode !== "hosted";
     const consent = el("input"); consent.type = "checkbox"; consent.id = "replay-hosted-consent";
     const approval = el("label", null, "attestation");
-    approval.append(consent, el("span", "I approve hosted calls for this run within the server's remaining call budget. Matching requests may reuse captures."));
+    const budget = getConfig().call_budget;
+    approval.append(consent, el("span", budget.limit === null
+      ? "I approve hosted calls for this run. The server sets no local cap on new calls; provider charges may apply. Matching requests may reuse captures."
+      : "I approve hosted calls for this run within the server's remaining call budget. Matching requests may reuse captures."));
     approval.hidden = true;
     mode.addEventListener("change", () => { approval.hidden = mode.value !== "hosted"; consent.required = mode.value === "hosted"; });
-    const budget = getConfig().call_budget;
-    const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit}.`);
+    const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit ?? "unlimited"}.`);
     const error = el("p", "", "error"); error.hidden = true; error.setAttribute("role", "alert");
     const start = el("button", "Start replay", "primary"); start.type = "submit"; start.id = "confirm-replay";
     const cancel = button("Cancel", () => closeReplayDialog(dialog));
