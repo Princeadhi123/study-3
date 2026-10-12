@@ -1418,7 +1418,8 @@ class DemoService:
                 self._pending_provider = max(
                     0, self._pending_provider - 1)
 
-    def _aligned_recommendation(self, session_id, rows, skill_ids):
+    def _aligned_recommendation(self, session_id, rows, skill_ids,
+                                review_subtopic_ids=None):
         try:
             with self.lock:
                 meta = self._load_meta(session_id)
@@ -1427,7 +1428,8 @@ class DemoService:
                 copy.deepcopy(context["bank"]),
                 copy.deepcopy(context["taxonomy"]), rows,
                 list(skill_ids),
-                research=meta.get("bank_mode", "demo") != "demo")
+                research=meta.get("bank_mode", "demo") != "demo",
+                review_subtopic_ids=copy.deepcopy(review_subtopic_ids))
             if not isinstance(result, dict):
                 raise ValueError("invalid recommendation result")
             result["used_for_student_advice"] = False
@@ -1510,6 +1512,9 @@ class DemoService:
                 originals = selection["bundle"]["review_candidates"]
                 skill_ids = [c["focus"]["skill_id"] for c in originals
                              if c.get("focus")]
+                review_subtopic_ids = {
+                    c["focus"]["skill_id"]: c["focus"]["subtopic_id"]
+                    for c in originals if c.get("focus")}
                 if self.recommender is None:
                     rec_result = {
                         "status": "disabled", "mode": "shadow_only",
@@ -1553,7 +1558,8 @@ class DemoService:
                             future = self.diag_pool.submit(
                                 self._aligned_recommendation,
                                 session_id, copy.deepcopy(rows),
-                                list(skill_ids))
+                                list(skill_ids),
+                                copy.deepcopy(review_subtopic_ids))
                             rec_result, rec_job = future.result()
                         finally:
                             with self.lock:

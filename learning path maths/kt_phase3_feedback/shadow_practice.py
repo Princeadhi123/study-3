@@ -118,22 +118,40 @@ def select_predictions(candidates, prediction_result, skills, band):
     }
 
 
-ALIGNED_PRACTICE_POLICY_VERSION = "one_in_band_question_per_selected_skill_v1"
+ALIGNED_PRACTICE_POLICY_VERSION = "prefer_exact_subtopic_in_band_per_selected_skill_v2"
 
 
-def select_aligned_predictions(candidates, prediction_result, skills, band,
-                               review_skill_ids):
-    if (not isinstance(review_skill_ids, (list, tuple))
-            or len(review_skill_ids) > 2
-            or len(set(review_skill_ids)) != len(review_skill_ids)
-            or any(sid not in skills or not skills[sid]["incorrect"]
-                   for sid in review_skill_ids)):
-        raise ValueError("practice requires up to two distinct observed-error skills")
-    if any(q["skill_id"] not in review_skill_ids for q in candidates):
-        raise ValueError("practice candidates must follow selected review skills")
-    checked = select_predictions(candidates, prediction_result, skills, band)
-    predictions = {p["question_id"]: p
-                   for p in checked["candidate_predictions"]}
+def _validate_review_subtopics(review_skill_ids, review_subtopic_ids):
+    if review_subtopic_ids is not None and (
+            not isinstance(review_subtopic_ids, dict)
+            or set(review_subtopic_ids) != set(review_skill_ids)
+            or any(not isinstance(value, str) or not value.strip()
+                   for value in review_subtopic_ids.values())):
+        raise ValueError("review subtopics must match the selected review skills")
+
+
+def _validate_candidate_subtopics(candidates, candidate_subtopic_ids):
+    if (not isinstance(candidate_subtopic_ids, dict)
+            or set(candidate_subtopic_ids)
+            != {q["question_id"] for q in candidates}
+            or any(not isinstance(value, str) or not value.strip()
+                   for value in candidate_subtopic_ids.values())):
+        raise ValueError("practice subtopics must match the eligible candidates")
+
+
+def _exact_subtopic_selection(group, predictions, skills, band,
+                              review_subtopic, candidate_subtopic_ids):
+    exact = [q for q in group
+             if candidate_subtopic_ids[q["question_id"]]
+             == review_subtopic]
+    return select_predictions(
+        exact, {"predictions": [predictions[q["question_id"]]
+                                for q in exact]}, skills, band)
+
+
+def _aligned_skill_slots(candidates, predictions, skills, band,
+                         review_skill_ids, review_subtopic_ids,
+                         candidate_subtopic_ids):
     selected_ids, slots = [], []
     for sid in review_skill_ids:
         group = [q for q in candidates if q["skill_id"] == sid]
@@ -141,6 +159,12 @@ def select_aligned_predictions(candidates, prediction_result, skills, band,
             group, {"predictions": [predictions[q["question_id"]]
                                     for q in group]}, skills, band)
         qid = result["selected_question_id"]
+        if review_subtopic_ids is not None:
+            exact_result = _exact_subtopic_selection(
+                group, predictions, skills, band,
+                review_subtopic_ids[sid], candidate_subtopic_ids)
+            if exact_result["selected_question_id"] is not None:
+                qid = exact_result["selected_question_id"]
         if qid is not None:
             selected_ids.append(qid)
         slots.append({
@@ -151,6 +175,29 @@ def select_aligned_predictions(candidates, prediction_result, skills, band,
                        "no_eligible_unattempted_error_topic_candidates"),
             "selected_question_id": qid,
             "baseline_question_id": result["baseline_question_id"]})
+    return selected_ids, slots
+
+
+def select_aligned_predictions(candidates, prediction_result, skills, band,
+                               review_skill_ids, review_subtopic_ids=None,
+                               candidate_subtopic_ids=None):
+    if (not isinstance(review_skill_ids, (list, tuple))
+            or len(review_skill_ids) > 2
+            or len(set(review_skill_ids)) != len(review_skill_ids)
+            or any(sid not in skills or not skills[sid]["incorrect"]
+                   for sid in review_skill_ids)):
+        raise ValueError("practice requires up to two distinct observed-error skills")
+    if any(q["skill_id"] not in review_skill_ids for q in candidates):
+        raise ValueError("practice candidates must follow selected review skills")
+    _validate_review_subtopics(review_skill_ids, review_subtopic_ids)
+    if review_subtopic_ids is not None:
+        _validate_candidate_subtopics(candidates, candidate_subtopic_ids)
+    checked = select_predictions(candidates, prediction_result, skills, band)
+    predictions = {p["question_id"]: p
+                   for p in checked["candidate_predictions"]}
+    selected_ids, slots = _aligned_skill_slots(
+        candidates, predictions, skills, band, review_skill_ids,
+        review_subtopic_ids, candidate_subtopic_ids)
     return {
         "selected_question_ids": selected_ids,
         "selected_question_id": selected_ids[0] if selected_ids else None,
@@ -188,16 +235,18 @@ class ShadowPracticeRecommender:
         return self._recommend(bank, responses, evidence)
 
     def recommend_for_reviews(self, bank, taxonomy, responses,
-                              review_skill_ids, research=False):
+                              review_skill_ids, research=False,
+                              review_subtopic_ids=None):
         if len(responses) != 40:
             raise ValueError("recommendations require completed assessment")
         evidence = (build_research_evidence if research
                     else build_evidence)(bank, taxonomy, responses)
-        return self._aligned_recommend(bank, responses, evidence,
-                                       review_skill_ids)
+        return self._aligned_recommend(
+            bank, responses, evidence, review_skill_ids,
+            review_subtopic_ids=review_subtopic_ids)
 
     def _aligned_recommend(self, bank, responses, evidence,
-                           review_skill_ids):
+                           review_skill_ids, review_subtopic_ids=None):
         candidates, exclusions, skills = eligibility(
             bank, evidence, self.pool)
         if (not isinstance(review_skill_ids, (list, tuple))
@@ -207,6 +256,7 @@ class ShadowPracticeRecommender:
                        for sid in review_skill_ids)):
             raise ValueError(
                 "practice requires up to two distinct observed-error skills")
+        _validate_review_subtopics(review_skill_ids, review_subtopic_ids)
         review_skill_ids = list(review_skill_ids)
         aligned = [q for q in candidates
                    if q["skill_id"] in review_skill_ids]
@@ -218,6 +268,7 @@ class ShadowPracticeRecommender:
             "schema": "phase3_shadow_practice_recommendation_v1",
             "policy_version": ALIGNED_PRACTICE_POLICY_VERSION,
             "mode": "shadow_only", "review_skill_ids": review_skill_ids,
+            "review_subtopic_ids": copy.deepcopy(review_subtopic_ids),
             "used_for_student_advice": False, "used_for_feedback": False,
             "answer_count": 40, "pool_sha256": self.pool_sha256,
             "bank_sha256": evidence["bank_sha256"],
@@ -250,11 +301,19 @@ class ShadowPracticeRecommender:
                     "in_band_question_ids": [],
                     "outside_band_question_ids": []}
         try:
+            candidate_subtopic_ids = None
+            if review_subtopic_ids is not None:
+                from feedback_practice import _graph_row
+                candidate_subtopic_ids = {
+                    q["question_id"]: _graph_row(q)["concept_id"]
+                    for q in aligned}
             predicted = self.predictor(
                 copy.deepcopy(bank), copy.deepcopy(responses),
                 copy.deepcopy(aligned))
             selection = select_aligned_predictions(
-                aligned, predicted, skills, self.band, review_skill_ids)
+                aligned, predicted, skills, self.band, review_skill_ids,
+                review_subtopic_ids=review_subtopic_ids,
+                candidate_subtopic_ids=candidate_subtopic_ids)
         except Exception:
             return {**base, "status": "unavailable",
                     "reason": "future_prediction_failed",

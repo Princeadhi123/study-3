@@ -15,6 +15,7 @@ from full_feedback import (
     FULL_FEEDBACK_MAX_TOKENS, FULL_FEEDBACK_PROMPT_VERSION,
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_MAX_CHARS,
     FULL_FEEDBACK_SECTION_TITLES, FullFeedbackAittaGenerator,
+    MULTI_FULL_FEEDBACK_INSTRUCTIONS,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
     build_full_input, build_multi_full_input, full_message_sections,
     validate_full_input, validate_full_reply)
@@ -618,6 +619,45 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
+    def test_v4_prompt_wording_contract(self):
+        self.assertEqual(
+            self.full_input["prompt_version"],
+            "aitta_assessment_grounded_two_topic_feedback_v4")
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        reply = self._generator(opener).generate(self.full_input)
+        self.assertEqual(set(reply["sections"]),
+                         set(FULL_FEEDBACK_SECTION_KEYS))
+        body = opener.calls[0]["body"]
+        system = body["messages"][0]["content"]
+        self.assertEqual(system, MULTI_FULL_FEEDBACK_INSTRUCTIONS)
+        for needle in (
+                "write 'On this assessment, ...'",
+                "separate topic names clearly",
+                "Give this teacher-review instruction once",
+                "Only for an example whose status is unavailable",
+                "Call these 'separate practice activities', not "
+                "'similar practice tasks'",
+                "shown on each practice card"):
+            self.assertIn(needle, system)
+        user = json.loads(body["messages"][1]["content"])
+        self.assertEqual(
+            user["prompt_version"],
+            "aitta_assessment_grounded_two_topic_feedback_v4")
+
+    def test_stale_v3_prompt_version_rejected_before_request(self):
+        payload = copy.deepcopy(self.full_input)
+        payload["prompt_version"] = (
+            "aitta_assessment_grounded_two_topic_feedback_v3")
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        generator = self._generator(opener)
+        with self.assertRaises(ValueError):
+            generator.generate(payload)
+        self.assertEqual(opener.calls, [])
+        self.assertEqual(generator.last_metadata["status"],
+                         "not_called")
+
     def test_run_multi_feedback_records_generated_sections(self):
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
@@ -674,7 +714,8 @@ class MultiBaselineSectionsRegressionTests(unittest.TestCase):
     def _cand(self, sub_id, sub_name, incorrect, out_of,
               pattern="recurring_errors", tied=None,
               strategy="supported_review", action=None, focus=True):
-        candidate = {"focus": None,
+        candidate = {"candidate_id": f"review_{sub_id}",
+                     "focus": None,
                      "planning": {"error_pattern": pattern,
                                   "tied_candidate_ids": tied or []},
                      "strategy": strategy,
@@ -719,10 +760,10 @@ class MultiBaselineSectionsRegressionTests(unittest.TestCase):
                         strategy="worked_example")]))
         self.assertEqual(
             texts["review_focus"],
-            "A possible review starting point is Percentage of an "
-            "amount: 3 of 10 assessed answers were incorrect.\n\n"
-            "A possible review starting point is Divisibility: 2 of 8 "
-            "assessed answers were incorrect.\n\n" + SCOPE)
+            "Possible review topics:\n\n"
+            "Percentage of an amount: 3 of 10 assessed answers were "
+            "incorrect.\n\nDivisibility: 2 of 8 assessed answers were "
+            "incorrect.\n\n" + SCOPE)
         self.assertEqual(
             texts["next_steps"],
             "With your teacher, work through the example for Percentage "
@@ -744,15 +785,15 @@ class MultiBaselineSectionsRegressionTests(unittest.TestCase):
                         tied=["c", "d"], action="Custom action.")]))
         self.assertEqual(
             texts["review_focus"],
-            "A possible review starting point is Percentage of an "
-            "amount: 1 of 5 assessed answers were incorrect. This is an "
-            "isolated incorrect answer, not evidence of a consistent "
-            "difficulty. Other options share this display rank; this is "
-            "not a uniquely weakest area.\n\n"
-            "A possible review starting point is Unknown topic: 1 of 1 "
-            "assessed answers were incorrect. Only one question assessed "
-            "this content. Other options share this display rank; this "
-            "is not a uniquely weakest area.\n\n" + SCOPE)
+            "Possible review topics:\n\n"
+            "Percentage of an amount: 1 of 5 assessed answers were "
+            "incorrect. This is an isolated incorrect answer, not "
+            "evidence of a consistent difficulty. Other options share "
+            "this display rank; this is not a uniquely weakest area.\n\n"
+            "Unknown topic: 1 of 1 assessed answers were incorrect. "
+            "Only one question assessed this content. Other options "
+            "share this display rank; this is not a uniquely weakest "
+            "area.\n\n" + SCOPE)
         self.assertEqual(
             texts["next_steps"],
             "With your teacher, work through the example for Percentage "
@@ -777,6 +818,97 @@ class MultiBaselineSectionsRegressionTests(unittest.TestCase):
             "Review the example for Prime recognition below, explain "
             "each step, and ask your teacher to check your reasoning.")
         self.assertEqual(texts["review_focus"].count(SCOPE), 1)
+
+    def test_shared_grounded_instruction_once_same_support(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut",
+                                "correct": 5}]}
+        for strategy in ("supported_review", "focused_review"):
+            with self.subTest(strategy=strategy):
+                texts = self._texts(multi_baseline_sections(
+                    evidence,
+                    [self._cand("a", "Topic A", 2, 5,
+                                strategy=strategy),
+                     self._cand("b", "Topic B", 3, 6,
+                                strategy=strategy)],
+                    review_examples=[
+                        {"candidate_id": "review_a",
+                         "status": "ready"},
+                        {"candidate_id": "review_b",
+                         "status": "ready"}]))
+                opening = ("With your teacher, revisit the assessment "
+                           "answers shown below."
+                           if strategy == "supported_review" else
+                           "Revisit the assessment answers shown below.")
+                self.assertEqual(
+                    texts["next_steps"],
+                    opening + " Compare your selected answers with the "
+                    "checked worked steps, explain your reasoning, and "
+                    "discuss each reasoning question with your teacher.")
+                self.assertEqual(
+                    texts["next_steps"].count("checked worked steps"), 1)
+
+    def test_mixed_ready_unavailable_no_checked_steps_claim(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut",
+                                "correct": 5}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("a", "Topic A", 2, 5,
+                        strategy="focused_review"),
+             self._cand("b", "Topic B", 3, 6,
+                        strategy="focused_review")],
+            review_examples=[
+                {"candidate_id": "review_a", "status": "ready"},
+                {"candidate_id": "review_b", "status": "unavailable"}]))
+        self.assertEqual(
+            texts["next_steps"],
+            "Revisit your assessment answer on Topic A below, compare "
+            "it with the checked worked steps, and discuss the "
+            "reasoning question with your teacher.\n\n"
+            "Ask your teacher to work through your assessment question "
+            "on Topic B with you; a checked worked solution is not "
+            "available for it, and no replacement example has been "
+            "invented.")
+        self.assertEqual(
+            texts["next_steps"].count("checked worked steps"), 1)
+        self.assertIn("not available", texts["next_steps"])
+
+    def test_mixed_support_keeps_individual_grounded_steps(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut",
+                                "correct": 5}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("a", "Topic A", 2, 5,
+                        strategy="supported_review"),
+             self._cand("b", "Topic B", 3, 6,
+                        strategy="focused_review")],
+            review_examples=[
+                {"candidate_id": "review_a", "status": "ready"},
+                {"candidate_id": "review_b", "status": "ready"}]))
+        self.assertEqual(
+            texts["next_steps"],
+            "With your teacher, revisit your assessment answer on "
+            "Topic A below, compare it with the checked worked steps, "
+            "and discuss the reasoning question.\n\n"
+            "Revisit your assessment answer on Topic B below, compare "
+            "it with the checked worked steps, and discuss the "
+            "reasoning question with your teacher.")
+        self.assertEqual(
+            texts["next_steps"].count("checked worked steps"), 2)
+
+    def test_no_grounded_context_keeps_candidate_actions(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut",
+                                "correct": 5}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("a", "Topic A", 2, 5, action="Custom one."),
+             self._cand("b", "Topic B", 3, 6, action="Custom two.")],
+            review_examples=[]))
+        self.assertEqual(texts["next_steps"],
+                         "Custom one.\n\nCustom two.")
 
 
 if __name__ == "__main__":

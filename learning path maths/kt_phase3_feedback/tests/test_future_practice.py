@@ -2,12 +2,17 @@
 import copy
 import json
 import unittest
+from unittest import mock
 
 import torch
 
+import feedback_practice
 from evidence_feedback import build_evidence, run_feedback
 from future_kt import predict_future_candidates
-from shadow_practice import ShadowPracticeRecommender, validate_practice_pool, validate_target_band
+from shadow_practice import (
+    ALIGNED_PRACTICE_POLICY_VERSION, ShadowPracticeRecommender,
+    select_aligned_predictions, validate_practice_pool,
+    validate_target_band)
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_kt_adapter import FakeKT
 
@@ -366,6 +371,244 @@ class AlignedPracticeTests(unittest.TestCase):
             self.bank, self.taxonomy, rows, ["sA", "sB"])
         self.assertEqual(result["status"], "abstained")
         self.assertEqual(result["selected_question_ids"], [])
+
+
+class AlignedSubtopicTests(unittest.TestCase):
+    """Exact-subtopic in-band preference via the review subtopic map."""
+
+    def setUp(self):
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        self.calls = []
+        self.probabilities = {}
+
+    def predictor(self, bank, rows, candidates):
+        self.calls.append(copy.deepcopy(candidates))
+        return {"predictions": [
+            {"question_id": q["question_id"], "skill_id": q["skill_id"],
+             "item_id": q["item_id"], "regime": "warm",
+             "p_correct": self.probabilities.get(q["question_id"], 0.6)}
+            for q in candidates]}
+
+    def rows_wrong(self, skills=("sA",)):
+        rows = responses(self.bank)
+        for row in rows:
+            q = next(q for q in self.bank["questions"]
+                     if q["question_id"] == row["question_id"])
+            if q["skill_id"] in skills:
+                row["selected_index"] = (
+                    (q["answer_index"] + 1) % len(q["options"]))
+        return rows
+
+    @staticmethod
+    def graph(questions, concepts):
+        return {"exercises": [
+            {"question_id": q["question_id"],
+             "source_id": "practice_pool_v2", "role": "practice",
+             "skill_id": q["skill_id"],
+             "concept_id": concepts[q["question_id"]],
+             "concept_label": f"Concept {q['question_id']}",
+             "text": q["text"], "options": list(q["options"]),
+             "mathematical_task": "task"}
+            for q in questions]}
+
+    def recommend(self, questions, concepts, rows, review_skill_ids,
+                  review_subtopic_ids=None, band=(0.4, 0.8),
+                  graph=None):
+        recommender = ShadowPracticeRecommender(
+            pool(questions), band, self.predictor)
+        context = (graph if graph is not None
+                   else self.graph(questions, concepts))
+        with mock.patch.object(
+                feedback_practice, "teacher_content_context",
+                return_value=context):
+            return recommender.recommend_for_reviews(
+                self.bank, self.taxonomy, rows, review_skill_ids,
+                review_subtopic_ids=review_subtopic_ids)
+
+    def pair(self):
+        return ([question("pool_a", "sA"), question("pool_a2", "sA")],
+                {"pool_a": "other", "pool_a2": "target"})
+
+    def test_exact_subtopic_in_band_beats_closer_broad(self):
+        questions, concepts = self.pair()
+        self.probabilities = {"pool_a": 0.6, "pool_a2": 0.4}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"],
+                                review_subtopic_ids={"sA": "target"})
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["selected_question_ids"], ["pool_a2"])
+        self.assertEqual(
+            sorted(result["in_band_question_ids"]),
+            ["pool_a", "pool_a2"])
+        self.assertEqual(result["outside_band_question_ids"], [])
+        self.assertEqual(result["review_subtopic_ids"],
+                         {"sA": "target"})
+        self.assertEqual(result["policy_version"],
+                         ALIGNED_PRACTICE_POLICY_VERSION)
+        self.assertFalse(result["used_for_feedback"])
+        self.assertFalse(result["used_for_student_advice"])
+
+    def test_no_map_keeps_legacy_broad_choice(self):
+        questions, concepts = self.pair()
+        self.probabilities = {"pool_a": 0.6, "pool_a2": 0.4}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"])
+        self.assertEqual(result["selected_question_ids"], ["pool_a"])
+        self.assertIsNone(result["review_subtopic_ids"])
+
+    def test_exact_outside_band_falls_back_to_broad(self):
+        questions, concepts = self.pair()
+        self.probabilities = {"pool_a": 0.6, "pool_a2": 0.95}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"],
+                                review_subtopic_ids={"sA": "target"})
+        self.assertEqual(result["selected_question_ids"], ["pool_a"])
+        self.assertEqual(result["in_band_question_ids"], ["pool_a"])
+        self.assertEqual(result["outside_band_question_ids"],
+                         ["pool_a2"])
+
+    def test_no_eligible_exact_falls_back_to_broad(self):
+        questions, _ = self.pair()
+        self.probabilities = {"pool_a": 0.6, "pool_a2": 0.5}
+        result = self.recommend(
+            questions, {"pool_a": "other", "pool_a2": "other"},
+            self.rows_wrong(), ["sA"],
+            review_subtopic_ids={"sA": "target"})
+        self.assertEqual(result["selected_question_ids"], ["pool_a"])
+
+    def test_all_outside_band_abstains(self):
+        questions, concepts = self.pair()
+        self.probabilities = {"pool_a": 0.95, "pool_a2": 0.95}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"],
+                                review_subtopic_ids={"sA": "target"})
+        self.assertEqual(result["status"], "abstained")
+        self.assertEqual(result["selected_question_ids"], [])
+        slot = result["topic_selections"][0]
+        self.assertEqual(slot["status"], "abstained")
+        self.assertEqual(slot["reason"],
+                         "no_candidate_in_explicit_target_band")
+
+    def test_exact_band_boundaries_and_lexicographic_tie(self):
+        questions = [question("pool_a2", "sA"),
+                     question("pool_a3", "sA")]
+        concepts = {"pool_a2": "target", "pool_a3": "target"}
+        self.probabilities = {"pool_a2": 0.6, "pool_a3": 0.6}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"],
+                                review_subtopic_ids={"sA": "target"})
+        self.assertEqual(result["selected_question_ids"], ["pool_a2"])
+        self.assertEqual(sorted(result["in_band_question_ids"]),
+                         ["pool_a2", "pool_a3"])
+        self.probabilities = {"pool_a2": 0.4, "pool_a3": 0.8}
+        result = self.recommend(questions, concepts,
+                                self.rows_wrong(), ["sA"],
+                                review_subtopic_ids={"sA": "target"})
+        self.assertEqual(sorted(result["in_band_question_ids"]),
+                         ["pool_a2", "pool_a3"])
+        self.assertIn(result["selected_question_ids"][0],
+                      ("pool_a2", "pool_a3"))
+
+    def test_frozen_case_related_inband_beats_outofband_exact(self):
+        exacts = [question(f"pool_exact{i}", "sA")
+                  for i in range(1, 6)]
+        questions = [question("pool_related", "sA")] + exacts
+        concepts = {"pool_related": "retain_unlike_terms"}
+        concepts.update({q["question_id"]: "combine_like_terms"
+                         for q in exacts})
+        self.probabilities = {
+            "pool_related": 0.5811787247657776,
+            "pool_exact1": 0.1805587261915207,
+            "pool_exact2": 0.8930445909500122,
+            "pool_exact3": 0.9632471203804016,
+            "pool_exact4": 0.960766077041626,
+            "pool_exact5": 0.9710615873336792}
+        result = self.recommend(
+            questions, concepts, self.rows_wrong(), ["sA"],
+            review_subtopic_ids={"sA": "combine_like_terms"})
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["selected_question_ids"],
+                         ["pool_related"])
+        self.assertEqual(result["in_band_question_ids"],
+                         ["pool_related"])
+        self.assertEqual(
+            sorted(result["outside_band_question_ids"]),
+            [q["question_id"] for q in exacts])
+        probs = {p["question_id"]: p["p_correct"]
+                 for p in result["candidate_predictions"]}
+        self.assertEqual(probs, self.probabilities)
+
+    def test_same_concept_on_other_skill_not_eligible(self):
+        questions = [question("pool_a", "sA"),
+                     question("pool_a2", "sA"),
+                     question("pool_b", "sB")]
+        concepts = {"pool_a": "other", "pool_a2": "target",
+                    "pool_b": "target"}
+        self.probabilities = {"pool_a": 0.6, "pool_a2": 0.5,
+                              "pool_b": 0.6}
+        result = self.recommend(
+            questions, concepts, self.rows_wrong(("sA", "sB")),
+            ["sA", "sB"],
+            review_subtopic_ids={"sA": "target", "sB": "other"})
+        self.assertEqual(sorted(result["selected_question_ids"]),
+                         ["pool_a2", "pool_b"])
+        slots = {s["skill_id"]: s
+                 for s in result["topic_selections"]}
+        self.assertEqual(slots["sA"]["selected_question_id"],
+                         "pool_a2")
+        self.assertEqual(slots["sB"]["selected_question_id"],
+                         "pool_b")
+
+    def test_invalid_review_subtopic_maps_rejected(self):
+        questions, concepts = self.pair()
+        rows = self.rows_wrong()
+        for bad in ({"sB": "target"}, {"sA": "x", "sB": "y"},
+                    {"sA": ""}, {"sA": "   "}, "target", 5):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self.recommend(questions, concepts, rows, ["sA"],
+                                   review_subtopic_ids=bad)
+
+    def test_invalid_candidate_subtopic_maps_rejected(self):
+        skills = {"sA": {"skill_id": "sA", "skill_name": "Skill sA",
+                         "correct": 3, "incorrect": 2, "out_of": 5}}
+        candidates = [question("pool_a", "sA")]
+        prediction = {"predictions": [
+            {"question_id": "pool_a", "skill_id": "sA",
+             "item_id": "pool_a", "regime": "warm",
+             "p_correct": 0.6}]}
+        for bad in ({}, {"other": "x"},
+                    {"pool_a": "x", "extra": "y"}, {"pool_a": ""},
+                    "target"):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(ValueError):
+                    select_aligned_predictions(
+                        candidates, prediction, skills, (0.4, 0.8),
+                        ["sA"], review_subtopic_ids={"sA": "target"},
+                        candidate_subtopic_ids=bad)
+
+    def test_graph_row_mismatch_is_unavailable_not_invented(self):
+        questions, _ = self.pair()
+        result = self.recommend(
+            questions, {}, self.rows_wrong(), ["sA"],
+            review_subtopic_ids={"sA": "target"},
+            graph={"exercises": []})
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "future_prediction_failed")
+        self.assertEqual(result["selected_question_ids"], [])
+        self.assertEqual(self.calls, [])
+
+    def test_inputs_not_mutated(self):
+        questions, concepts = self.pair()
+        rows = self.rows_wrong()
+        mapping = {"sA": "target"}
+        before = copy.deepcopy(
+            (self.bank, self.taxonomy, rows, questions, mapping))
+        self.recommend(questions, concepts, rows, ["sA"],
+                       review_subtopic_ids=mapping)
+        self.assertEqual(before, (self.bank, self.taxonomy, rows,
+                                  questions, mapping))
 
 
 if __name__ == "__main__":

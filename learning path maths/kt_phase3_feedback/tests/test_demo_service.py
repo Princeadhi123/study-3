@@ -1907,12 +1907,16 @@ class FakeAlignedRecommender:
         self._inner = ShadowPracticeRecommender(pool, band, predictor)
         self.band = tuple(band)
         self.calls = []
+        self.subtopic_calls = []
 
     def recommend_for_reviews(self, bank, taxonomy, rows,
-                              review_skill_ids, research=False):
+                              review_skill_ids, research=False,
+                              review_subtopic_ids=None):
         self.calls.append(list(review_skill_ids))
+        self.subtopic_calls.append(copy.deepcopy(review_subtopic_ids))
         return self._inner.recommend_for_reviews(
-            bank, taxonomy, rows, review_skill_ids, research=research)
+            bank, taxonomy, rows, review_skill_ids, research=research,
+            review_subtopic_ids=review_subtopic_ids)
 
 
 class MultiModeTests(unittest.TestCase):
@@ -2019,7 +2023,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v5")
+                         "phase3_student_feedback_template_v6")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2228,6 +2232,129 @@ class MultiModeTests(unittest.TestCase):
         statuses = [c["context"]["status"]
                     for c in end["practice_contexts"]]
         self.assertEqual(statuses, ["unavailable", "unavailable"])
+
+    @staticmethod
+    def _subtopic_pool_and_graph():
+        def q(qid, skill):
+            text = f"Pool practice {qid}?"
+            return {"question_id": qid, "skill_id": skill,
+                    "item_id": f"item-{qid}", "text": text,
+                    "options": ["one", "two", "three"],
+                    "content_text":
+                        text + " [OPTIONS] one | two | three"}
+        questions = [q("pool_exact", "sA"), q("pool_broad", "sA"),
+                     q("pool_sb", "sB")]
+        pool = {"schema": "phase3_shadow_practice_pool_v1",
+                "scope": "research_only_not_learner_approved",
+                "questions": questions}
+        concepts = {"pool_exact": "sub_sA", "pool_broad": "concept_sA",
+                    "pool_sb": "concept_sB"}
+        graph = {"exercises": [
+            {"question_id": x["question_id"],
+             "source_id": "practice_pool_v2", "role": "practice",
+             "skill_id": x["skill_id"],
+             "concept_id": concepts[x["question_id"]],
+             "concept_label": f"Concept {x['question_id']}",
+             "text": x["text"], "options": list(x["options"]),
+             "mathematical_task": f"Task {x['question_id']}"}
+            for x in questions]}
+        return pool, graph
+
+    def test_exact_subtopic_chosen_and_relationship_same_content(self):
+        import feedback_practice
+        import research_runtime
+        from unittest import mock
+        pool, graph = self._subtopic_pool_and_graph()
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        predictor = RecordingPredictor(
+            {"pool_exact": 0.5, "pool_broad": 0.6, "pool_sb": 0.55})
+        recommender = FakeAlignedRecommender(pool, predictor)
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        with mock.patch.object(
+                feedback_practice, "load_current_practice_pool",
+                return_value=copy.deepcopy(pool)), \
+             mock.patch.object(
+                research_runtime, "load_current_practice_pool",
+                return_value=copy.deepcopy(pool)), \
+             mock.patch.object(
+                feedback_practice, "teacher_content_context",
+                return_value=copy.deepcopy(graph)):
+            sid, _ = self._complete(
+                service, self._rows_wrong(("sA", "sB", "sC")))
+            self._wait_done(service, sid)
+            end = self._end(service, sid)
+            activities = self._delivery(service, sid)["preview"][
+                "practice_activities"]
+        self.assertEqual(
+            recommender.subtopic_calls,
+            [{"sA": "sub_sA", "sB": "sub_sB"}])
+        self.assertEqual(
+            sorted(end["recommendation"]["selected_question_ids"]),
+            ["pool_exact", "pool_sb"])
+        self.assertEqual(end["recommendation"]["review_subtopic_ids"],
+                         {"sA": "sub_sA", "sB": "sub_sB"})
+        self.assertEqual(len(activities), 2)
+        by_label = {a["topic_label"]: a for a in activities}
+        self.assertEqual(by_label["Subtopic sA"]["relationship"]["kind"],
+                         "same_content")
+        self.assertEqual(by_label["Subtopic sA"]["question"]["text"],
+                         "Pool practice pool_exact?")
+        self.assertEqual(by_label["Subtopic sB"]["relationship"]["kind"],
+                         "same_topic_different_content")
+        for activity in activities:
+            self.assertEqual(activity["status"], "selected")
+
+    def test_no_exact_inband_keeps_same_topic_warning(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, _ = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self._wait_done(service, sid)
+        self.assertEqual(
+            recommender.subtopic_calls,
+            [{"sA": "sub_sA", "sB": "sub_sB"}])
+        activities = self._delivery(service, sid)["preview"][
+            "practice_activities"]
+        self.assertEqual(
+            {a["relationship"]["kind"] for a in activities},
+            {"same_topic_different_content"})
+        for activity in activities:
+            self.assertIn("rather than",
+                          activity["relationship"]["message"])
+
+    def test_invalid_graph_mapping_unavailable_no_replacement(self):
+        import feedback_practice
+        from unittest import mock
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, predictor = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        with mock.patch.object(
+                feedback_practice, "teacher_content_context",
+                return_value={"exercises": []}):
+            sid, _ = self._complete(
+                service, self._rows_wrong(("sA", "sB", "sC")))
+            self._wait_done(service, sid)
+        end = self._end(service, sid)
+        self.assertEqual(end["recommendation"]["status"], "unavailable")
+        self.assertEqual(predictor.calls, [])
+        statuses = [c["context"]["status"]
+                    for c in end["practice_contexts"]]
+        self.assertEqual(statuses, ["unavailable", "unavailable"])
+        activities = self._delivery(service, sid)["preview"][
+            "practice_activities"]
+        self.assertEqual(
+            {a["status"] for a in activities}, {"unavailable"})
+        self.assertTrue(
+            all(a["question"] is None for a in activities))
 
     def test_closing_fallback_contexts_per_mode(self):
         generator = MultiGenerator()

@@ -138,6 +138,11 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(
             "Boolean(document.querySelector("
             "'.review-example script, .review-example img'))"))
+        self.assertEqual(b.js(
+            "(() => { const host = document.querySelectorAll("
+            "'.review-example')[0].parentElement; return Array.from("
+            "host.querySelectorAll('p')).filter(p => p.textContent"
+            ".includes('draft translation')).length; })()"), 1)
         self.assertEqual(b.errors, [])
 
     def test_teacher_preview_and_student_release_render_cards(self):
@@ -162,6 +167,104 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         b.wait("document.body.textContent.includes('Worked review')",
                timeout=30)
         self._assert_card_rendered()
+
+    def test_rendered_feedback_dedup_disclaimer_injection(self):
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        payload = {
+            "review_examples": [
+                {"source": "incorrect_assessment_response",
+                 "question_id": "q1", "prompt": "Alkuluku?",
+                 "options": ["2 <img src=x onerror=alert(1)>",
+                             "4", "9"],
+                 "selected_answer": "4",
+                 "correct_answer": "2 <img src=x onerror=alert(1)>",
+                 "steps": ["Prime numbers have two divisors."],
+                 "reasoning_question": "Explain your choice.",
+                 "notice": "Shared checked warning."},
+                {"source": "incorrect_assessment_response",
+                 "question_id": "q2", "prompt": "Alkuluku?",
+                 "options": ["2", "4", "9"],
+                 "selected_answer": "4", "correct_answer": "2",
+                 "steps": ["Prime numbers have two divisors."],
+                 "notice": "Shared checked warning."}],
+            "practice_activities": [
+                {"status": "selected",
+                 "message": "Duplicate selected message.",
+                 "notice": "Same synthetic practice notice.",
+                 "topic_label": "Percentages",
+                 "relationship": {"kind": "same_content",
+                                  "message": "Covers the same area."},
+                 "question": {"skill_name": "Prosenttilaskenta",
+                              "concept_name": "Percentage",
+                              "text": "Alkuluku?",
+                              "options": ["a", "b", "c"]}},
+                {"status": "selected",
+                 "message": "Duplicate selected message.",
+                 "notice": "Same synthetic practice notice.",
+                 "topic_label": "Combine coefficients of like terms",
+                 "relationship": {
+                     "kind": "same_topic_different_content",
+                     "message": "Related topic, not exact content."},
+                 "question": {
+                     "skill_name": "Algebra",
+                     "concept_name":
+                         "Recognize terms that cannot be combined",
+                     "text": "Other prompt?",
+                     "options": ["a", "b", "c"]}},
+                {"status": "selected",
+                 "message": "Duplicate selected message.",
+                 "notice": "Same synthetic practice notice.",
+                 "relationship": {"kind": "different_content",
+                                  "message": "Different area."},
+                 "question": {"skill_name": "Other",
+                              "concept_name": "Other concept",
+                              "text": "Other prompt?",
+                              "options": ["a", "b", "c"]}},
+                {"status": "abstained",
+                 "message": "Abstained status message.",
+                 "notice": None, "question": None}]}
+        result = b.js(
+            "(() => { const host = document.createElement('div');"
+            "document.body.appendChild(host);"
+            f"renderStructuredFeedback(host, {json.dumps(payload)});"
+            "const text = host.textContent;"
+            "const count = (s) => text.split(s).length - 1;"
+            "return {disclaimers: count('draft translation'),"
+            "exampleNotice: count('Shared checked warning.'),"
+            "practiceNotice: count('Same synthetic practice notice.'),"
+            "suppressed: text.includes('Duplicate selected message.'),"
+            "abstainedShown: text.includes('Abstained status message.'),"
+            "relatedHeading: text.includes('Related practice — "
+            "Recognize terms that cannot be combined'),"
+            "relatedMessage: text.includes("
+            "'Related topic, not exact content.'),"
+            "separateHeading: text.includes("
+            "'Separate practice — Other concept'),"
+            "relMessages: count('Covers the same area.'),"
+            "imgs: host.querySelectorAll('img').length,"
+            "scripts: host.querySelectorAll('script').length,"
+            "details: host.querySelectorAll('details.raw').length,"
+            "rawImg: (host.querySelector('details.raw') || "
+            "{textContent: ''}).textContent.includes("
+            "'<img src=x onerror=alert(1)>'),"
+            "original: count('Original question wording')}; })()")
+        self.assertEqual(result["disclaimers"], 1)
+        self.assertEqual(result["exampleNotice"], 1)
+        self.assertEqual(result["practiceNotice"], 1)
+        self.assertFalse(result["suppressed"])
+        self.assertTrue(result["abstainedShown"])
+        self.assertTrue(result["relatedHeading"])
+        self.assertTrue(result["relatedMessage"])
+        self.assertTrue(result["separateHeading"])
+        self.assertEqual(result["relMessages"], 1)
+        self.assertEqual(result["imgs"], 0)
+        self.assertEqual(result["scripts"], 0)
+        self.assertGreaterEqual(result["details"], 1)
+        self.assertTrue(result["rawImg"])
+        self.assertGreaterEqual(result["original"], 1)
+        self.assertEqual(b.errors, [])
 
 
 if __name__ == "__main__":

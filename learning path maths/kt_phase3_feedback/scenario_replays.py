@@ -43,6 +43,7 @@ class ScenarioReplays:
                  "integrated_synthetic_pipeline.py", "replay_provider_scenarios.py",
                  "jev_selector.py", "aitta_generator.py", "synthetic_feedback.py",
                  "full_feedback.py", "feedback_practice.py",
+                 "shadow_practice.py",
                  "assessment_worked_review.py", "worked_review_math.py",
                  "research_runtime.py", "active_payload.py")
         root = Path(__file__).parent

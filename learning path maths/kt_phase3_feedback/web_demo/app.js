@@ -618,6 +618,13 @@ function renderStructuredFeedback(container, payload) {
   });
   const examples = payload.review_examples ||
     (payload.review_example ? [payload.review_example] : []);
+  const exampleNoticeCounts = new Map();
+  examples.forEach((example) => {
+    if (example.notice) {
+      exampleNoticeCounts.set(example.notice,
+        (exampleNoticeCounts.get(example.notice) || 0) + 1);
+    }
+  });
   examples.forEach((example) => {
     const box = el("div", null, "feedback-section review-example");
     const heading = example.for_subtopic_name
@@ -659,9 +666,6 @@ function renderStructuredFeedback(container, payload) {
       }
       if (displayPrompt !== rawPrompt
           || displayOptions.join("\n") !== rawOptions.join("\n")) {
-        box.appendChild(el("p",
-          "English display wording is a draft translation; original " +
-          "text is preserved.", "meta small"));
         const original = el("details", null, "raw");
         original.dataset.disclosureKey =
           `worked-review-original:${example.question_id}`;
@@ -680,31 +684,69 @@ function renderStructuredFeedback(container, payload) {
         box.appendChild(el("p", example.explanation, "sec"));
       }
     }
-    if (example.notice) box.appendChild(el("p", example.notice, "meta"));
+    if (example.notice
+        && exampleNoticeCounts.get(example.notice) === 1) {
+      box.appendChild(el("p", example.notice, "meta"));
+    }
     container.appendChild(box);
+  });
+  exampleNoticeCounts.forEach((count, notice) => {
+    if (count > 1) {
+      container.appendChild(el("p", notice, "meta"));
+    }
   });
   if (payload.worked_review_notice) {
     container.appendChild(el("p", payload.worked_review_notice, "meta"));
   }
   const activities = payload.practice_activities ||
     (payload.practice ? [payload.practice] : []);
-  activities.forEach((practice, index) => {
-    renderPracticeCard(container, practice, index);
+  const practiceNoticeCounts = new Map();
+  activities.forEach((practice) => {
+    if (practice.notice) {
+      practiceNoticeCounts.set(practice.notice,
+        (practiceNoticeCounts.get(practice.notice) || 0) + 1);
+    }
   });
+  activities.forEach((practice, index) => {
+    renderPracticeCard(container, practice, index,
+      !practice.notice
+      || practiceNoticeCounts.get(practice.notice) === 1);
+  });
+  practiceNoticeCounts.forEach((count, notice) => {
+    if (count > 1) {
+      container.appendChild(el("p", notice, "meta"));
+    }
+  });
+  if (container.querySelector("details.raw")) {
+    container.appendChild(el("p",
+      "English display wording is a draft translation; original " +
+      "text is preserved.", "meta small"));
+  }
 }
 
-function renderPracticeCard(container, practice, index) {
+function renderPracticeCard(container, practice, index, showNotice) {
   const relationship = practice.relationship || null;
   const box = el("div", null, "feedback-section practice-activity");
-  box.appendChild(el("h3",
-    practice.topic_label
+  let heading;
+  if (relationship && relationship.kind === "same_topic_different_content") {
+    heading = `Related practice — ${englishSkillName(
+      practice.question?.concept_name || practice.topic_label
+      || "related content")}`;
+  } else if (relationship && relationship.kind === "different_content") {
+    heading = `Separate practice — ${englishSkillName(
+      practice.question?.concept_name || "other content")}`;
+  } else {
+    heading = practice.topic_label
       ? `Practice for ${englishSkillName(practice.topic_label)}`
-      : (relationship && relationship.kind === "different_content"
-         ? "Separate practice activity" : "Practice activity")));
+      : "Practice activity";
+  }
+  box.appendChild(el("h3", heading));
   if (relationship && relationship.message) {
     box.appendChild(el("p", relationship.message, "sec"));
   }
-  if (practice.message) {
+  if (practice.message
+      && !(practice.status === "selected"
+           && relationship && relationship.message)) {
     box.appendChild(el("p", practice.message, "sec"));
   }
   const question = practice.question;
@@ -728,9 +770,6 @@ function renderPracticeCard(container, practice, index) {
     }
     if (displayPrompt !== rawPrompt
         || displayOptions.join("\n") !== rawOptions.join("\n")) {
-      box.appendChild(el("p",
-        "English display wording is a draft translation; original " +
-        "text is preserved.", "meta small"));
       const original = el("details", null, "raw");
       original.dataset.disclosureKey = index === 0
         ? "practice-original" : `practice-original:${index}`;
@@ -744,7 +783,7 @@ function renderPracticeCard(container, practice, index) {
       box.appendChild(original);
     }
   }
-  if (practice.notice) {
+  if (practice.notice && showNotice !== false) {
     box.appendChild(el("p", practice.notice, "meta"));
   }
   container.appendChild(box);
