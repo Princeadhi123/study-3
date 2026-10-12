@@ -317,6 +317,110 @@ class ResolvePracticeTests(PracticeCase):
                              PRACTICE_STATUS_MESSAGES[status])
 
 
+def _focused_candidate(skill_id="sA", subtopic_id="concept_sA",
+                       subtopic_name="Review subtopic"):
+    return {"candidate_id": "fixture",
+            "focus": {"skill_id": skill_id, "subtopic_id": subtopic_id,
+                      "subtopic_name": subtopic_name}}
+
+
+class RelationshipTests(PracticeCase):
+    def test_same_and_different_content_kinds(self):
+        evidence, _ = self.evidence()
+        ctx = self.context()
+        same = resolve_practice(
+            ctx, evidence, candidate=_focused_candidate())["card"]
+        self.assertEqual(same["relationship"]["kind"], "same_content")
+        self.assertIn("same assessed content",
+                      same["relationship"]["message"])
+        other_concept = resolve_practice(
+            ctx, evidence, candidate=_focused_candidate(
+                subtopic_id="fraction_product"))["card"]
+        self.assertEqual(other_concept["relationship"]["kind"],
+                         "different_content")
+        message = other_concept["relationship"]["message"]
+        self.assertIn("Concept sA", message)
+        self.assertIn("Review subtopic", message)
+        other_skill = resolve_practice(
+            ctx, evidence,
+            candidate=_focused_candidate(skill_id="sB"))["card"]
+        self.assertEqual(other_skill["relationship"]["kind"],
+                         "different_content")
+        nofocus = resolve_practice(
+            ctx, evidence,
+            candidate={"candidate_id": "fixture", "focus": None})["card"]
+        self.assertEqual(nofocus["relationship"]["kind"],
+                         "no_review_focus")
+
+    def test_no_candidate_keeps_card_wire_shape(self):
+        evidence, _ = self.evidence()
+        card = resolve_practice(self.context(), evidence)["card"]
+        self.assertNotIn("relationship", card)
+        self.assertEqual(set(card), {"status", "message", "notice",
+                                     "question"})
+
+    def test_nonselected_never_adds_relationship(self):
+        evidence, _ = self.evidence()
+        for status in ("abstained", "unavailable", "disabled"):
+            card = resolve_practice(
+                empty_context(status), evidence,
+                candidate=_focused_candidate())["card"]
+            self.assertNotIn("relationship", card)
+            self.assertIsNone(card["question"])
+
+
+class ReviewExampleTests(PracticeCase):
+    def test_all_known_subtopics_return_fixed_records(self):
+        from evidence_feedback_policy import PRACTICE_ACTIONS
+        self.assertEqual(set(feedback_practice.REVIEW_EXAMPLES),
+                         set(PRACTICE_ACTIONS))
+        self.assertEqual(len(feedback_practice.REVIEW_EXAMPLES), 23)
+        for subtopic_id in feedback_practice.REVIEW_EXAMPLES:
+            candidate = {"focus": {"subtopic_id": subtopic_id}}
+            example = feedback_practice.review_example(candidate)
+            self.assertEqual(example["title"], "Worked review example")
+            self.assertEqual(
+                example["prompt"],
+                feedback_practice.REVIEW_EXAMPLES[subtopic_id]["prompt"])
+            self.assertEqual(
+                example["explanation"],
+                feedback_practice.REVIEW_EXAMPLES[subtopic_id]
+                ["explanation"])
+            self.assertIn("Discuss this example", example["notice"])
+            example["prompt"] = "mutated"
+            self.assertNotEqual(
+                feedback_practice.review_example(candidate)["prompt"],
+                "mutated")
+
+    def test_percentage_example_exact(self):
+        example = feedback_practice.review_example(
+            {"focus": {"subtopic_id": "percentage_amount"}})
+        self.assertEqual(example["prompt"], "Find 30% of 90.")
+        self.assertEqual(
+            example["explanation"],
+            "The whole is 90. Write 30% as 30/100 = 0.30, then "
+            "multiply: 0.30 × 90 = 27.")
+
+    def test_unknown_or_absent_focus_returns_none(self):
+        self.assertIsNone(feedback_practice.review_example(None))
+        self.assertIsNone(feedback_practice.review_example({}))
+        self.assertIsNone(feedback_practice.review_example(
+            {"focus": None}))
+        self.assertIsNone(feedback_practice.review_example(
+            {"focus": {"subtopic_id": "unmapped_subtopic"}}))
+
+    def test_example_has_no_private_fields(self):
+        example = feedback_practice.review_example(
+            {"focus": {"subtopic_id": "fraction_product",
+                       "skill_id": "sA", "answer_index": 0}})
+        self.assertEqual(
+            set(example), {"title", "prompt", "explanation", "notice"})
+        blob = json.dumps(example)
+        for needle in ("answer_index", "p_correct", "subtopic",
+                       "skill_id", "candidate_id"):
+            self.assertNotIn(needle, blob)
+
+
 class RealAssetsBindingTests(unittest.TestCase):
     def test_current_pool_and_warm_bank_bind(self):
         from evidence_feedback import build_research_evidence

@@ -1,5 +1,5 @@
 FULL_FEEDBACK_SCHEMA = "phase3_full_feedback_generation_v2"
-FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v2"
+FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v3"
 FULL_FEEDBACK_MAX_TOKENS = 3072
 FULL_FEEDBACK_SECTION_MAX_CHARS = 2000
 FULL_FEEDBACK_SECTION_KEYS = (
@@ -29,8 +29,17 @@ FULL_FEEDBACK_INSTRUCTIONS = (
     "reasoning, confidence scores, citations, or numeric digits. Numeric "
     "results will be displayed separately by the application. Do not restate "
     "scores or numerical quantities in words either.\n"
-    "assessment_summary: acknowledge completion and describe the assessment "
-    "as a limited record of observed answers, not a judgement of ability.\n"
+    "Write concise English throughout. Translate content labels into plain "
+    "English descriptions; do not repeat Finnish labels in the narrative. "
+    "Do not mention the feedback plan, priority groups, candidates, routing, "
+    "providers, prompts, or internal selection decisions. Do not describe "
+    "a recommended approach as more effective or optimal. Keep each section "
+    "to one or two short sentences, except next_steps when needed to "
+    "preserve the supplied action. Do not repeat scope disclaimers in every "
+    "section; the application adds the assessment limitation separately.\n"
+    "assessment_summary: briefly acknowledge completion and direct attention "
+    "to the observed results displayed above. Do not repeat those results "
+    "or add generic judgements of ability.\n"
     "observed_strengths: describe observed successes, supported by the supplied "
     "counts. When no correct answers were observed, do not invent a strength; "
     "acknowledge that the answers provide a starting point for supported "
@@ -45,10 +54,17 @@ FULL_FEEDBACK_INSTRUCTIONS = (
     "next_steps: clearly phrase the supplied candidate action, preserving "
     "its meaning, support level, and teacher-check requirement. If "
     "practice_context.status is selected, connect the proposed practice "
-    "activity to a follow-up on its supplied skill and assessed concept. "
-    "The review focus and the practice activity are separate decisions and "
-    "may cover different content; do not imply they are the same when they "
-    "differ. Describe the supplied mathematical task only, not a solution "
+    "activity to a proposed follow-up on its supplied assessed concept. "
+    "The review focus and the practice activity are separate decisions. "
+    "Compare their supplied assessed-content labels. If they differ, "
+    "explicitly describe the practice as separate work on another area with "
+    "observed incorrect answers, not as practice of the review focus. If "
+    "they match, say the proposed practice covers that same content. "
+    "Use conditional wording such as 'If your teacher approves, ...'; "
+    "do not say 'you will have' or imply an assignment already exists. "
+    "The application may attach a fixed worked review example separately; "
+    "do not invent or solve an example yourself. "
+    "Describe the supplied mathematical task only, not a solution "
     "or an explanation of an observed error. If practice_context.status "
     "is disabled, abstained, or unavailable, do not claim that a question "
     "was selected or assigned. Do not invent a replacement activity. "
@@ -87,6 +103,11 @@ _FULL_KIND_GROUP = {
 _FULL_SECTION_TITLES = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
                                 FULL_FEEDBACK_SECTION_TITLES))
 _MARKUP = re.compile(r"<[^>]+>")
+_INTERNAL_PROCESS_LANGUAGE = re.compile(
+    r"\b(?:feedback plan|priority groups?|selected candidate|selection "
+    r"policy|routing|system prompt|jev|aitta)\b|\b(?:follows|according "
+    r"to|based on|guided by)\s+(?:the|this|our|its)\s+plan\b",
+    re.IGNORECASE)
 
 
 def structured_sections(review):
@@ -204,7 +225,8 @@ def _valid_section_text(text):
             and len(text) <= FULL_FEEDBACK_SECTION_MAX_CHARS
             and not any((ord(c) < 0x20 and c not in "\n\t") or c.isnumeric()
                         for c in text)
-            and not _MARKUP.search(text))
+            and not _MARKUP.search(text)
+            and not _INTERNAL_PROCESS_LANGUAGE.search(text))
 
 
 def validate_full_reply(reply, selected_id):

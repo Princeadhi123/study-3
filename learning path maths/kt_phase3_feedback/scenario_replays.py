@@ -42,6 +42,7 @@ class ScenarioReplays:
                  "feedback_service.py", "mcq_service.py", "live_diagnostics.py", "kt_adapter.py",
                  "integrated_synthetic_pipeline.py", "replay_provider_scenarios.py",
                  "jev_selector.py", "aitta_generator.py", "synthetic_feedback.py",
+                 "full_feedback.py", "feedback_practice.py",
                  "research_runtime.py", "active_payload.py")
         root = Path(__file__).parent
         paths = {name: root / name for name in names}
@@ -228,7 +229,8 @@ class ScenarioReplays:
         packages = {p["audience"]: p["review"] for p in original["packages"] if p["checkpoint"] == "end"}
         end = detail["checkpoints"]["end"]
         comparisons = []
-        for audience, previous in packages.items():
+        for audience in ("student",):
+            previous = packages[audience]
             current = end[f"{audience}_review"]
             comparisons.append({"audience": audience,
                                 "candidate_changed": previous["selected_candidate_id"] != current["selected_candidate_id"],

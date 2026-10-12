@@ -283,7 +283,7 @@ function aittaProvenance(review, genExec) {
 function renderSelectionDecision(audience, review, baseline,
                                  executions, job) {
   const card = el("div", null, "card-inner decision");
-  card.appendChild(el("h4", `Selection decision — ${audience}`));
+  card.appendChild(el("h4", "Review-focus selection"));
   const trace = (review && review.trace) || {};
   const execs = (executions && executions[audience]) || {};
   const selExec = execs.selector || {};
@@ -375,7 +375,7 @@ function renderSelectionDecision(audience, review, baseline,
     pput("Tied candidates",
         planning ? (ties.join(", ") || "None") : "—");
     pput("Strategy", plan.strategy || "—");
-    pput("KT used", plan.kt_used ? "Yes" : "No");
+    pput("KT used for review-focus selection", plan.kt_used ? "Yes" : "No");
     card.appendChild(planRows);
     card.appendChild(el("p",
       "The application records this plan before any generated opening. " +
@@ -440,23 +440,62 @@ function renderStructuredFeedback(container, payload) {
     });
     container.appendChild(box);
   });
+  const example = payload.review_example;
+  if (example) {
+    const box = el("div", null, "feedback-section review-example");
+    box.appendChild(el("h3", example.title || "Worked review example"));
+    if (example.prompt) box.appendChild(el("p", example.prompt, "sec"));
+    if (example.explanation) {
+      box.appendChild(el("p", example.explanation, "sec"));
+    }
+    if (example.notice) box.appendChild(el("p", example.notice, "meta"));
+    container.appendChild(box);
+  }
   const practice = payload.practice;
   if (practice) {
+    const relationship = practice.relationship || null;
     const box = el("div", null, "feedback-section practice-activity");
-    box.appendChild(el("h3", "Practice activity"));
+    box.appendChild(el("h3",
+      relationship && relationship.kind === "different_content"
+        ? "Separate practice activity" : "Practice activity"));
+    if (relationship && relationship.message) {
+      box.appendChild(el("p", relationship.message, "sec"));
+    }
     if (practice.message) {
       box.appendChild(el("p", practice.message, "sec"));
     }
     const question = practice.question;
     if (question) {
+      const displayPrompt = englishQuestionText(question);
+      const displayOptions =
+        (question.options || []).map(englishOptionText);
+      const rawPrompt = normalizeDisplayText(question.text);
+      const rawOptions = (question.options || []).map(normalizeDisplayText);
       box.appendChild(el("p",
-        `${question.skill_name} · ${question.concept_name}`, "meta"));
-      box.appendChild(el("p", question.text, "sec"));
+        `${englishSkillName(question.skill_name)} · ` +
+        `${englishSkillName(question.concept_name)}`, "meta"));
+      box.appendChild(el("p", displayPrompt, "sec"));
       const list = el("ul", null, "practice-options");
-      (question.options || []).forEach((option) => {
+      displayOptions.forEach((option) => {
         list.appendChild(el("li", option));
       });
       box.appendChild(list);
+      if (displayPrompt !== rawPrompt
+          || displayOptions.join("\n") !== rawOptions.join("\n")) {
+        box.appendChild(el("p",
+          "English display wording is a draft translation; original " +
+          "text is preserved.", "meta small"));
+        const original = el("details", null, "raw");
+        original.dataset.disclosureKey = "practice-original";
+        original.appendChild(el("summary", "Original question wording"));
+        original.appendChild(el("p", rawPrompt, "sec"));
+        const rawList = el("ul", null, "practice-options");
+        rawOptions.forEach((option) => {
+          rawList.appendChild(el("li", option));
+        });
+        original.appendChild(rawList);
+        box.appendChild(original);
+      }
     }
     if (practice.notice) {
       box.appendChild(el("p", practice.notice, "meta"));
@@ -950,7 +989,7 @@ function createDetailView(root, options = {}) {
   const $ = (selector) => root.querySelector(selector.replace(/#([\w-]+)/g, (_, id) => `#${prefix}${id}`));
   const TABS = ["overview", "evidence", "graph", "research", "feedback", "review"];
   const STALE_NOTE = "The feedback draft changed. Re-read it before reviewing the new version.";
-  let detail = null, selected = null, tab = "overview", researchCp = "end", lastAudience = "student";
+  let detail = null, selected = null, tab = "overview", researchCp = "end";
   let contract = null;
   const drafts = new Map();   // "sid:audience" -> draft state
   const releaseDrafts = new Map();
@@ -1383,7 +1422,7 @@ function createDetailView(root, options = {}) {
   function renderReleaseCard(pane) {
     const delivery = detail.feedback_delivery;
     const card = el("div", null, "card-inner release-card");
-    card.appendChild(el("h3", "Student feedback — preview and release"));
+    card.appendChild(el("h3", "Shared feedback — teacher preview and release"));
     card.appendChild(el("p",
       "This approval releases feedback and practice only within this " +
       "synthetic demo session. It does not certify the research bank or " +
@@ -1417,6 +1456,51 @@ function createDetailView(root, options = {}) {
       }
     }
     const preview = delivery.preview;
+    const end = detail.checkpoints.end || {};
+    const job = detail.provider_job;
+    const selReview = end.student_review || end.baseline_student;
+    const strip = el("div", null, "release-status");
+    strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
+    const practiceStatus = preview && preview.practice
+      ? statusLabel(preview.practice.status)
+      : (delivery.practice_status
+         ? statusLabel(delivery.practice_status)
+         : ((end.recommendation_job || {}).status
+            ? statusLabel(end.recommendation_job.status) : "—"));
+    strip.appendChild(kv("Practice selection", practiceStatus));
+    if (delivery.preview_source === "teacher_edited") {
+      strip.appendChild(kv("Preview source", "Teacher-edited draft"));
+    }
+    if (selReview) {
+      const applied = (selReview.candidates || []).find(
+        (c) => c.candidate_id === selReview.selected_candidate_id);
+      strip.appendChild(kv("Review focus", applied
+        ? focusLabel(applied, selReview.selected_candidate_id)
+        : "Recorded candidate not found"));
+      const studentExecs = (job.executions || {}).student || {};
+      strip.appendChild(kv("Selection provenance",
+        selectionProvenance(selReview, job,
+                            studentExecs.selector || {})));
+      const aitta = aittaProvenance(
+        selReview, studentExecs.generator || {});
+      if (aitta) strip.appendChild(kv("Aitta provenance", aitta));
+    }
+    const fallback = (selReview && (selReview.trace || {})
+                      .fallback_reason) || null;
+    if (fallback) {
+      strip.appendChild(el("p",
+        `A provider fallback was recorded ` +
+        `(${String(fallback).replaceAll("_", " ")}). ` +
+        "Review the current preview before approval.", "warn"));
+    }
+    if (!end.student_review && job.status === "pending"
+        && job.provider_mode === "hosted") {
+      strip.appendChild(el("p",
+        "Hosted feedback is still processing. The current preview " +
+        "uses the deterministic baseline unless you have saved " +
+        "teacher edits.", "warn"));
+    }
+    card.appendChild(strip);
     if (!preview) {
       card.appendChild(el("p",
         delivery.practice_status_message ||
@@ -1447,7 +1531,8 @@ function createDetailView(root, options = {}) {
     const editStatus = el("p", edit.note || null, "meta");
     const sectionInputs = {};
     card.appendChild(el("p",
-      "Narrative editing only—scores and skill counts are fixed.",
+      "Narrative editing only—scores, worked example and practice " +
+      "activity are fixed.",
       "boundary-note"));
     if (edit.dirty && edit.stale) {
       card.appendChild(el("p",
@@ -1455,6 +1540,9 @@ function createDetailView(root, options = {}) {
         "were started. Review the latest preview, then re-apply your " +
         "edits to it with the button below.", "warn"));
     }
+    const editBox = el("details", null, "raw");
+    editBox.dataset.disclosureKey = "feedback-editing";
+    editBox.appendChild(el("summary", "Edit feedback wording"));
     (preview.sections || []).forEach((section) => {
       const field = document.createElement("textarea");
       field.id = `${prefix}edit-${section.kind}`;
@@ -1479,10 +1567,11 @@ function createDetailView(root, options = {}) {
             "Unsaved edits — save the edited draft before releasing.";
         }
       });
-      card.appendChild(wrap);
-      card.appendChild(field);
+      editBox.appendChild(wrap);
+      editBox.appendChild(field);
       sectionInputs[section.kind] = field;
     });
+    card.appendChild(editBox);
     const rebindBtn = el("button",
       "Use latest revision with my edits", "secondary");
     rebindBtn.type = "button";
@@ -1547,7 +1636,9 @@ function createDetailView(root, options = {}) {
         button.disabled = edit.dirty || edit.saving || edit.awaitingPreview
           || draft.sending || currentReleased;
         editStatus.textContent = edit.note;
-        if (failed && selected === sid) renderFeedbackContent();
+        if (failed && selected === sid) {
+          renderPane("feedback", renderFeedbackContent);
+        }
       }
     });
     card.appendChild(saveBtn);
@@ -1637,7 +1728,11 @@ function createDetailView(root, options = {}) {
         input.setSelectionRange(caret.start, caret.end);
       }
     }
+    const research = el("details", null, "raw");
+    research.dataset.disclosureKey = "feedback-research";
+    research.appendChild(el("summary", "Research details"));
     const card = el("div", null, "card-inner");
+    research.appendChild(card);
     const end = detail.checkpoints.end || {};
     card.appendChild(kv("Provider job",
       `${detail.provider_job.status} (${detail.provider_job.provider_mode})`));
@@ -1646,12 +1741,12 @@ function createDetailView(root, options = {}) {
       card.appendChild(kv("Finished",
         detail.provider_job.finished_at || "—"));
     }
-    ["student", "teacher"].forEach((audience) => {
+    ["student"].forEach((audience) => {
       const review = end[`${audience}_review`];
       const baseline = end[`baseline_${audience}`];
       if (!baseline && !review) return;
       card.appendChild(el("h3",
-        `${audience} end draft (baseline vs selected)`));
+        "Shared feedback draft (baseline vs selected)"));
       card.appendChild(renderSelectionDecision(
         audience, review, baseline,
         detail.provider_job.executions, detail.provider_job));
@@ -1691,12 +1786,45 @@ function createDetailView(root, options = {}) {
       saved.append(el("summary", "Halfway student feedback in this result"), el("p", halfway.message.text, "draft-text"));
       card.append(saved);
     }
+    const recommendation = end.recommendation;
+    if (recommendation) {
+      const evidenceBox = el("details", null, "raw");
+      evidenceBox.dataset.disclosureKey = "practice-evidence";
+      evidenceBox.appendChild(
+        el("summary", "Practice selection evidence"));
+      const inner = el("div");
+      inner.appendChild(kv("Status",
+        statusLabel(recommendation.status)));
+      if (recommendation.reason) {
+        inner.appendChild(kv("Reason", recommendation.reason));
+      }
+      if (recommendation.target_band) {
+        inner.appendChild(kv(
+          "Experimental probability band (not validated learning " +
+          "difficulty)",
+          recommendation.target_band.join("–")));
+      }
+      const selectedId = end.practice_context
+        && end.practice_context.selected_question_id;
+      const prediction = (recommendation.candidate_predictions || [])
+        .find((p) => p.question_id === selectedId);
+      const p = prediction && prediction.p_correct;
+      const practiceStatus = (((detail.feedback_delivery || {})
+        .preview || {}).practice || {}).status;
+      if (practiceStatus === "selected" && Number.isFinite(p)) {
+        inner.appendChild(kv(
+          "Estimated correctness on this question (not mastery)",
+          p.toFixed(3)));
+      }
+      evidenceBox.appendChild(inner);
+      card.appendChild(evidenceBox);
+    }
     if (detail.provider_job.executions) {
       card.appendChild(jsonDetails(
         "Provider executions (provenance, metadata, latency)",
         detail.provider_job.executions, "executions"));
     }
-    pane.appendChild(card);
+    pane.appendChild(research);
   }
 
   /* ---------- review tab with per-session draft state ---------- */
@@ -1727,10 +1855,7 @@ function createDetailView(root, options = {}) {
       return;
     }
     const hashes = detail.review_hashes || {};
-    const audienceEl = $("#tab-review select[data-audience]");
-    const audience = (audienceEl && audienceEl.value) ||
-      lastAudience || "student";
-    lastAudience = audience;
+    const audience = "student";
     const currentHash = hashes[audience] || null;
     const draft = draftFor(selected, audience, currentHash);
     const key = [selected, audience, currentHash,
@@ -1744,25 +1869,7 @@ function createDetailView(root, options = {}) {
     const card = el("div", null, "card-inner");
     card.appendChild(el("p", contract ? contract.notice : "", "warn"));
 
-    const audSel = el("select");
-    audSel.dataset.audience = "1";
-    audSel.id = `${prefix}rev-audience`;
-    audSel.setAttribute("aria-label", "Review audience");
-    ["student", "teacher"].forEach((a) => {
-      const o = el("option", a);
-      o.value = a;
-      audSel.appendChild(o);
-    });
-    audSel.value = audience;
-    audSel.addEventListener("change", () => {
-      lastAudience = audSel.value;
-      reviewRenderKey = null;
-      renderPane("review", renderReviewContent);
-    });
-    const audLabel = el("label", "Audience draft");
-    audLabel.htmlFor = audSel.id;
-    card.appendChild(audLabel);
-    card.appendChild(audSel);
+    card.appendChild(el("p", "Shared student-facing feedback", "meta"));
 
     if (!currentHash) {
       card.appendChild(el("p",

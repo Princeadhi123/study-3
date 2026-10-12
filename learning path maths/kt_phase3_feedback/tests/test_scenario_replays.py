@@ -92,6 +92,14 @@ class ScenarioReplayTests(unittest.TestCase):
                          [r["selected_index"] for r in self.source["scenarios"][0]["responses"]])
         self.assertEqual(detail["checkpoints"]["end"]["diagnostics"]["mode"], "fresh_frozen_model_inference")
         self.assertEqual(result["changes"]["observed_correct_delta"], 0)
+        self.assertEqual([row["audience"] for row in result["changes"]["feedback"]],
+                         ["student"])
+        self.assertIsNone(detail["checkpoints"]["end"]["teacher_review"])
+        self.assertIsNone(detail["checkpoints"]["end"]["baseline_teacher"])
+        original = self.service.research.scenario(result["scenario_id"])
+        self.assertEqual(
+            [p["audience"] for p in original["packages"]
+             if p["checkpoint"] == "end"], ["student", "teacher"])
         self.assertEqual(before, (self.report_path.read_bytes(), self.source_path.read_bytes()))
         self.assertIn("code_sha256", finished)
         self.assertNotIn("student_token", json.dumps(finished))
@@ -101,6 +109,11 @@ class ScenarioReplayTests(unittest.TestCase):
         again = self.service.replays.start(request)
         self.assertEqual(again["id"], run["id"])
         self.assertEqual(len(self.service.replays.list()["runs"]), 1)
+
+    def test_current_code_includes_feedback_modules(self):
+        names = set(self.service.replays.current_code())
+        self.assertIn("full_feedback.py", names)
+        self.assertIn("feedback_practice.py", names)
 
     def test_all_cases_have_complete_results_and_replay_history(self):
         run = self.service.replays.start(self.request(3))
@@ -232,7 +245,8 @@ class ScenarioReplayTests(unittest.TestCase):
                 detail["feedback_delivery"]["preview"]["practice"]
                 ["question"])
         self.assertIsNotNone(end["student_review"])
-        self.assertIsNotNone(end["teacher_review"])
+        self.assertIsNone(end["teacher_review"])
+        self.assertIsNone(end["baseline_teacher"])
         self.assertEqual(recommender.calls, 1)
 
     def test_original_case_detail_is_read_only_and_has_all_answers(self):

@@ -170,7 +170,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const summary = library.summary;
     const metrics = el("div", null, "metrics-grid");
     metrics.append(metric(summary.scenarios, "Saved scenarios", "Chosen stress-test cases"),
-      metric(summary.end_packages, "End-stage drafts", "Student + teacher audiences"),
+      metric(summary.end_packages, "End-stage drafts", "Retained original audiences"),
       metric(summary.selection_differences, "Different selections", `Of ${summary.end_packages} end packages; not a quality score`),
       metric(summary.fallback_packages, "Recorded fallbacks", "End packages in this replay"));
     libraryPane.append(metrics, el("p", "These summary counts describe the retained original report, not the most recent replay.", "meta small"));
@@ -374,7 +374,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
         }, "run-case");
         const warnings = row.diagnostics && Object.values(row.diagnostics).some((s) => s !== "ready");
         item.append(el("span", row.display_name), el("span", `${statusLabel(row.status)}${warnings ? " · diagnostics unavailable" : ""}${row.provider_status === "fallback" ? " · baseline fallback" : ""}`, "meta small"));
-        if (row.changes) item.append(el("span", `${row.changes.feedback.filter((f) => f.text_changed).length}/2 drafts changed from original`, "case-tag"));
+        if (row.changes) item.append(el("span", `${row.changes.feedback.filter((f) => f.text_changed).length}/${row.changes.feedback.length} drafts changed from original`, "case-tag"));
         cases.append(item);
       });
       section.append(cases, raw("Run provenance and code fingerprints", {code_sha256: run.code_sha256, source: run.source,

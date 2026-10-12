@@ -549,7 +549,7 @@ class DemoAPITests(unittest.TestCase):
         end = snap["feedback"]["end"]
         self.assertEqual(
             end["template_version"],
-            "phase3_student_feedback_template_v2")
+            "phase3_student_feedback_template_v3")
         self.assertEqual([s["title"] for s in end["sections"]],
                          ["Assessment summary", "Observed strengths",
                           "Review focus", "Next steps"])

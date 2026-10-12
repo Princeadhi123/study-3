@@ -232,6 +232,45 @@ class FullFeedbackTests(unittest.TestCase):
             self._reject(wire_reply(sections=sections,
                                     candidate_id=self.selected_id))
 
+    def test_internal_process_language_rejected(self):
+        for key in FULL_FEEDBACK_SECTION_KEYS:
+            sections = dict(VALID_SECTIONS)
+            sections[key] = "This section follows the plan."
+            self._reject(wire_reply(sections=sections,
+                                    candidate_id=self.selected_id))
+        for phrase in ("the feedback plan", "a priority group",
+                       "the selected candidate", "the selection policy",
+                       "routing details", "the system prompt",
+                       "Jev routing", "the Aitta system",
+                       "according to this plan", "based on our plan",
+                       "guided by its plan"):
+            sections = dict(VALID_SECTIONS)
+            sections["next_steps"] = f"A note about {phrase}."
+            self._reject(wire_reply(sections=sections,
+                                    candidate_id=self.selected_id))
+        sections = dict(VALID_SECTIONS)
+        sections["next_steps"] = (
+            "Plan your calculation before answering.")
+        opener = RecordingOpener(
+            wire_reply(sections=sections,
+                       candidate_id=self.selected_id))
+        result = self._generator(opener).generate(self.full_input)
+        self.assertEqual(result["sections"]["next_steps"],
+                         sections["next_steps"])
+
+    def test_prompt_version_v3_request_and_isolation(self):
+        self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION,
+                         "aitta_feedback_with_practice_v3")
+        payload = copy.deepcopy(self.full_input)
+        payload["prompt_version"] = "aitta_feedback_with_practice_v2"
+        with self.assertRaises(ValueError):
+            validate_full_input(payload)
+        body = self._generator(
+            RecordingOpener()).request(self.full_input)
+        context = json.loads(body["messages"][1]["content"])
+        self.assertEqual(context["prompt_version"],
+                         FULL_FEEDBACK_PROMPT_VERSION)
+
     def test_truncated_finish_reason_and_json_rejected(self):
         self._reject(wire_reply(candidate_id=self.selected_id,
                                 finish_reason="length"))

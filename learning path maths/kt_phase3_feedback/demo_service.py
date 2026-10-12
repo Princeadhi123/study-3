@@ -35,7 +35,7 @@ from evidence_providers import EvidenceJevSelector
 from feedback_practice import (
     FEEDBACK_BUNDLE_VERSION, INTEGRATED_TEMPLATE_VERSION,
     PRACTICE_STATUS_MESSAGES, empty_context, project_practice_context,
-    resolve_practice)
+    resolve_practice, review_example)
 from feedback_service import assessment_feedback_graph
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
@@ -556,14 +556,25 @@ class DemoService:
                 for row in evidence["skills"]],
             "requires_educator_review": True}
         if integrated:
+            selected = None
+            if review is not None:
+                selected = next(
+                    (c for c in review.get("candidates") or []
+                     if c.get("candidate_id")
+                     == review.get("selected_candidate_id")), None)
             try:
                 preview["practice"] = resolve_practice(
-                    end["practice_context"], evidence)["card"]
+                    end["practice_context"], evidence,
+                    candidate=selected)["card"]
             except Exception:
                 preview["practice"] = {
                     "status": "unavailable",
                     "message": PRACTICE_STATUS_MESSAGES["unavailable"],
                     "notice": None, "question": None}
+            if selected is not None:
+                example = review_example(selected)
+                if example is not None:
+                    preview["review_example"] = example
         return preview
 
     @staticmethod
@@ -686,8 +697,6 @@ class DemoService:
         end["evidence"] = evidence
         end["baseline_student"] = run_feedback(
             evidence, "student", "end")
-        end["baseline_teacher"] = run_feedback(
-            evidence, "teacher", "end")
         end["graph"] = assessment_feedback_graph(
             context["bank"], context["taxonomy"], rows)
         mode = meta["provider_job"]["provider_mode"]
@@ -722,7 +731,7 @@ class DemoService:
         end["practice_context"] = ctx
         if reason:
             end["practice_context_reason"] = reason
-        for audience in ("student", "teacher"):
+        for audience in ("student",):
             end[f"baseline_{audience}"] = run_feedback(
                 evidence, audience, "end", practice_context=ctx)
         return ctx
@@ -739,7 +748,7 @@ class DemoService:
                 "provider_mode": mode,
                 "queued_at": utc_now(), "finished_at": utc_now(),
                 "reason": "service_closing"}
-            for audience in ("student", "teacher"):
+            for audience in ("student",):
                 end[f"{audience}_review"] = self._baseline_review(
                     evidence, audience, "service_closing", ctx)
             end["provider_job"] = copy.deepcopy(meta["provider_job"])
@@ -750,7 +759,7 @@ class DemoService:
                 "provider_mode": mode,
                 "queued_at": utc_now(), "finished_at": utc_now(),
                 "reason": "demo_provider_queue_capacity"}
-            for audience in ("student", "teacher"):
+            for audience in ("student",):
                 end[f"{audience}_review"] = self._baseline_review(
                     evidence, audience, "demo_provider_queue_capacity",
                     ctx)
@@ -769,7 +778,7 @@ class DemoService:
                     "provider_mode": mode,
                     "queued_at": utc_now(), "finished_at": utc_now(),
                     "reason": "service_closing"}
-                for audience in ("student", "teacher"):
+                for audience in ("student",):
                     end[f"{audience}_review"] = self._baseline_review(
                         evidence, audience, "service_closing", ctx)
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
@@ -999,7 +1008,7 @@ class DemoService:
                                         .get("practice_context"))
                 evidence = self._evidence(meta, rows)
                 results = {}
-                for audience in ("student", "teacher"):
+                for audience in ("student",):
                     review, executions = self._audience_result(
                         evidence, audience, mode,
                         practice_context=practice_context)
@@ -1037,7 +1046,7 @@ class DemoService:
                             audience: self._baseline_review(
                                 evidence, audience, "provider_error",
                                 ctx)
-                            for audience in ("student", "teacher")}
+                            for audience in ("student",)}
                     except Exception:
                         if integrated:
                             ctx = empty_context("unavailable")
@@ -1045,26 +1054,25 @@ class DemoService:
                             end["practice_context_reason"] = (
                                 "provider_fallback_context_unavailable")
                         baselines = {}
-                        for audience in ("student", "teacher"):
+                        for audience in ("student",):
                             review = run_feedback(
                                 evidence, audience, "end",
                                 practice_context=ctx)
                             review["trace"]["fallback_reason"] = (
                                 "provider_error")
                             baselines[audience] = review
-                        for audience in ("student", "teacher"):
+                        for audience in ("student",):
                             end[f"baseline_{audience}"] = copy.deepcopy(
                                 baselines[audience])
-                    for audience in ("student", "teacher"):
+                    for audience in ("student",):
                         end[f"{audience}_review"] = baselines[audience]
                     meta["provider_job"].update(
                         {"status": "fallback", "finished_at": finished,
                          "executions": {
                              a: {"status": "worker_error"}
-                             for a in ("student", "teacher")}})
+                             for a in ("student",)}})
                 else:
                     end["student_review"] = results["student"]["review"]
-                    end["teacher_review"] = results["teacher"]["review"]
                     meta["provider_job"].update({
                         "status": job_status, "finished_at": finished,
                         "executions": {
@@ -1106,16 +1114,11 @@ class DemoService:
             if ctx is not None:
                 end["baseline_student"] = run_feedback(
                     evidence, "student", "end", practice_context=ctx)
-                end["baseline_teacher"] = run_feedback(
-                    evidence, "teacher", "end", practice_context=ctx)
             else:
                 if end.get("baseline_student") is None:
                     end["baseline_student"] = run_feedback(
                         evidence, "student", "end")
-                if end.get("baseline_teacher") is None:
-                    end["baseline_teacher"] = run_feedback(
-                        evidence, "teacher", "end")
-            for audience in ("student", "teacher"):
+            for audience in ("student",):
                 if end.get(f"{audience}_review") is None:
                     end[f"{audience}_review"] = self._baseline_review(
                         evidence, audience, "interrupted_by_restart",

@@ -85,12 +85,36 @@ class TeacherFailSelector:
 
     def __init__(self):
         self.execution = None
+        self.audiences = []
 
     def select(self, payload):
+        self.audiences.append(payload["audience"])
         if payload["audience"] == "teacher":
             raise RuntimeError("teacher provider down")
         self.execution = {"status": "fake_completed"}
         return {"candidate_id": payload["candidates"][1]["candidate_id"]}
+
+
+class RecordingSelector:
+    def __init__(self):
+        self.execution = None
+        self.audiences = []
+
+    def select(self, payload):
+        self.audiences.append(payload["audience"])
+        self.execution = {"status": "fake_completed"}
+        return {"candidate_id":
+                payload["candidates"][1]["candidate_id"]}
+
+
+class RecordingGenerator(FakeGenerator):
+    def __init__(self):
+        super().__init__()
+        self.audiences = []
+
+    def generate(self, payload):
+        self.audiences.append(payload["audience"])
+        return super().generate(payload)
 
 
 class BudgetAtGeneratorSelector:
@@ -262,7 +286,8 @@ class DemoServiceTests(unittest.TestCase):
         self.assertEqual(meta["provider_job"]["provider_mode"], "rules")
         end = meta["checkpoints"]["end"]
         self.assertIsNotNone(end["student_review"])
-        self.assertIsNotNone(end["teacher_review"])
+        self.assertIsNone(end["teacher_review"])
+        self.assertIsNone(end["baseline_teacher"])
         self.assertIsNone(
             end["student_review"]["trace"]["fallback_reason"])
 
@@ -322,6 +347,36 @@ class DemoServiceTests(unittest.TestCase):
         self.assertEqual(config["call_budget"]["used"], 0)
         self.assertIn('"limit": null', json.dumps(config))
 
+    def test_shared_student_draft_is_the_only_generated_end(self):
+        selector = RecordingSelector()
+        generator = RecordingGenerator()
+        service = self._service(
+            provider_mode="hosted",
+            selector=selector, generator=generator)
+        self.addCleanup(service.close)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(self.bank, correct=False, count=40):
+            service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "ready"))
+        self.assertEqual(selector.audiences, ["student"])
+        self.assertEqual(generator.audiences, ["student"])
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        self.assertIsNotNone(end["student_review"])
+        self.assertIsNone(end["teacher_review"])
+        self.assertIsNone(end["baseline_teacher"])
+        self.assertEqual(set(meta["provider_job"]["executions"]),
+                         {"student"})
+        view = service.teacher_session(sid)
+        self.assertEqual(set(view["review_hashes"]), {"student"})
+        self.assertEqual(view["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+
     def test_single_candidate_emits_local_status(self):
         service = self._service(
             provider_mode="hosted",
@@ -336,17 +391,16 @@ class DemoServiceTests(unittest.TestCase):
             lambda: service._load_meta(sid)["provider_job"]["status"]
             in ("ready", "fallback")))
         job = service._load_meta(sid)["provider_job"]
+        self.assertEqual(set(job["executions"]), {"student"})
         self.assertEqual(
             job["executions"]["student"]["selector"]["status"],
             "local_single_candidate")
-        self.assertEqual(
-            job["executions"]["teacher"]["selector"]["status"],
-            "local_single_candidate")
 
-    def test_partial_fallback_keeps_student_review_public(self):
+    def test_teacher_branch_never_runs_and_job_stays_ready(self):
+        selector = TeacherFailSelector()
         service = self._service(
             provider_mode="hosted",
-            selector=TeacherFailSelector(),
+            selector=selector,
             generator=FakeGenerator())
         self.addCleanup(service.close)
         created = service.create_session()
@@ -355,7 +409,8 @@ class DemoServiceTests(unittest.TestCase):
             service.submit_response(sid, token, row)
         self.assertTrue(wait_for(
             lambda: service._load_meta(sid)["provider_job"]["status"]
-            == "fallback"))
+            == "ready"))
+        self.assertEqual(selector.audiences, ["student"])
         meta = service._load_meta(sid)
         end = meta["checkpoints"]["end"]
         student_review = end["student_review"]
@@ -364,14 +419,12 @@ class DemoServiceTests(unittest.TestCase):
         self.assertNotEqual(
             student_review["selected_candidate_id"],
             student_review["baseline_candidate_id"])
-        self.assertEqual(end["teacher_review"]["trace"]
-                         ["fallback_reason"], "selector_error")
+        self.assertIsNone(end["teacher_review"])
         job = meta["provider_job"]
-        self.assertEqual(job["executions"]["teacher"]["generator"]
-                         ["status"], "skipped_selector_failure")
+        self.assertEqual(set(job["executions"]), {"student"})
         snapshot = service.snapshot(sid, token)
         self.assertEqual(snapshot["provider_job"]["status"],
-                         "fallback")
+                         "ready")
         self.assertIsNone(snapshot["feedback"]["end"])
         self.assertEqual(snapshot["feedback_delivery"]["status"],
                          "awaiting_teacher_review")
@@ -706,10 +759,10 @@ class DemoServiceTests(unittest.TestCase):
     def test_stale_review_hash_rejected_with_current(self):
         sid = self.finish_ready()
         view = self.service.teacher_session(sid)
-        current = view["review_hashes"]["teacher"]
+        current = view["review_hashes"]["student"]
         with self.assertRaises(ConflictError) as ctx:
             self.service.add_review(sid, {
-                "audience": "teacher",
+                "audience": "student",
                 "message_sha256": "0" * 64,
                 "judgments": self.judgments(), "note": ""})
         self.assertEqual(ctx.exception.current, current)
@@ -773,7 +826,7 @@ class DemoServiceTests(unittest.TestCase):
         preview = view["feedback_delivery"]["preview"]
         self.assertEqual(
             preview["template_version"],
-            "phase3_student_feedback_template_v2")
+            "phase3_student_feedback_template_v3")
         self.assertTrue(preview["requires_educator_review"])
         result = self.service.release_feedback(sid2, {
             "message_sha256": view["feedback_delivery"]["preview_sha256"],
@@ -782,7 +835,7 @@ class DemoServiceTests(unittest.TestCase):
         snapshot = self.service.snapshot(sid2, token2)
         end = snapshot["feedback"]["end"]
         self.assertEqual(end["template_version"],
-                         "phase3_student_feedback_template_v2")
+                         "phase3_student_feedback_template_v3")
         self.assertFalse(end["requires_educator_review"])
         self.assertEqual(snapshot["feedback_delivery"]["status"],
                          "released")
@@ -1350,7 +1403,7 @@ class IntegratedPracticeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v2")
+                         "phase3_student_feedback_template_v3")
         card = preview["practice"]
         self.assertEqual(card["status"], "selected")
         self.assertEqual(set(card["question"]),
@@ -1368,6 +1421,136 @@ class IntegratedPracticeTests(unittest.TestCase):
         self.assertEqual(
             meta["feedback_release"]["preview_sha256"],
             __import__("evidence_feedback").canonical_digest(preview))
+
+    def test_example_relationship_edit_and_release_preserved(self):
+        from unittest import mock
+        import feedback_practice
+        selector = RecordingSelector()
+        generator = RecordingGenerator()
+        service = self._service(
+            provider_mode="hosted", selector=selector,
+            generator=generator,
+            recommender=BoundRecommender(self.bank, self.pool))
+        sid, token = self._complete(service)
+        self._wait_terminal(service, sid)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "ready"))
+        self.assertEqual(set(selector.audiences), {"student"}
+                         if selector.audiences else set())
+        self.assertLessEqual(len(selector.audiences), 1)
+        self.assertEqual(generator.audiences, ["student"])
+        end = self._end(service, sid)
+        review = end["student_review"]
+        selected = next(
+            c for c in review["candidates"]
+            if c["candidate_id"] == review["selected_candidate_id"])
+        sub_id = selected["focus"]["subtopic_id"]
+        self.assertEqual(selected["focus"]["skill_id"], "sA")
+        first = {"prompt": "Fixed first prompt?",
+                 "explanation": "Fixed first explanation."}
+        other = {"prompt": "Fixed other prompt?",
+                 "explanation": "Fixed other explanation."}
+        with mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             {sub_id: first}):
+            delivery = self._delivery(service, sid)
+            first_sha = delivery["preview_sha256"]
+        with mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             {sub_id: other}):
+            other_sha = self._delivery(service, sid)["preview_sha256"]
+        self.assertNotEqual(first_sha, other_sha)
+        with mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             {sub_id: first}):
+            delivery = self._delivery(service, sid)
+            preview = delivery["preview"]
+            self.assertEqual(preview["template_version"],
+                             "phase3_student_feedback_template_v3")
+            example = preview["review_example"]
+            self.assertEqual(example["title"], "Worked review example")
+            self.assertEqual(example["prompt"], first["prompt"])
+            self.assertEqual(example["explanation"],
+                             first["explanation"])
+            self.assertIn("Discuss this example", example["notice"])
+            self.assertEqual(
+                set(example),
+                {"title", "prompt", "explanation", "notice"})
+            card = preview["practice"]
+            self.assertEqual(card["status"], "selected")
+            self.assertEqual(card["relationship"]["kind"],
+                             "different_content")
+            self.assertIn("Concept sA",
+                          card["relationship"]["message"])
+            self.assertIn("Subtopic sA",
+                          card["relationship"]["message"])
+            res = service.save_feedback_edit(sid, {
+                "message_sha256": delivery["preview_sha256"],
+                "sections": {
+                    key: f"Edited {key}."
+                    for key in ("assessment_summary",
+                                "observed_strengths", "review_focus",
+                                "next_steps")},
+                "reviewer_label": "fx"})
+            released = service.release_feedback(
+                sid, {"message_sha256": res["preview_sha256"]})
+        self.assertTrue(released["released"])
+        snap = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(snap["review_example"], example)
+        self.assertEqual(snap["practice"], card)
+        blob = json.dumps(snap)
+        for needle in ("pool_q", "p_correct", "answer_index",
+                       "item_id", "pool_sha256", "sub_"):
+            self.assertNotIn(needle, blob)
+        stored = service.teacher_session(sid)["feedback_delivery"]
+        self.assertEqual(stored["preview"]["review_example"], example)
+
+    def test_released_same_content_has_no_awaiting_claim(self):
+        from unittest import mock
+        import feedback_practice
+        from tests.test_feedback_practice import make_graph
+        graph = make_graph(self.pool)
+        for row in graph["exercises"]:
+            if row["question_id"] == "pool_q1":
+                row["concept_id"] = "sub_sA"
+                row["concept_label"] = "Subtopic sA"
+        with mock.patch.object(feedback_practice,
+                               "teacher_content_context",
+                               return_value=copy.deepcopy(graph)):
+            service = self._service(recommender=BoundRecommender(
+                self.bank, self.pool))
+            sid, token = self._complete(service)
+            self._wait_terminal(service, sid)
+            delivery = self._delivery(service, sid)
+            card = delivery["preview"]["practice"]
+            self.assertEqual(card["relationship"]["kind"], "same_content")
+            self.assertEqual(
+                card["relationship"]["message"],
+                "This practice activity covers the same assessed content "
+                "as the review focus. Review and practice are separate "
+                "activities.")
+            res = service.release_feedback(sid, {
+                "message_sha256": delivery["preview_sha256"]})
+            self.assertTrue(res["released"])
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["practice"], card)
+        self.assertNotIn("awaiting", json.dumps(released))
+
+    def test_nonselected_states_fabricate_no_question_or_example(self):
+        for status in ("abstained", "unavailable"):
+            service = self._service(recommender=StaticRecommender(
+                result={"status": status}))
+            sid, _ = self._complete(service)
+            self._wait_terminal(service, sid)
+            preview = self._delivery(service, sid)["preview"]
+            self.assertIsNone(preview["practice"]["question"])
+            self.assertNotIn("relationship", preview["practice"])
+            self.assertNotIn("review_example", preview)
+        service = self._service()
+        sid, _ = self._complete(service)
+        self._wait_terminal(service, sid)
+        preview = self._delivery(service, sid)["preview"]
+        self.assertIsNone(preview["practice"]["question"])
+        self.assertNotIn("relationship", preview["practice"])
+        self.assertNotIn("review_example", preview)
 
     def test_abstained_unavailable_disabled_contexts(self):
         service = self._service(recommender=StaticRecommender(
@@ -1478,8 +1661,8 @@ class IntegratedPracticeTests(unittest.TestCase):
             lambda: service._load_meta(sid)["provider_job"]["status"]
             in ("ready", "fallback")))
         self.assertEqual(recommender.calls, 1)
-        self.assertEqual(selector.calls, 2)
-        self.assertEqual(calls["generate"], 2)
+        self.assertEqual(selector.calls, 1)
+        self.assertEqual(calls["generate"], 1)
         for ctx in calls["contexts"]:
             self.assertEqual(ctx["status"], "selected")
             self.assertEqual(ctx["selected_question_id"], "pool_q1")
@@ -1493,7 +1676,7 @@ class IntegratedPracticeTests(unittest.TestCase):
         service.snapshot(sid, token)
         self._delivery(service, sid)
         self.assertEqual(recommender.calls, 1)
-        self.assertEqual(calls["generate"], 2)
+        self.assertEqual(calls["generate"], 1)
         from full_feedback import FULL_FEEDBACK_PROMPT_VERSION
         self.assertEqual(
             service._load_meta(sid)["provider_job"]

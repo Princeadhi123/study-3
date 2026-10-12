@@ -1,6 +1,6 @@
 PRACTICE_CONTEXT_SCHEMA = "phase3_feedback_practice_context_v1"
 FEEDBACK_BUNDLE_VERSION = "phase3_feedback_practice_bundle_v1"
-INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v2"
+INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v3"
 PRACTICE_CONTEXT_KEYS = {
     "schema", "status", "selected_question_id", "pool_sha256"}
 PRACTICE_TERMINAL_STATUSES = {
@@ -16,8 +16,123 @@ PRACTICE_SELECTION_NOTICE = (
     "Synthetic demo activity only. This selection does not establish mastery "
     "or a validated optimal learning difficulty.")
 PRACTICE_NEXT_STEP_SELECTED = (
-    "A suggested practice activity accompanies this feedback: {concept_name} "
-    "({skill_name}). Use it as a follow-up, not as a judgement of mastery.")
+    "If your teacher approves, a separate practice activity is proposed on "
+    "{concept_name}. Review and practice are separate suggestions; the "
+    "practice may cover different content.")
+PRACTICE_RELATIONSHIP_MESSAGES = {
+    "same_content":
+        "This practice activity covers the same assessed content as the "
+        "review focus. Review and practice are separate activities.",
+    "different_content":
+        "This is separate practice on {concept_name}, another area where "
+        "this assessment recorded incorrect answers. It does not practise "
+        "the review focus, {subtopic_name}.",
+    "no_review_focus":
+        "This practice activity is separate from the review suggestion.",
+}
+REVIEW_EXAMPLE_NOTICE = (
+    "Discuss this example with your teacher. It is not the selected "
+    "practice question.")
+REVIEW_EXAMPLES = {
+    "percentage_amount": {
+        "prompt": "Find 30% of 90.",
+        "explanation": "The whole is 90. Write 30% as 30/100 = 0.30, then "
+                       "multiply: 0.30 × 90 = 27."},
+    "divisibility": {
+        "prompt": "Is 18 divisible by 6?",
+        "explanation": "18 ÷ 6 = 3 with no remainder, so 6 is a divisor of "
+                       "18. Check: 6 × 3 = 18."},
+    "prime_recognition": {
+        "prompt": "Which of 13 and 15 is prime?",
+        "explanation": "13 has only the positive divisors 1 and 13, so it "
+                       "is prime. 15 = 3 × 5, so 15 is not prime."},
+    "combine_like_terms": {
+        "prompt": "Simplify 7a − 2a.",
+        "explanation": "Both terms have the variable part a. Subtract the "
+                       "coefficients and keep a: (7 − 2)a = 5a."},
+    "retain_unlike_terms": {
+        "prompt": "Simplify 2a + 5b.",
+        "explanation": "The variable parts a and b differ, so these are "
+                       "unlike terms. They cannot be combined into one "
+                       "term; the expression remains 2a + 5b."},
+    "fraction_product": {
+        "prompt": "Calculate 2/3 × 3/5.",
+        "explanation": "Multiply the numerators and denominators: "
+                       "(2 × 3)/(3 × 5) = 6/15 = 2/5."},
+    "fraction_of_quantity": {
+        "prompt": "Find 3/4 of 12.",
+        "explanation": "The whole is 12. Multiply by the fraction: "
+                       "(3/4) × 12 = 36/4 = 9."},
+    "fraction_times_integer": {
+        "prompt": "Calculate 2/5 × 3.",
+        "explanation": "Write 3 as 3/1, then multiply: "
+                       "(2 × 3)/(5 × 1) = 6/5."},
+    "arithmetic_order_of_operations": {
+        "prompt": "Calculate 3 + 2 × (8 − 5).",
+        "explanation": "Evaluate the brackets first: 8 − 5 = 3. Multiply "
+                       "next: 2 × 3 = 6. Then add: 3 + 6 = 9."},
+    "arithmetic_division_by_ten": {
+        "prompt": "Calculate 430 ÷ 10.",
+        "explanation": "Dividing by 10 makes each digit's place value one "
+                       "tenth as large: 430 ÷ 10 = 43. Check: 43 × 10 = 430."},
+    "price_subtraction": {
+        "prompt": "Find the difference between EUR 7.50 and EUR 2.20.",
+        "explanation": "Align the decimal places and subtract: "
+                       "EUR 7.50 − EUR 2.20 = EUR 5.30. Check: "
+                       "EUR 5.30 + EUR 2.20 = EUR 7.50."},
+    "price_unit_price": {
+        "prompt": "Three kilograms cost EUR 12. What is the price per "
+                  "kilogram?",
+        "explanation": "Divide the total price by the quantity: "
+                       "EUR 12 ÷ 3 kg = EUR 4 per kilogram. Check: "
+                       "3 kg × EUR 4 per kilogram = EUR 12."},
+    "price_proportional_cost": {
+        "prompt": "Four notebooks cost EUR 12 at a fixed unit price. What "
+                  "do six cost?",
+        "explanation": "One notebook costs EUR 12 ÷ 4 = EUR 3. Six "
+                       "notebooks cost 6 × EUR 3 = EUR 18."},
+    "fractions_compare": {
+        "prompt": "Which is larger: 2/3 or 3/5?",
+        "explanation": "Use a common denominator: 2/3 = 10/15 and "
+                       "3/5 = 9/15. Since 10/15 > 9/15, 2/3 is larger."},
+    "fractions_multiply": {
+        "prompt": "Calculate 2/3 × 3/5.",
+        "explanation": "Multiply the numerators and denominators: "
+                       "(2 × 3)/(3 × 5) = 6/15 = 2/5."},
+    "fractions_divide_whole": {
+        "prompt": "Calculate (3/4) ÷ 2.",
+        "explanation": "Multiply by the reciprocal of 2: (3/4) × (1/2) = "
+                       "3/8. Check: (3/8) × 2 = 3/4."},
+    "fractions_multiply_whole": {
+        "prompt": "Calculate 2/5 × 3.",
+        "explanation": "Write 3 as 3/1, then multiply: "
+                       "(2 × 3)/(5 × 1) = 6/5."},
+    "fractions_add_same_denominator": {
+        "prompt": "Calculate 2/7 + 3/7.",
+        "explanation": "Keep the common denominator and add the "
+                       "numerators: (2 + 3)/7 = 5/7."},
+    "fractions_add_different_denominators": {
+        "prompt": "Calculate 1/3 + 1/4.",
+        "explanation": "Use denominator 12: 1/3 = 4/12 and 1/4 = 3/12. "
+                       "Then add: 4/12 + 3/12 = 7/12."},
+    "percent_of_number": {
+        "prompt": "Find 30% of 90.",
+        "explanation": "The whole is 90. Write 30% as 30/100 = 0.30, then "
+                       "multiply: 0.30 × 90 = 27."},
+    "percent_find_whole": {
+        "prompt": "30% of an amount is 27. Find the whole amount.",
+        "explanation": "Write 30% as 0.30 and divide the part by it: "
+                       "27 ÷ 0.30 = 90. Check: 0.30 × 90 = 27."},
+    "percent_as_multiplier": {
+        "prompt": "Write 35% as a decimal multiplier.",
+        "explanation": "Divide by 100: 35/100 = 0.35. Multiplying an "
+                       "amount by 0.35 gives 35% of that amount."},
+    "percent_find_rate": {
+        "prompt": "What percentage of 50 is 15?",
+        "explanation": "The part is 15 and the whole is 50. Divide and "
+                       "multiply by 100: (15/50) × 100 = 30, so the "
+                       "percentage is 30%."},
+}
 PRACTICE_NEXT_STEP_ABSTAINED = (
     "No practice activity was selected for this assessment. Ask your teacher "
     "to choose a suitable follow-up if needed.")
@@ -155,7 +270,7 @@ def project_practice_context(result, bank, rows, evidence, recommender):
                 "practice_context_validation_failed")
 
 
-def resolve_practice(context, evidence):
+def resolve_practice(context, evidence, candidate=None):
     status = context["status"]
     card = {"status": status, "message": PRACTICE_STATUS_MESSAGES[status],
             "notice": PRACTICE_SELECTION_NOTICE, "question": None}
@@ -172,10 +287,40 @@ def resolve_practice(context, evidence):
                         "concept_name": row["concept_label"],
                         "text": question["text"],
                         "options": copy.deepcopy(question["options"])}
+    if candidate is not None:
+        focus = candidate.get("focus")
+        if focus is None:
+            card["relationship"] = {
+                "kind": "no_review_focus",
+                "message":
+                    PRACTICE_RELATIONSHIP_MESSAGES["no_review_focus"]}
+        elif (focus.get("skill_id") == question["skill_id"]
+                and focus.get("subtopic_id") == row["concept_id"]):
+            card["relationship"] = {
+                "kind": "same_content",
+                "message": PRACTICE_RELATIONSHIP_MESSAGES["same_content"]}
+        else:
+            card["relationship"] = {
+                "kind": "different_content",
+                "message": PRACTICE_RELATIONSHIP_MESSAGES[
+                    "different_content"].format(
+                        concept_name=row["concept_label"],
+                        subtopic_name=focus.get("subtopic_name"))}
     return {"card": card,
             "selection": {"skill_name": skill["skill_name"],
                           "concept_name": row["concept_label"],
                           "mathematical_task": row["mathematical_task"]}}
+
+
+def review_example(candidate):
+    focus = (candidate or {}).get("focus") or {}
+    record = REVIEW_EXAMPLES.get(focus.get("subtopic_id"))
+    if record is None:
+        return None
+    return {"title": "Worked review example",
+            "prompt": copy.deepcopy(record["prompt"]),
+            "explanation": copy.deepcopy(record["explanation"]),
+            "notice": REVIEW_EXAMPLE_NOTICE}
 
 
 def contextual_message(evidence, audience, candidate, context,
