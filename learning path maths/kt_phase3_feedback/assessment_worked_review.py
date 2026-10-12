@@ -3,7 +3,7 @@ import copy
 import worked_review_math
 
 ASSESSMENT_WORKED_REVIEW_VERSION = "assessment_grounded_worked_review_v1"
-GROUNDED_TEMPLATE_VERSION = "phase3_student_feedback_template_v6"
+GROUNDED_TEMPLATE_VERSION = "phase3_student_feedback_template_v7"
 SELECTION_POLICY = "earliest_incorrect_in_selected_subtopic_v1"
 CONTEXT_KEYS = {"bank", "taxonomy", "responses"}
 CARD_TITLE = "Worked review of your assessment answer"

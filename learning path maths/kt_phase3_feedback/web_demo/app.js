@@ -293,12 +293,16 @@ function aittaProvenance(review, genExec) {
       `${detail ? ` (${detail})` : ""} - deterministic feedback used`;
   }
   if (trace.phrasing_source === "injected_generator_full_sections") {
+    const guarded = trace.guardrails_version
+      && (trace.section_sources || {}).assessment_summary === "provider";
+    const label = guarded
+      ? " (completion wording; factual sections application-owned)"
+      : " (full structured feedback)";
     if (hostedConfirmed(exec, "aitta_")) {
-      return `Aitta - ${captureProvenanceKind(exec)}` +
-        " (full structured feedback)";
+      return `Aitta - ${captureProvenanceKind(exec)}` + label;
     }
     return "Injected full-feedback generator - hosted provenance " +
-      "unavailable";
+      "unavailable" + (guarded ? label : "");
   }
   if (trace.phrasing_source === "injected_generator_opening_only") {
     if (hostedConfirmed(exec, "aitta_")) {
@@ -1793,6 +1797,11 @@ function createDetailView(root, options = {}) {
       const aitta = aittaProvenance(
         selReview, studentExecs.generator || {});
       if (aitta) strip.appendChild(kv("Aitta provenance", aitta));
+      if ((selReview.trace || {}).guardrails_version
+          && delivery.preview_source !== "teacher_edited") {
+        strip.appendChild(kv("Feedback safeguards",
+          "Strengths, review focus and next steps are application-owned."));
+      }
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;

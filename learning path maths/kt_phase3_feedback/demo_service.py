@@ -247,17 +247,17 @@ class DemoService:
 
     @staticmethod
     def _grounded_unavailable(review):
-        from full_feedback import multi_baseline_sections
+        from full_feedback import guarded_multi_message
         safe = review["sanitized_evidence"]
 
         def det(cands):
-            sections = multi_baseline_sections(
-                safe, cands, review_examples=[])
-            return {"sections": sections,
-                    "text": "\n\n".join(
-                        s["text"] for s in sections if s["text"])}
+            return guarded_multi_message(safe, cands, review_examples=[])
 
         review["message"] = det(review["selected_candidates"])
+        review["trace"]["guardrails_version"] = (
+            review["message"]["guardrails_version"])
+        review["trace"]["section_sources"] = copy.deepcopy(
+            review["message"]["section_sources"])
         baseline = next(
             b for b in review["candidates"]
             if b["candidate_id"] == review["baseline_candidate_id"])

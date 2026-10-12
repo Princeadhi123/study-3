@@ -155,11 +155,18 @@ class WorkedReviewBrowserTests(unittest.TestCase):
              f"{json.dumps(self.pin)}; "
              "document.querySelector('#unlock-form').requestSubmit()")
         b.wait("!document.querySelector('#teacher-app').hidden")
-        b.js("const row = document.querySelector('.session-row, "
-             "[data-session]'); if (row) row.click();")
+        b.wait("document.querySelector('.session-row, [data-session]')",
+               timeout=30)
+        b.js("document.querySelector('.session-row, [data-session]')"
+             ".click()")
         b.wait("document.querySelector('#teacher-app')"
                ".textContent.includes('Worked review')", timeout=30)
         self._assert_card_rendered()
+        teacher_text = b.js("document.body.textContent")
+        self.assertIn("Feedback safeguards", teacher_text)
+        self.assertIn(
+            "Strengths, review focus and next steps are "
+            "application-owned.", teacher_text)
         b.command("Page.navigate", {
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
@@ -264,6 +271,46 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertGreaterEqual(result["details"], 1)
         self.assertTrue(result["rawImg"])
         self.assertGreaterEqual(result["original"], 1)
+        self.assertEqual(b.errors, [])
+
+    def test_aitta_provenance_guard_labels(self):
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        guarded_trace = {
+            "phrasing_source": "injected_generator_full_sections",
+            "guardrails_version": "application_owned_multi_feedback_v1",
+            "section_sources": {
+                "assessment_summary": "provider",
+                "observed_strengths": "application",
+                "review_focus": "application",
+                "next_steps": "application"}}
+        hosted_exec = {"capture_file": "aitta_x.json",
+                       "reused": False, "origin": "hosted_replay",
+                       "metadata": {"status": "completed"}}
+        result = b.js(
+            "(() => {"
+            f"const guarded = {json.dumps(guarded_trace)};"
+            f"const hosted = {json.dumps(hosted_exec)};"
+            "const hostedLabel = aittaProvenance("
+            "{trace: guarded}, hosted);"
+            "const injectedLabel = aittaProvenance("
+            "{trace: guarded}, {});"
+            "const historical = aittaProvenance({trace: {"
+            "phrasing_source: "
+            "'injected_generator_full_sections'}}, hosted);"
+            "return {hostedLabel, injectedLabel, historical}; })()")
+        self.assertIn("completion wording; factual sections "
+                      "application-owned", result["hostedLabel"])
+        self.assertIn("Aitta - fresh hosted response",
+                      result["hostedLabel"])
+        self.assertIn("completion wording; factual sections "
+                      "application-owned", result["injectedLabel"])
+        self.assertIn("hosted provenance unavailable",
+                      result["injectedLabel"])
+        self.assertEqual(result["historical"],
+                         "Aitta - fresh hosted response "
+                         "(full structured feedback)")
         self.assertEqual(b.errors, [])
 
 

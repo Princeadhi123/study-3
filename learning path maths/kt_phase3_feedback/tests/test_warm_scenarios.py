@@ -3,6 +3,7 @@ import contextlib
 import copy
 import io
 import json
+import re
 import secrets
 import tempfile
 import time
@@ -14,7 +15,7 @@ import phase3_paths
 from demo_service import DemoService
 from evidence_feedback import (
     build_research_evidence, run_feedback, selection_payload)
-from evidence_feedback_policy import PRACTICE_ACTIONS
+from evidence_feedback_policy import PRACTICE_ACTIONS, SCOPE
 from feedback_service import assessment_feedback_graph
 from live_diagnostics import LiveDiagnostics
 from research_runtime import load_research_bank
@@ -122,12 +123,141 @@ class WarmScenarioTests(unittest.TestCase):
             self.assertEqual([q["question_id"] for q in detail["question_responses"]],
                              [q["question_id"] for q in self.bank["questions"]])
             self.assertFalse(detail["provenance"]["educator_approved"])
+            review = detail["checkpoints"]["end"]["student_review"]
+            trace = review["trace"]
+            self.assertEqual(trace["guardrails_version"],
+                             "application_owned_multi_feedback_v1")
+            self.assertEqual(
+                set(trace["section_sources"].values()), {"application"})
+            sections = review["message"]["sections"]
+            self.assertEqual(
+                [s["kind"] for s in sections],
+                ["assessment_summary", "observed_strengths",
+                 "review_focus", "next_steps"])
+            self.assertEqual(review["message"]["text"].count(SCOPE), 1)
+            focus_text = next(s["text"] for s in sections
+                              if s["kind"] == "review_focus")
+            self.assertIsNone(re.search(r"\d", focus_text))
+            for candidate in review["selected_candidates"]:
+                focus = candidate.get("focus")
+                if focus is None:
+                    continue
+                planning = candidate["planning"]
+                if (planning["error_pattern"]
+                        == "isolated_incorrect_answer"):
+                    self.assertIn("isolated incorrect answer",
+                                  focus_text)
+                if focus["out_of"] == 1:
+                    self.assertIn("Only one question assessed this "
+                                  "content", focus_text)
+                if len(planning["tied_candidate_ids"]) > 1:
+                    self.assertIn("not a uniquely weakest area",
+                                  focus_text)
         retained = service.scenario_detail(run["cases"][0]["scenario_id"])["detail"]
         self.assertEqual(retained["bank_mode"], "warm")
         self.assertEqual(len(retained["question_responses"]), 40)
         self.assertEqual(retained["content_context"]["practice_question_count"], 24)
         self.assertEqual(before, (self.source_path.read_bytes(), self.report_path.read_bytes()))
         self.assertEqual(service.list_sessions(), [])
+
+    def test_all54_hosted_guarded_completion_and_capture_reuse(self):
+        from aitta_generator import AittaGenerator
+        from full_feedback import (
+            CachedFullFeedbackGenerator, FullFeedbackAittaGenerator)
+        from replay_provider_scenarios import CaptureCache
+        from tests.test_full_feedback import FakeResponse, wire_reply
+
+        sections = {
+            "assessment_summary":
+                "You have completed this assessment. " + SCOPE,
+            "observed_strengths":
+                "The student shows mastery of all content.",
+            "review_focus":
+                "Focus on the weakest area first.",
+            "next_steps":
+                "Try similar practice tasks on the same concepts."}
+
+        class DerivingOpener:
+            def __init__(self):
+                self.calls = []
+
+            def open(self, request, timeout=None):
+                body = json.loads(request.data.decode("utf-8"))
+                self.calls.append(body)
+                user = json.loads(body["messages"][1]["content"])
+                return FakeResponse(wire_reply(
+                    sections=sections,
+                    candidate_id=user["selected_candidate"]
+                    ["candidate_id"]))
+
+        cache_root = Path(self.tmp.name) / "captures"
+        cache_root.mkdir()
+        opener = DerivingOpener()
+        native = FullFeedbackAittaGenerator(AittaGenerator(
+            "test-aitta-key-0123456789abcdef",
+            "https://aitta.example.test", model="openai/gpt-oss-120b",
+            opener=opener))
+        cached = CachedFullFeedbackGenerator(
+            native, CaptureCache(cache_root, None),
+            "openai/gpt-oss-120b", "endpointhash" * 8)
+        service = self.service(provider_mode="hosted",
+                               replay_bank_mode="warm",
+                               generator=cached)
+        library = service.research.library()
+
+        def start(ids):
+            return self.wait_run(service, service.replays.start({
+                "request_id": secrets.token_hex(16),
+                "report_sha256": library["report_sha256"],
+                "scenario_ids": ids,
+                "provider_mode": "hosted",
+                "allow_provider_calls": True})["id"])
+
+        run = start([row["id"] for row in library["scenarios"]])
+        self.assertEqual(run["status"], "complete")
+        self.assertEqual(run["completed"], 54)
+        self.assertEqual(run["failed"], 0)
+        self.assertEqual(len(opener.calls), 54)
+        for row in run["cases"]:
+            detail = service.replays.result(run["id"], row["scenario_id"])
+            review = detail["checkpoints"]["end"]["student_review"]
+            trace = review["trace"]
+            self.assertEqual(trace["guardrails_version"],
+                             "application_owned_multi_feedback_v1")
+            self.assertEqual(
+                trace["section_sources"],
+                {"assessment_summary": "provider",
+                 "observed_strengths": "application",
+                 "review_focus": "application",
+                 "next_steps": "application"})
+            texts = {s["kind"]: s["text"]
+                     for s in review["message"]["sections"]}
+            self.assertEqual(texts["assessment_summary"],
+                             "You have completed this assessment.")
+            self.assertNotIn("mastery of all content",
+                             texts["observed_strengths"])
+            self.assertNotIn("Focus on the weakest area",
+                             texts["review_focus"])
+            self.assertNotIn("similar practice tasks",
+                             texts["next_steps"])
+            self.assertNotIn("same concepts", texts["next_steps"])
+            self.assertEqual(
+                review["message"]["text"].count(SCOPE), 1)
+            preview = detail["feedback_delivery"]["preview"]
+            self.assertEqual(preview["template_version"],
+                             "phase3_student_feedback_template_v7")
+        first_case = run["cases"][0]["scenario_id"]
+        rerun = start([first_case])
+        self.assertEqual(rerun["status"], "complete")
+        self.assertEqual(len(opener.calls), 54)
+        self.assertTrue(cached.execution["reused"])
+        detail = service.replays.result(rerun["id"], first_case)
+        review = detail["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["trace"]["guardrails_version"],
+                         "application_owned_multi_feedback_v1")
+        self.assertEqual(
+            review["trace"]["section_sources"]["assessment_summary"],
+            "provider")
 
     def test_warm_source_cannot_be_replayed_as_demo(self):
         service = self.service()

@@ -1089,8 +1089,9 @@ class MultiBundleTests(unittest.TestCase):
         focus_text = next(
             s["text"] for s in review["message"]["sections"]
             if s["kind"] == "review_focus")
-        self.assertIn("A possible review starting point is",
-                      focus_text)
+        self.assertIn("Possible review topics", focus_text)
+        self.assertNotIn("assessed answers were incorrect",
+                         focus_text)
 
     def test_selector_failure_skips_generation(self):
         evidence = self._three_skill_evidence()
@@ -1137,7 +1138,7 @@ class MultiBundleTests(unittest.TestCase):
                             "observed_strengths":
                                 "Answers were recorded correctly.",
                             "review_focus":
-                                "One area is offered for review.",
+                                "Areas are offered for review.",
                             "next_steps":
                                 "Review the worked example."}}
         generator = FullGen()
@@ -1152,6 +1153,25 @@ class MultiBundleTests(unittest.TestCase):
                          "phase3_multi_topic_feedback_generation_v2")
         self.assertEqual(review["trace"]["phrasing_source"],
                          "injected_generator_full_sections")
+        self.assertEqual(
+            review["trace"]["guardrails_version"],
+            "application_owned_multi_feedback_v1")
+        self.assertEqual(
+            review["trace"]["section_sources"],
+            {"assessment_summary": "provider",
+             "observed_strengths": "application",
+             "review_focus": "application",
+             "next_steps": "application"})
+        self.assertEqual(
+            review["trace"]["validation"],
+            "application_owned_facts_and_actions_provider_summary_"
+            "shape_checked")
+        texts = {s["kind"]: s["text"]
+                 for s in review["message"]["sections"]}
+        self.assertEqual(texts["assessment_summary"],
+                         "You completed this assessment.")
+        self.assertNotEqual(texts["review_focus"],
+                            "Areas are offered for review.")
 
 
 if __name__ == "__main__":

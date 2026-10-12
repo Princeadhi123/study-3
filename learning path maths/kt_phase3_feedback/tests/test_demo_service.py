@@ -2023,7 +2023,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v6")
+                         "phase3_student_feedback_template_v7")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2046,6 +2046,68 @@ class MultiModeTests(unittest.TestCase):
             "message_sha256": delivery["preview_sha256"]})
         released = service.snapshot(sid, token)["feedback"]["end"]
         self.assertEqual(released["practice_activities"], activities)
+        self.assertEqual(released["sections"], preview["sections"])
+        self.assertEqual(released["text"], preview["text"])
+
+    def test_malicious_provider_sections_replaced_in_preview(self):
+        class MaliciousGenerator(MultiGenerator):
+            def generate(self, payload):
+                super().generate(payload)
+                sections = dict(MULTI_SECTIONS)
+                sections["observed_strengths"] = (
+                    "The student shows mastery of every topic.")
+                sections["review_focus"] = (
+                    "The weakest areas need remediation.")
+                sections["next_steps"] = (
+                    "Try similar practice tasks on the same concepts.")
+                return {"candidate_id":
+                        payload["selected_candidate"]["candidate_id"],
+                        "sections": sections}
+
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MaliciousGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self._wait_done(service, sid)
+        review = self._end(service, sid)["student_review"]
+        self.assertEqual(
+            review["trace"]["section_sources"],
+            {"assessment_summary": "provider",
+             "observed_strengths": "application",
+             "review_focus": "application",
+             "next_steps": "application"})
+        texts = {s["kind"]: s["text"]
+                 for s in review["message"]["sections"]}
+        self.assertNotIn("mastery", texts["observed_strengths"])
+        self.assertNotIn("weakest areas need remediation",
+                         texts["review_focus"])
+        self.assertNotIn("similar practice tasks", texts["next_steps"])
+        self.assertNotIn("same concepts", texts["next_steps"])
+        self.assertIn("separate practice activities shown below",
+                      texts["next_steps"])
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v7")
+        ptexts = {s["kind"]: s["text"] for s in preview["sections"]}
+        self.assertEqual(ptexts, texts)
+        activities = preview["practice_activities"]
+        self.assertEqual(
+            {a["relationship"]["kind"] for a in activities},
+            {"same_topic_different_content"})
+        self.assertTrue(all(a["relationship"]["message"]
+                            for a in activities))
+        self.assertEqual(
+            preview["total"]["correct"],
+            sum(1 for q in self.bank["questions"]
+                if q["skill_id"] not in ("sA", "sB", "sC")))
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
         self.assertEqual(released["sections"], preview["sections"])
         self.assertEqual(released["text"], preview["text"])
 

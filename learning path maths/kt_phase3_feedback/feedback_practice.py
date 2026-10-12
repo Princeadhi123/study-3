@@ -1,7 +1,7 @@
 PRACTICE_CONTEXT_SCHEMA = "phase3_feedback_practice_context_v1"
 FEEDBACK_BUNDLE_VERSION = "phase3_feedback_practice_bundle_v1"
 INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v3"
-MULTI_INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v4"
+MULTI_INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v5"
 PRACTICE_ALIGNED_INSTRUCTION = (
     "Choose an option and explain your reasoning.")
 PRACTICE_CONTEXT_KEYS = {
