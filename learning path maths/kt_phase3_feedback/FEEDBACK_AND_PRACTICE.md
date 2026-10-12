@@ -1,11 +1,122 @@
 # Feedback and future practice: explicit separation
 
-Decision recorded 2026-10-06. This clarifies component responsibility rather
-than discarding the prior work. Historical pre-answer prediction remains a
-valid evaluation task: the recorded target answer is hidden before prediction.
-The issue was conflating that task with explaining an already observed error.
+Current state recorded 2026-10-12. The live end-feedback path is now the
+**aligned two-topic shared package** described in the next section; the
+earlier `legacy_single` mode remains available and is described at the end
+of that section. The pre-integration diagrams and boundaries below are
+retained 2026-10-06 research-seam history — the "Aitta opening" and
+independent-selection steps they show describe the old offline/batch
+provider seam, **not** either live review mode today. Companion documents:
+[README.md](README.md) is the runbook and boundary reference;
+[README_STATUS_ARCHITECTURE_ROADMAP.md](README_STATUS_ARCHITECTURE_ROADMAP.md)
+holds the consolidated handoff and dated change history.
 
-## Implemented architecture
+## Current aligned implementation (recorded 2026-10-12)
+
+```text
+Completed answers (40) -> deterministic scoring + descriptive graph
+  -> observed evidence -> permitted review bundles (built locally)
+  -> one Jev bundle selection (or local bypass when one bundle exists)
+  -> aligned KT practice recommendation (0-2 questions, one per selected skill)
+  -> one Aitta shared four-section student draft
+  -> application adds fixed scores, worked review examples, practice cards,
+     and the scope disclaimer
+  -> teacher edits the four narrative sections -> one approval
+  -> student receives the approved snapshot's content unchanged
+```
+
+Key contracts:
+
+- **Review bundles** are built deterministically from observed evidence:
+  up to two error focuses from **different broad skills**; one focus when
+  only one error skill exists; an optional consolidation candidate with no
+  error focus when all answers are correct. The serialized bundle
+  `candidate_id` is an enum bundle ID, not a single focus — do not equate
+  the optional consolidation candidate count with the error-focus count.
+- **Jev** makes at most one call per completed scenario, choosing among the
+  permitted bundle IDs (enum choice). A single permitted bundle is selected
+  locally with no HTTP request (all-correct, one error candidate, or exactly
+  two candidates in distinct skills). Selection payload schema
+  `phase3_review_bundle_selection_v1`, prompt
+  `jev_distinct_skill_review_bundles_v1`.
+- **Aligned KT practice** predicts candidates only for the Jev-selected
+  review skills — never an unrelated skill and never a second question for
+  the same skill — policy `one_in_band_question_per_selected_skill_v1`.
+  Each slot ends `selected`, `abstained` (nothing eligible/in-band),
+  `unavailable` (prediction/validation/queue failure), or `disabled`
+  (no pool+band). All-correct sessions make no predictor call.
+- **Aitta** writes one shared student-facing draft through
+  `FullFeedbackAittaGenerator`'s multi schema
+  `phase3_multi_topic_feedback_generation_v1`, prompt
+  `aitta_aligned_two_topic_feedback_v1`. It receives observed aggregate
+  evidence, the validated bundle and per-focus plans, the deterministic
+  baseline, fixed worked examples, and safe practice status/task
+  descriptions — never answer keys, raw practice questions/options, or
+  KT probabilities. Payload validation rebuilds every field and rejects
+  tampering; it is interface validation, not semantic verification.
+- **Worked examples** come from the fixed 23-entry `REVIEW_EXAMPLES` map in
+  `feedback_practice.py`, matched by review `subtopic_id` — not the KT pool,
+  not Aitta, not random. Up to two examples for recognized focuses; the same
+  focus across different cases shows the same fixed example, and related
+  focuses may share an example. Sample entries:
+
+  | review focus | fixed worked example |
+  |---|---|
+  | `percentage_amount` | Find 30% of 90. (= 27) |
+  | `combine_like_terms` | Simplify 7a − 2a. |
+  | `retain_unlike_terms` | Simplify 2a + 5b. |
+
+  They are implementation-author checked, not independently
+  educator-approved, and are separate from the 0–2 selected practice
+  questions. No error focus means no example; an unmapped focus contributes
+  no example, while another mapped focus can still have one. An abstained
+  practice slot is a status card, not an assigned question.
+- **Approval**: the preview is unavailable until selection, practice, and
+  generation are all terminal; the teacher edits only the four narrative
+  sections (scores, examples, and questions are fixed). One approval
+  releases the whole package — the same approved narrative, worked-example
+  and practice content reaches the student (all included activities and
+  examples, up to two each), while delivery metadata such as the
+  review-required flag changes on release. Stale-hash edits and releases are
+  rejected with 409.
+- **Version identifiers**: primitives `observed_subtopic_feedback_v3`;
+  multi review marker `observed_distinct_skill_review_v1`; selection
+  schema/prompt above; aligned KT policy above; preview template
+  `phase3_student_feedback_template_v4`. Retained single-mode identifiers:
+  full schema `phase3_full_feedback_generation_v2`, prompt
+  `aitta_feedback_with_practice_v3`, template
+  `phase3_student_feedback_template_v3`. Practice context schema
+  `phase3_feedback_practice_context_v1` and bundle version
+  `phase3_feedback_practice_bundle_v1` remain unchanged for compatibility.
+- **New result fields**: `selected_candidates` / `selected_candidate_ids`
+  (original focuses inside the chosen bundle), `feedback_plans`,
+  `practice_contexts` (per-focus terminal slots),
+  `recommendation.topic_selections` / `selected_question_ids`, and
+  `preview.practice_activities` / `review_examples`. Legacy first-item
+  aliases `practice` and `review_example` remain readable; the renderer
+  prefers the plural fields when present. Old single-mode records, edits,
+  and releases stay readable and exact — a `feedback_selection_version`
+  marker distinguishes new multi records.
+- **Failure and restart**: a completed selector execution (fresh or cached)
+  is preserved even when the aligned practice or generation stage fails;
+  a generator that ran and failed is recorded as failed, one never started
+  as skipped. Tested queue-capacity, shutdown, and interrupted-restart paths
+  settle to terminal fallback/`unavailable` (or `disabled`) states without
+  new hosted calls, rather than remaining pending.
+
+`--review-mode legacy_single` keeps the earlier live pathway: one review
+focus, one independently selected practice question (the independent
+practice recommendation is computed before Jev selection), the full
+four-section Aitta draft through `FullFeedbackAittaGenerator` (prompt
+`aitta_feedback_with_practice_v3`, schema
+`phase3_full_feedback_generation_v2`), the same narrative-edit/preview-hash/
+approval-release gate, and template `phase3_student_feedback_template_v3`.
+It still produces no teacher-addressed end draft; legacy batch tools and old
+captures may retain student+teacher audiences but those are not new live
+packages. The Aitta "opening-only" contract below belongs to the old
+offline/batch provider seam only — it is not what `legacy_single` sends.
+
+## Historical pre-integration architecture (2026-10-06 research seams)
 
 ```text
 Completed answers (20 / 40)
@@ -28,13 +139,23 @@ Saved historical conformal artifacts
   -> preserved offline analysis only; excluded from active API/UI output
 ```
 
+(The diagram above describes the 2026-10-06 independent-selection research
+seams; under the current aligned mode, feedback waits for terminal bundle
+selection, aligned practice, and generation before teacher preview, and
+`legacy_single` still sends the full four-section draft — see the current
+section above.)
+
 Feedback baselines are built before research jobs are admitted. Providers and
 research use separate workers. Future queries reuse the serialized frozen
 model worker, not the provider worker; feedback does not wait for either
 research result. No active worker loads conformal calibration.
 They do not wait for Jev/Aitta completion or use their generated text.
 
-## Component boundaries
+## Historical pre-integration boundaries
+
+These component roles describe the old independent-selection research seams
+(the KT column below is the shadow/diagnostic record, not the current live
+aligned stage).
 
 | Component | Input | Authority |
 |---|---|---|
@@ -56,7 +177,15 @@ recommendation. Jev failure falls back to rule-based selection; Aitta failure
 retains the selected focus with deterministic opening wording. These existing
 behaviors are not changed by the new branch.
 
-## Explicit experimental policy
+## Explicit experimental policy (historical independent-selection seam)
+
+The policy below governed the original shadow/independent KT selection —
+still used by the offline research seam. The live aligned path now uses
+`one_in_band_question_per_selected_skill_v1` (see the current section):
+candidates are restricted to the Jev-selected review skills and at most one
+question is chosen per selected skill. Eligibility, band inclusivity, the
+error-count/fraction/midpoint/ID ordering, abstain/unavailable semantics,
+and the independent per-candidate prediction contract below are unchanged.
 
 Implementation: [shadow_practice.py](shadow_practice.py).
 Version: `observed_error_topic_then_explicit_probability_band_v1`.
@@ -127,10 +256,11 @@ checks before interpreting a native practice experiment.
 
 ## Opt-in use
 
-The default demo leaves KT recommendations disabled. The teacher's Skill map
-tab still shows graph v3 assessed tasks and all 24 practice drafts, pending
-formal educator review. To opt into the existing experimental KT selector,
-from this folder:
+The default demo leaves KT recommendations disabled unless both flags are
+supplied. The teacher's Skill map tab still shows graph v3 assessed tasks and
+all 24 practice drafts, pending formal educator review. The same paired
+flags enable both the private shadow research record and the aligned
+practice slots in the current end package. To opt in, from this folder:
 
 ```powershell
 $env:KT_PHASE2_TEXT_EMBEDDINGS = (Resolve-Path "..\kt_phase2_inference\artifacts\text_embeddings_v2_synthetic_practice_20261007.npz").Path
@@ -144,7 +274,9 @@ smoke pool. Set the environment before starting Python; a stale Phase 2
 embedding-path import is rejected. The band is illustrative, not an endorsed
 study configuration. Both flags are required
 together. This uses the normal synthetic-only localhost demo; it does not
-deploy a live ViLLE integration or send recommendations to learners.
+deploy a live ViLLE integration or reach real learners; in the local
+synthetic demo, selected sanitized cards can be released inside the package
+after teacher approval.
 
 The end result is `selected`, `abstained`, or `unavailable`; unconfigured
 sessions report `disabled`. Queue capacity is shared with diagnostics.
@@ -166,7 +298,7 @@ policy behavior, privacy, failure isolation and application wiring. They do
 not establish native prediction performance, learning benefit or conformal
 coverage for recommendations.
 
-### Native smoke run (2026-10-06)
+### Native smoke run (2026-10-06, historical)
 
 A small frozen native smoke run was executed under
 [SHADOW_SMOKE_PROTOCOL.md](SHADOW_SMOKE_PROTOCOL.md); review and frozen
@@ -195,7 +327,7 @@ contains `practice_pool_v2_private.json`, a separate 24-question pool with
 the augmented table; the original frozen pool/table and all completed results
 remain unchanged.
 
-### Source-masked practice comparison (prepared 2026-10-06)
+### Source-masked practice comparison (prepared 2026-10-06, historical)
 
 Ten source-masked review tasks are prepared under
 [PRACTICE_COMPARISON_PROTOCOL.md](PRACTICE_COMPARISON_PROTOCOL.md); the offline
@@ -205,7 +337,7 @@ hypothetical response worlds the scripted comparison shows no consistent KT
 advantage; see `artifacts/practice_comparison_20261006/investigator/COMPARISON_REVIEW.md` for the authored analysis.
 No learner delivery and no new KT inference are involved.
 
-### Bounded content graph (prepared 2026-10-06; v3 default)
+### Bounded content graph (prepared 2026-10-06; v3 default, historical)
 
 A descriptive, hash-bound map of the frozen warm/cold banks and the
 24-question v2 practice pool is captured under
@@ -236,7 +368,7 @@ The smoke pool matches the final research-bank topics, not the different
 skill IDs in the unchanged demo assessment. The original 20-question pool and
 its smoke results remain preserved as a completed experiment only.
 
-## Implemented transition (decision recorded 2026-10-07)
+## Implemented transition (decision recorded 2026-10-07, historical)
 
 The following transition requirements are implemented in `demo_api.py`,
 `demo_service.py`, `research_runtime.py` and `web_demo/`. Formal educator
@@ -302,7 +434,7 @@ hosted provider calls were made, so it is not Jev quality evidence. Jev
 keeps its existing constrained observed-evidence selection role, and no KT,
 graph internals or private bank data enter provider inputs.
 
-### Feedback planning (policy v3)
+### Feedback planning (policy v3, historical single-focus record)
 
 `evidence_feedback_policy.py` v3 adds an application-owned `planning` block
 to each review candidate, described to the selector by selection prompt
@@ -319,9 +451,9 @@ The policy fixes a specific authored practice action for each of the eight
 assessed graph concepts, and a single isolated incorrect answer — including
 a 0/1 one-question case — is now `focused_review` rather than
 `supported_review`, which requires multiple incorrect answers and zero
-correct. No hosted calls were made for this change. The Aitta contract is
-byte-for-byte unchanged: it still receives only the narrow opening context,
-so plans,
+correct. No hosted calls were made for this change. At the time of this
+record the Aitta contract was byte-for-byte unchanged (the narrow opening
+context; the later full four-section v3 draft superseded this), so plans,
 evidence and KT never reach it. KT remains separate teacher-only practice
 research and is never provider feedback evidence. Retained captures and the
 warm report are not rewritten; to see the new plan fields, run a fresh
@@ -339,15 +471,20 @@ omit the block.
 
 ### Remaining requirement and standing constraints
 
-The previously recorded transition items are implemented: the 24-question
-v2 practice pool, conformal removal from the active runtime/UI, warm/cold
-research-bank sessions with graph-v3 taxonomies, the student/teacher UI
-updates, graph-v3 evidence in feedback drafts, and the covering tests.
-One requirement remains open:
+The previously recorded transition items are implemented, and the demo
+release boundary now exists in software: the teacher edits and approves the
+shared end package, and the approved narrative, worked-example, and
+practice content reaches the student unchanged on release — delivery
+metadata such as the review-required flag changes (narrative edits only;
+scores, examples, and questions fixed; stale hashes rejected).
+The separate unscored educator-review ledger records opinions about a draft
+— it does **not** constitute release approval, and neither mechanism is
+formal educator sign-off or real-learner delivery approval. One requirement
+remains open:
 
-- **Complete review and release boundaries.** Record formal educator review
-  separately before any student-facing claim or release. Teacher review of a
-  draft is not yet learner-delivery approval.
+- **Formal review and real-world release.** Independent educator review,
+  privacy review, and a real deployment path remain pending; in-app
+  approval is prototype workflow only.
 
 Standing constraints from the completed work:
 

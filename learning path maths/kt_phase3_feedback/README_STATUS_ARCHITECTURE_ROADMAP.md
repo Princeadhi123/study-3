@@ -1,8 +1,10 @@
 # Status, Architecture, and Roadmap
 
-Runtime transition updated: 2026-10-07. This file is the current handoff for the local
+Current handoff updated: 2026-10-12. This file is the current handoff for the local
 synthetic demo in this repository. It describes working software for private
-research review — not a validated educational product.
+research review — not a validated educational product. Sections recording
+dated captures and Phase 4 metrics are historical results, not current
+behavior claims.
 
 ## 1. Executive status
 
@@ -33,18 +35,21 @@ research review — not a validated educational product.
 |---|---|
 | Student + teacher web UI (`web_demo/`) | Implemented |
 | Local PIN teacher auth, owner-token student auth | Implemented (local demo separation only) |
-| Async provider jobs (Jev selection + Aitta opening) | Implemented |
+| Async provider jobs (Jev bundle/single-focus selection + Aitta draft) | Implemented (aligned_two_topic default; legacy_single keeps the earlier one-focus full draft) |
+| Aligned two-topic end package (Jev bundle + aligned KT practice + shared Aitta draft) | Implemented; default `aligned_two_topic` mode |
+| Teacher edit + one-approval release of the whole end package | Implemented (prototype workflow, not formal sign-off) |
+| Shared practice cards inside the approved package | Implemented: 0–2 aligned slots, review content only — no in-app answering/scoring |
 | Frozen KT research diagnostics | Implemented; active conformal computation/output removed |
 | Warm/cold research sessions and v3 taxonomies | Implemented; synthetic only, pending educator review |
-| Teacher task context and 24-question practice drafts | Implemented; no learner release |
+| Teacher task context and 24-question practice drafts | Implemented; selected cards may be released in the approved synthetic-demo package, not authorized for real learners |
 | Assessment graph, reviews ledger, English display layer, poll/disclosure persistence | Implemented |
 | 54-case Scenario Library browser UI | Implemented: readable names, search/filters, shared six-tab live detail renderer |
 | Selected / filtered / all-scenario replay | Implemented: original-answer resubmission, progress/cancel, saved versions and original-result comparison |
 | Historical result preservation | Original report remains immutable; completed replay snapshots remain readable after policy/taxonomy/bank changes |
 | Blind baseline-vs-selected comparison | Implemented pilot tooling: balanced A/B, persisted shuffled order, immutable judgments, completion-only reveal |
 | Evidence Lab responsive UI | Implemented: three workspaces, session search, keyboard controls, synthetic consent |
-| Richer Aitta evidence explanation | **Pending** |
-| Reviewed practice questions / worked solutions / practice loop | **Pending** |
+| Richer Aitta evidence explanation | Implemented for the shared-draft seam (bounded context; no keys/probabilities) |
+| Reviewed practice questions / worked solutions / practice loop | **Pending** (worked examples are author-checked fixed mappings; in-app practice answering/scoring is a separate unbuilt feature) |
 | Independent educator preference benchmark | **Pending** |
 | Calibration validity on a fixed assessment | **Pending** |
 | Real-student privacy review + production deployment | **Pending** |
@@ -63,8 +68,11 @@ demo_api.py  --  loopback-only boundary, owner token + teacher cookie
 DemoService (demo_service.py)
    |-- bank-bound ordered MCQ scoring (one selected 40-question bank)
    |-- observed evidence + assessment graph at n=20 / n=40
-   |-- branch A: feedback baseline + Jev selection + Aitta opening
-   |            (one provider worker; per-audience isolation)
+   |-- branch A (aligned_two_topic, default): baseline + permitted review
+   |            bundles -> one Jev bundle selection (1-2 focuses, distinct
+   |            broad skills) -> aligned KT practice (0-2 questions, one
+   |            per selected skill) -> one Aitta shared 4-section draft
+   |            -> teacher edit/approve -> approved released student snapshot
    |-- branch B: private frozen KT research diagnostics
    |             (own diagnostics worker; snapshot rows at queue admission)
    +-- teacher-only v3 task context / 24-question practice drafts
@@ -74,15 +82,18 @@ DemoService (demo_service.py)
 - Provider/diagnostic work triggers **only at n=20 and n=40**, never on poll.
 - At question 20: no Jev/Aitta call; a deterministic neutral student pause,
   plus private graph + diagnostics for the teacher.
-- At question 40: deterministic baseline feedback is shown immediately while
-  the provider job is pending; both end audiences are processed by one
-  provider worker.
+- At question 40 (current aligned mode): the provider worker runs selection,
+  aligned practice, then generation; the teacher preview appears only at the
+  terminal state, and students see no final feedback until the approved
+  package is released — only observed totals can appear before approval.
 - Diagnostics snapshot the answer rows at queue admission so later answers
   cannot race the evaluation.
 - KT uses current answers on CPU via the frozen variant D
   (`skill_item_content_option`); no retraining or calibration loading.
   Diagnostics carry labels `uncalibrated_for_20_40_question_feed` and
-  `used_for_student_advice: false`.
+  `used_for_student_advice: false` — a legacy flag on the diagnostics record;
+  under aligned mode the validated KT-assisted practice projection still
+  ships in the approved package (raw estimates stay teacher-private).
 - The graph relation is `is_part_of_not_prerequisite` — part-of groupings,
   not prerequisites; no conformal gate is used for advice.
 - Boundary: student payloads exclude diagnostics, private question/item IDs,
@@ -107,14 +118,20 @@ DemoService (demo_service.py)
   `all_correct`, `all_incorrect`, `weak_fractions_only`,
   `first_half_correct_second_half_wrong`, `alternating` — these are response
   patterns, not diagnoses.
-- **Selection decision panel** (Feedback tab): shows applied focus, candidate
-  ID, observed incorrect/out-of counts, baseline comparison, per-candidate
-  Selected/Baseline marks plus observed-pattern and priority columns, and the
-  applied feedback plan (error pattern, assessment coverage, parent-topic
-  totals, priority group, tied candidate ids, strategy, `KT used: No`).
-  Also shown: selection provenance (Jev cached/fresh/local
-  fallback/unverified), Aitta provenance, and selector model version only for
-  confirmed hosted executions.
+- **Selection decision panel** (Feedback tab): shows the selected review
+  bundle (bundle label, focus count, Selected/Baseline marks) with each
+  chosen focus's observed incorrect/out-of counts, and the applied feedback
+  plan per focus (error pattern, assessment coverage, parent-topic totals,
+  priority group, tied candidate ids, strategy, `KT used for review-focus
+  selection: No` — this label records that KT was not used for review-focus
+  selection, not that aligned practice is disabled). Also shown: selection
+  provenance (Jev cached/fresh/local fallback/unverified), Aitta provenance,
+  per-slot practice status (selected/abstained/unavailable/disabled), and
+  selector model version only for confirmed hosted executions. Research
+  traces and raw comparisons stay collapsed under Research details; the edit
+  area is labeled Edit feedback wording; polling preserves disclosures and
+  unsaved edits. No teacher-addressed end draft is generated; historical
+  teacher content remains only in old exports where present.
 - **Review tab**: five unscored fields from `educator_review_contract.py` —
   `evidence_support`, `method_content`, `audience_tone`, `taxonomy`, `scope`
   — plus optional note/reviewer label, bound to the feedback message hash,
@@ -136,8 +153,10 @@ DemoService (demo_service.py)
 `research_workspace.py` loads the retained integrated report lazily, validates its
 package coverage and observed counts, and pins its raw-file SHA-256 for the
 process. `--replay-report PATH` selects another report. Library summaries are
-recomputed from the packages; the current retained report yields 54 cases,
-108 end packages, 69 baseline matches and 39 differences. Browsing does not
+recomputed from the packages; the retained report quoted at the time (2026-10-02,
+since removed by approved cleanup and absent by default) yielded 54 cases,
+108 end packages, 69 baseline matches and 39 differences — historical quoted
+metrics, not a current warm-library figure. Browsing does not
 run providers or inference, and no historical artifact is rewritten.
 
 `scenario_replays.py` adds explicit asynchronous selected/filtered/all replay. It
@@ -220,30 +239,42 @@ claims are generated. Completed reviews are not learner-delivery approval.
 - Historical conformal evidence remains on disk. Active API projections,
   including replay exports, omit conformal/calibration output without
   rewriting saved captures.
-- Jev selects a permitted observed-error focus; a single permitted candidate
-  bypasses Jev locally. Each candidate carries an application-owned planning
-  block (isolated vs multiple errors, item coverage, parent-topic totals,
-  priority group, tied ids). Candidate priority: highest incorrect count, then
-  highest incorrect fraction, then stable taxonomy order — an unvalidated
-  presentation heuristic. All-correct yields "optional consolidation." The
-  validated selection is recorded as a deep-copied `feedback_plan` with
-  `kt_used: false` before Aitta runs.
-- The app controls facts and most wording; **Aitta supplies the opening
-  sentence only** (verified in `integrated_synthetic_pipeline.aitta_request` /
-  `evidence_providers.EvidenceAittaGenerator`). The effective hosted wire for
-  Aitta is a generic audience/checkpoint communication context built with a
-  legacy generic candidate — **not** the actual review topic: no real focus
-  names, performance counts, or raw questions/KT are sent. Only three
-  matching contexts exist, which is why replay reuse is high.
-- Cache identity is the effective wire request (`CaptureCache`); no automatic
-  retry. The call budget counts *new* calls per process, not lifetime totals.
-  "fresh"/"cached" statuses reflect actual execution, not latency guesses.
-- Provider failures fall back per audience: an Aitta failure can keep a valid
-  Jev selection with a deterministic opening. Queue bounds are enforced;
-  unavailable diagnostics never fabricate values. A restart converts a
-  pending provider job to deterministic fallback and interrupted diagnostics
-  to `interrupted_by_restart` — not silently rerun. Reused captures are not
-  independent trials.
+- Jev (current aligned mode) selects one permitted review *bundle* — up to
+  two error focuses from different broad skills — in a single call; a single
+  permitted bundle bypasses Jev locally (all-correct, one error candidate, or
+  exactly two distinct-skill candidates). Each original candidate carries an
+  application-owned planning block (isolated vs multiple errors, item
+  coverage, parent-topic totals, priority group, tied ids). Candidate
+  priority: highest incorrect count, then highest incorrect fraction, then
+  stable taxonomy order — an unvalidated presentation heuristic. All-correct
+  yields the optional consolidation candidate with no error focus. The
+  validated selection is recorded as per-focus `feedback_plans` with
+  `kt_used: false` before aligned practice or Aitta runs.
+- Aitta (current aligned mode) writes one shared four-section student draft
+  for the whole bundle via `FullFeedbackAittaGenerator`; the wire carries the
+  observed aggregate evidence, validated bundle and per-focus plans,
+  deterministic baseline, fixed worked examples, and safe practice status /
+  task descriptions — never answer keys, raw practice questions/options, or
+  KT probabilities. `legacy_single` uses the same full structured draft
+  generator with the retained v3 prompt — the older opening-only
+  `EvidenceAittaGenerator` contract exists only in the legacy offline/batch
+  provider seam, not in either live review mode.
+- Cache identity is the effective wire request (`CaptureCache`) and includes
+  the prompt — the new multi prompt versions isolate old single-mode captures
+  without deletion; no automatic retry and no force-uncached flag exists. The
+  call budget counts *new* calls per process, not lifetime totals
+  (`--unlimited-calls` removes the cap; mutually exclusive with
+  `--call-budget`). "fresh"/"cached" statuses reflect actual execution, not
+  latency guesses.
+- Provider failures fall back deterministically: a completed selector
+  execution (fresh or cached) is preserved even if the aligned-practice or
+  generation stage later fails — a generator that ran and failed is recorded
+  as failed, while one never started is recorded as skipped. Queue bounds are
+  enforced; unavailable diagnostics never fabricate values. A restart
+  converts a pending provider job to deterministic fallback,
+  interrupted diagnostics to `interrupted_by_restart`, and missing aligned
+  practice slots to `unavailable`/`disabled` — no hosted work is silently
+  rerun. Reused captures are not independent trials.
 
 ## 6. Runbook (localhost, PowerShell)
 
@@ -261,7 +292,29 @@ python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
 
 # warm research-bank scenario library (rules; stop any running server first)
 python demo_api.py --port 8766 --providers rules --replay-bank-mode warm
+
+# current full hosted configuration (aligned two-topic + aligned practice)
+$env:KT_PHASE2_TEXT_EMBEDDINGS = (Resolve-Path "..\kt_phase2_inference\artifacts\text_embeddings_v2_synthetic_practice_20261007.npz").Path
+python demo_api.py --host 127.0.0.1 --port 8766 `
+  --providers hosted `
+  --review-mode aligned_two_topic `
+  --replay-bank-mode warm `
+  --unlimited-calls `
+  --jev-env-file "C:\path\to\jev.env" `
+  --shadow-practice-pool "artifacts\synthetic_practice_supplement_20261006\practice_pool_v2_private.json" `
+  --shadow-target-band 0.40 0.80
 ```
+
+The aligned command is the current default mode (`--review-mode
+aligned_two_topic`; `--review-mode legacy_single` keeps the earlier
+single-focus path). `--unlimited-calls` removes the per-process new-call cap
+and is mutually exclusive with `--call-budget N` (finite default cap 12) —
+use one or the other; external provider limits still apply. The pool/band
+flags are required together and need `KT_PHASE2_TEXT_EMBEDDINGS` set before
+Python starts; `0.40 0.80` is an experimental example band, not a validated
+difficulty target. Aitta uses `AITTA_API_KEY`/`AITTA_BASE_URL` (optional
+`AITTA_MODEL`) from env vars or the workspace-root `.env`, not a Phase
+3-local file.
 
 - `--replay-bank-mode warm` serves the retained warm capture in
   `artifacts/warm_scenarios_v1/`; omitting the flag keeps the original demo
@@ -287,12 +340,14 @@ python demo_api.py --port 8766 --providers rules --replay-bank-mode warm
 | `/api/banks` | GET | available bank labels and 40-question count |
 | `/api/teacher/unlock` | POST | issue PIN auth cookie |
 | `/api/teacher/logout` | POST | drop teacher cookie |
-| `/api/teacher/config` | GET | mode, diagnostics, call budget |
+| `/api/teacher/config` | GET | provider/review mode, topic & practice limits, alignment, diagnostics, call budget |
 | `/api/teacher/sessions` | GET | session list |
 | `/api/teacher/simulations` | POST | `{profile, seed}`, optional `bank_mode` |
 | `/api/teacher/sessions/{sid}` | GET | private detail (incl. answer keys) |
 | `/api/teacher/sessions/{sid}/export` | GET | JSON export |
 | `/api/teacher/sessions/{sid}/reviews` | POST | record educator review |
+| `/api/teacher/sessions/{sid}/feedback-edits` | POST | save narrative edits bound to the preview hash |
+| `/api/teacher/sessions/{sid}/release` | POST | approve and release the whole end package |
 | `/api/teacher/scenarios` | GET | retained case index and derived metrics |
 | `/api/teacher/scenarios/{id}` | GET | original packages and shared detail payload |
 | `/api/teacher/scenarios/{id}/export` | GET | original case export |
@@ -328,6 +383,9 @@ student routes.
   `integrated_synthetic_pipeline.py`, `CaptureCache` (defined in
   `replay_provider_scenarios.py`), `transport_diagnostics.py`
 - Review contract: `educator_review_contract.py`
+- Multi-topic feedback: `full_feedback.py` (shared-draft input/generator),
+  `feedback_practice.py` (worked examples, practice context projection),
+  `shadow_practice.py` (aligned KT selection), `research_runtime.py`
 - Batch/replay (legacy context): `scenario_runner.py`,
   `compare_scenarios.py`, `evaluate_scenarios.py`, `scenario_report.py`,
   `replay_provider_scenarios.py`
@@ -408,7 +466,7 @@ Unit-test paths are relative to this repository folder.
 Narrow commands:
 
 ```powershell
-python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics tests.test_research_workspace tests.test_scenario_replays
+python -m unittest tests.test_demo_api tests.test_demo_service tests.test_scenario_replays tests.test_evidence_feedback tests.test_evidence_providers tests.test_full_feedback tests.test_feedback_practice tests.test_future_practice
 node --check web_demo/app.js
 node --check web_demo/research.js
 ```
@@ -438,7 +496,84 @@ passed in installed Edge at 1440px and 390px viewport widths. The 64 targeted
 service/API/diagnostics/research tests passed, as did both JavaScript syntax checks
 and `git diff --check`. These are software checks, not research-validity results.
 
-## 10. Prioritised roadmap
+Known operational caveats:
+
+- On Windows, a manual Ctrl+C has produced `atexit`/native shutdown traces
+  during some exits; graceful native cleanup is not fully verified or fixed.
+  When stopping a replay, prefer **Stop after current scenario**, wait for it
+  to settle, then Ctrl+C once and allow cleanup; a shutdown trace alone is
+  not evidence that a KT prediction failed.
+- `.gitignore` already excludes Phase 3 `artifacts/` captures and `dbg.log`;
+  keep it that way — never commit PINs, keys, provider captures, or generated
+  private artifacts.
+
+## 10. Consolidated change history (2026-10-12)
+
+Most recent first; implemented changes recorded as chronological stages —
+no automatic commit is claimed for historical entries. Test counts below are
+stage-scoped test *executions* on their own day, not a cumulative sum, not
+unique tests, and not a fresh full baseline: the full suite is not re-run
+after every change. One existing conditional skip is a real-retained-report
+test. The earlier "601 tests / 10 skipped" figure is a user-reported
+comprehensive baseline from before these changes, not independently rerun.
+
+| Date | Stage | Recorded verification |
+|---|---|---|
+| 2026-10-12 | Maintenance refactor (Sonar warnings; see below) | 104 tests OK, 1 skip; `py_compile` + `git diff --check` |
+| 2026-10-12 | Aligned edge-case hardening + provider/cache/HTTP checks | 5 targeted tests OK (provider/cache ×3, worker-failure ×1, default-mode HTTP ×1) |
+| 2026-10-12 | Aligned two-topic package, edge corrections | 249 tests OK, 1 skip; 2 focused browser tests |
+| 2026-10-12 | Aligned two-topic package, initial gate | 285 tests OK, 1 skip; 24 future-practice tests; 11 browser tests — before the later edge-case corrections above |
+| earlier | Usability/fixed-example rework | 175 tests OK, 1 skip; 6 browser tests |
+| earlier | Teacher-facing draft removal (shared package) | 121 tests OK, 1 skip |
+| earlier | Shared package / call budget | 116 tests OK |
+
+Browser figures use fake providers/model in an isolated server — software
+checks only. No real hosted provider calls were made by the agent for these
+changes; user-posted manual replays under the earlier single mode showed a
+fresh/cached Jev call and a fresh Aitta call — integration evidence, not
+real-learner or pedagogical validation. A native hosted smoke of the
+two-topic path has not been run.
+
+- **2026-10-12 — Sonar-warning maintenance refactor.** `demo_api.py` split
+  `_dispatch` request preparation (`_prepare_request`) and the `_route`
+  monolith into per-family helpers, with shared `REPLAY_ROOT` /
+  `ROUTE_NOT_FOUND` constants; removed an unused `_static` assignment.
+  `full_feedback.py` extracted pure paragraph/next-step formatting helpers
+  with byte-identical output (golden-output regression tests added).
+  Scenario tests hoist request construction out of `assertRaises`. No
+  Sonar scanner was installed locally — no Sonar pass is claimed; a local
+  cyclomatic-complexity tool was used only as a structural check; its
+  cyclomatic numbers are not Sonar's cognitive-complexity metric, so no
+  threshold verification is claimed.
+  Auth/origin/draining/body-cap/status behavior unchanged and covered by
+  the existing HTTP tests.
+- **2026-10-12 — Aligned two-topic edge-case hardening.** All-correct
+  assessments require zero practice contexts and still run one generation
+  call; worker-boundary fallback marks unfinished aligned stages
+  `unavailable`/`provider_error`, writes the deterministic baseline, and
+  preserves an already-completed selector execution (fresh or cached)
+  while a generator that never ran is recorded as skipped (a generator that
+  ran and failed is recorded as failed); queue-capacity, shutdown, and
+  interrupted-restart paths fill terminal contexts without hosted reruns;
+  teacher config exposes mode/limits/alignment and the multi prompt/policy
+  versions.
+- **2026-10-12 — Aligned two-topic shared package.** New default
+  `review_mode="aligned_two_topic"`: permitted review bundles (up to two
+  error focuses from different broad skills), one Jev enum-bundle call
+  (local bypass for a single bundle), aligned KT practice (one question
+  per selected skill, 0–2 overall), one Aitta shared four-section draft,
+  fixed worked examples (23-entry mapping), one teacher approval releasing
+  the whole package content (delivery metadata such as the review-required
+  flag changes on release). `legacy_single` preserves the earlier
+  single-focus contract; old records/edits/releases stay readable. Stage
+  run: 249 tests OK (1 skip) plus focused provider/cache/HTTP coverage and
+  2 focused browser tests; earlier staged runs are listed in the table above.
+- **Earlier (recorded previously)** — `--unlimited-calls` flag and cache
+  isolation; shared single student-facing end package replacing dual
+  audience drafts; usability/UI rework with fixed worked examples and
+  English display layer. Stage counts are in the table above.
+
+## 11. Prioritised roadmap
 
 ### Completed prototype transition (2026-10-07)
 
@@ -482,15 +617,16 @@ concepts have authored review actions, and a single incorrect answer no
 longer triggers the stronger supported-review action. The Feedback tab
 decision panel renders the plan directly (error pattern, coverage, parent
 totals, priority, ties, `KT used: No`) — see `FEEDBACK_AND_PRACTICE.md`.
-Jev does not yet select practice questions; that remains a separate
-contract.
+Note (2026-10-12): practice selection is now implemented by the aligned KT
+stage described in section 10 — this planning entry is retained as the
+historical single-focus record.
 
 1. **Educator protocol and evaluation** — review the implemented source-masked
    comparison protocol, preregister sampling/analysis and duplicate handling,
    then collect independent educator judgments. Tool availability is not evidence
    of provider advantage.
-2. **Richer feedback scope** — bounded expansion of observed-evidence review
-   (e.g. individualized Aitta context), plus a reviewed practice-activity
+2. **Feedback content validation** — educator validation and refinement of
+   the implemented structured composition, plus a reviewed practice-activity
    bank (new content; the current assessment bank is not practice-approved).
 3. **Research analysis** — examine preference and evidence-support judgments
    with exposure, source reuse, scenario dependence, and inter-rater agreement
@@ -503,7 +639,11 @@ contract.
 The numbered roadmap items remain planned work — nothing here implies automatic approval
 for learner delivery.
 
-## 11. KT and warm/cold bank next steps (2026-10-05)
+## 12. KT and warm/cold bank next steps (2026-10-05, historical)
+
+> Historical record: this section preserves the Phase 4 study numbers and
+> bank-selection history exactly as recorded; it does not describe the
+> current aligned runtime.
 
 ### Decision and scope
 

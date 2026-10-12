@@ -8,7 +8,7 @@ assessment. The current project is an interactive localhost prototype with:
 - deterministic scoring and observed evidence;
 - a descriptive assessment graph;
 - optional hosted Jev candidate selection;
-- optional hosted Aitta opening phrasing;
+- optional hosted Aitta full structured feedback;
 - private frozen KT research diagnostics;
 - educator review records and JSON export.
 
@@ -28,6 +28,13 @@ Implemented:
 - fixed-order 40-question assessment over the approved Phase 2 bank;
 - midpoint and end checkpoints at responses 20 and 40;
 - deterministic baseline feedback with Jev/Aitta fallback;
+- aligned two-topic end feedback: one Jev-selected review bundle (up to two
+  error focuses from different broad skills), aligned KT practice selection
+  (at most one question per selected skill), one Aitta student-facing draft,
+  and one teacher-approved package released to the student with its
+  approved content unchanged (delivery metadata changes on release);
+- teacher editing of the four narrative sections with stale-hash protection
+  and a single approval that releases the whole package;
 - provider execution provenance, including fresh/cached/local/fallback states;
 - English display labels and prototype question translations;
 - poll-safe dashboard disclosure and review-form state;
@@ -44,7 +51,6 @@ Implemented:
 Pending:
 
 - independent educator recruitment, protocol review, and preference evaluation;
-- richer, bounded evidence-grounded feedback composition;
 - a reviewed practice-question/worked-solution bank;
 - calibrated KT validity for this fixed assessment;
 - production authentication, storage, privacy review, and deployment.
@@ -54,7 +60,7 @@ prioritized roadmap are in `README_STATUS_ARCHITECTURE_ROADMAP.md`.
 
 ## 2. Assessment and evidence model
 
-The assessment uses the approved Phase 2 bank:
+The default demo assessment uses the approved Phase 2 bank:
 
 ```text
 ../kt_phase2_inference/artifacts/test_question_bank_text_only_approved_v2.json
@@ -63,12 +69,21 @@ The assessment uses the approved Phase 2 bank:
 The bank contains private answer keys. It is referenced in place and must not
 be copied into student payloads or public artifacts.
 
-Assessment structure:
+Demo bank structure:
 
 - four skills: Arithmetic, Prices, Fractions, Percentages;
 - ten questions per skill in a fixed order;
 - midpoint after 20 answers and end after 40;
 - 15 descriptive subtopics from `assessment_taxonomy_draft.json`.
+
+Sessions may instead bind one of the 40-question warm/cold research banks
+(selected explicitly, one bank per session): four broad skills —
+Percentages, Divisibility/factors/primes, Combining like terms, and
+Fraction multiplication and division — mapped through graph-v3 assessed
+concepts (`descriptive_pending_formal_educator_review`). A
+`--replay-bank-mode warm` server binds the warm bank for its library and
+replays. The demo bank is the default; research banks are not
+educator-approved.
 
 The taxonomy relation is `is_part_of_not_prerequisite`. It groups questions by
 assessed content; it does not establish prerequisites, mastery,
@@ -85,13 +100,41 @@ Rules-only mode makes no provider calls:
 python demo_api.py --host 127.0.0.1 --port 8766 --providers rules
 ```
 
-Hosted mode is optional and requires a local Jev key file:
+The current default review mode is `aligned_two_topic` (up to two review
+focuses from different broad skills with aligned practice). The earlier
+single-focus path remains available for compatibility and old captures:
 
 ```powershell
-python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
-  --jev-env-file "C:/path/to/jev.env" `
-  --call-budget 12 --provider-timeout 120
+python demo_api.py --host 127.0.0.1 --port 8766 --providers rules `
+  --review-mode legacy_single
 ```
+
+Hosted mode is optional and requires a local Jev key file. The current
+full configuration, including the optional aligned KT practice pool:
+
+```powershell
+$env:KT_PHASE2_TEXT_EMBEDDINGS = (Resolve-Path "..\kt_phase2_inference\artifacts\text_embeddings_v2_synthetic_practice_20261007.npz").Path
+
+python demo_api.py --host 127.0.0.1 --port 8766 `
+  --providers hosted `
+  --review-mode aligned_two_topic `
+  --replay-bank-mode warm `
+  --unlimited-calls `
+  --jev-env-file "C:\path\to\jev.env" `
+  --shadow-practice-pool "artifacts\synthetic_practice_supplement_20261006\practice_pool_v2_private.json" `
+  --shadow-target-band 0.40 0.80
+```
+
+Replace the `C:\path\to\jev.env` placeholder with your own local key file;
+never commit it. `--unlimited-calls` removes the per-process new-call cap and
+is mutually exclusive with `--call-budget N` (finite default cap: 12);
+external provider charges, rate limits and timeouts still apply. To keep a
+finite cap instead, substitute `--call-budget 12` — do not pass both.
+`--replay-bank-mode warm` is optional and serves the retained warm capture;
+the explicit band `0.40 0.80` is an experimental example, not a validated
+difficulty target, and the pool/band flags are required together. Set
+`KT_PHASE2_TEXT_EMBEDDINGS` before Python starts; a stale embedding import
+is rejected.
 
 Aitta is configured separately through environment variables or the
 workspace-root `.env` file (`AITTA_API_KEY`, `AITTA_BASE_URL`, optional
@@ -117,10 +160,13 @@ authentication.
 - requires the `synthetic: true` attestation;
 - issues a per-session owner token;
 - serves key-free question payloads;
-- accepts ordered `{question_id, selected_index}` responses;
-- hides scores at midpoint;
-- shows deterministic baseline feedback immediately at the end;
-- updates the end page if provider-backed feedback later becomes ready.
+- accepts ordered `{question_token, selected_index}` responses (opaque
+  session/position tokens; no private question IDs);
+- hides scores at midpoint (deterministic neutral pause, no provider call);
+- shows only observed totals at the end until the teacher approves;
+- displays the approved end package — review-focus narrative, worked review
+  examples, and all included aligned practice activities (up to two each) —
+  after release.
 
 ### Teacher dashboard
 
@@ -132,9 +178,10 @@ renderer (including separate review-draft and disclosure state):
 2. Answers & scores — observed skill/subtopic totals and private question records;
 3. Skill map — descriptive hierarchy and observed counts;
 4. Model diagnostics — KT probability charts plus raw trace and provenance detail;
-5. Feedback drafts — baseline versus selected drafts, candidate selection,
-   the applied feedback plan, execution provenance, and halfway student
-   feedback;
+5. Feedback drafts — one shared end package preview: the generated four-section
+   narrative, worked review examples, aligned practice cards, baseline versus
+   selected drafts, candidate selection, the applied feedback plan, execution
+   provenance, and halfway student feedback;
 6. Educator review — version-bound review fields, notes, and saved review ledger.
 
 Names describe the answer pattern, for example “Errors in Fractions only” or
@@ -143,8 +190,19 @@ remain in audit records rather than primary labels. Repeated live sessions are
 distinguished by their creation timestamps. The random seed control is under
 Reproducibility settings.
 
-Teacher actions include synthetic simulation profiles, JSON export, and
-logout. Simulation profiles are response patterns, not learner diagnoses.
+Teacher actions include synthetic simulation profiles, JSON export, feedback
+editing, release approval, and logout. Simulation profiles are response
+patterns, not learner diagnoses. Under `aligned_two_topic`, the preview waits
+for terminal selection, practice, and generation before it can be approved:
+the teacher edits only the four narrative sections (scores, worked examples,
+and practice questions are fixed), saves through the preview hash, and one
+**Approve feedback and activities** action releases the whole package —
+the same approved narrative, worked-example and practice content reaches
+the student, while delivery metadata (for example the review-required flag)
+changes on release. Stale-hash submissions return 409; tested queue, worker,
+and restart paths settle to terminal fallback/unavailable states rather than
+remaining pending, and never fabricate questions. Saved educator-review
+ledger records are unscored and do not constitute release approval.
 
 The dashboard polls approximately every two seconds. Unchanged payloads skip
 redraws; expanded sections and unsaved review edits are preserved across real
@@ -284,40 +342,54 @@ DemoService (demo_service.py)
         |
         +-- ordered scoring + observed evidence + descriptive graph
         |
-        +-- feedback branch
+        +-- feedback branch (aligned_two_topic, current default)
         |       deterministic baseline
-        |       -> optional Jev candidate selection
-        |       -> validated feedback plan (kt_used: false)
-        |       -> optional Aitta opening
-        |       -> draft requiring educator review
+        |       -> permitted review bundles built locally
+        |       -> one Jev bundle selection (1-2 error focuses from
+        |          different broad skills; local bypass if one bundle)
+        |       -> aligned KT practice recommendation (0-2 questions,
+        |          at most one per selected skill)
+        |       -> one Aitta shared student-facing draft (4 sections)
+        |       -> teacher edits/approves -> approved released snapshot
         |
         +-- research branch
-        |       frozen KT inference
+        |       frozen KT inference (diagnostics worker)
         |       -> private teacher diagnostics
         |
-        +-- optional shadow practice branch (end checkpoint only,
-                opt-in) explicit private practice pool + target band
-                -> frozen KT future queries over the finished history
-                -> teacher-only shadow recommendation record
+        +-- optional aligned KT stage (end checkpoint only, opt-in pool
+                + band on the diagnostics worker) raw teacher-private
+                recommendation record; validated practice status/task
+                descriptions feed Aitta, and sanitized question cards ship
+                only inside the approved package
 ```
 
 Checkpoint behavior:
 
 - provider and diagnostics work is queued only at responses 20 and 40;
 - midpoint student feedback is deterministic and neutral;
-- at the end, baseline feedback is available while provider work is pending;
+- under `aligned_two_topic`, the end preview is not published until bundle
+  selection, aligned practice, and generation all reach terminal states —
+  students see only observed totals before teacher approval;
 - diagnostics snapshot the relevant answer prefix so later answers cannot
   race an already-queued checkpoint job;
 - a restart converts an interrupted provider job to deterministic fallback and
-  interrupted diagnostics to `interrupted_by_restart`;
+  interrupted diagnostics to `interrupted_by_restart`; interrupted aligned
+  practice slots become `unavailable` (or `disabled` when practice is not
+  configured) — no hosted work is silently rerun;
 - opening a completed session reads its persisted results rather than
-  automatically rerunning providers or inference.
+  automatically rerunning providers or inference; historical saved edits and
+  releases remain exact and are never recomputed.
 
-An optional third private branch is enabled only by the paired
+The optional aligned KT stage is enabled only by the paired
 `--shadow-practice-pool` and `--shadow-target-band` flags: after the 40th
-answer the frozen KT model scores candidates from an explicit private
-practice pool and stores a teacher-only shadow recommendation. It never
-reaches student payloads, Jev/Aitta, or feedback; see
+answer the frozen KT model scores eligible candidates from an explicit
+private practice pool restricted to the Jev-selected review skills. The raw
+recommendation — probabilities, candidate lists, provenance — stays a
+teacher-private record (`checkpoints.end.recommendation`); only validated
+practice status/task descriptions reach Aitta, and sanitized question cards
+ship to the student only inside the teacher-approved package. The older
+`used_for_student_advice` / `used_for_feedback` flags remain on legacy
+diagnostic records as recorded metadata. See
 [FEEDBACK_AND_PRACTICE.md](FEEDBACK_AND_PRACTICE.md). The frozen native smoke
 protocol is [SHADOW_SMOKE_PROTOCOL.md](SHADOW_SMOKE_PROTOCOL.md) and its
 review is in `artifacts/shadow_smoke_20261006/SMOKE_REVIEW.md` (private,
@@ -339,32 +411,69 @@ descriptive drafts pending educator review, no routing or student use).
 
 ## 6. Provider boundaries
 
-Jev:
+Jev (current `aligned_two_topic` mode):
 
-- chooses only among permitted observed-evidence-supported candidates;
-- receives allow-listed aggregate skill/subtopic evidence and candidates,
-  each with an application-owned planning block (error pattern, item
-  coverage, parent-topic totals, priority group, tied ids);
-- does not receive raw responses, question text, answer keys, session IDs, or
-  research probabilities;
-- is bypassed locally when only one candidate is permitted;
-- has its validated selection recorded as a `feedback_plan` with
-  `kt_used: false` before any Aitta call;
-- failure falls back to the deterministic baseline.
+- makes **one** request selecting one permitted review *bundle*: up to two
+  error focuses drawn from **different broad skills** (one focus when only
+  one error skill exists; an optional consolidation candidate when all
+  answers are correct);
+- receives allow-listed aggregate observed evidence plus the permitted
+  bundles and application-owned planning blocks only — never raw answers,
+  question text, answer keys, session IDs, or KT probabilities;
+- is bypassed locally — no Jev HTTP call — when only one permitted bundle
+  exists (all-correct, a single error candidate, or exactly two candidates
+  in distinct skills);
+- has its validated selection recorded with per-focus `feedback_plans`
+  (`kt_used: false`) before aligned practice or any Aitta call;
+- failure falls back to the deterministic baseline (first permitted bundle)
+  and skips the Aitta stage;
+- legacy `review_mode="legacy_single"` keeps the earlier single-candidate
+  contract for old captures and offline replay.
 
-Aitta:
+Aitta (current `aligned_two_topic` mode):
 
-- writes only the opening sentence;
-- does not author factual counts, mathematical explanations, or method-review
-  actions;
-- receives a narrow audience/checkpoint communication context rather than the
-  actual evidence packet;
-- failure preserves the selected candidate with deterministic opening text.
+- writes one shared four-section student-facing draft
+  (`assessment_summary`, `observed_strengths`, `review_focus`,
+  `next_steps`) for the whole selected bundle, via
+  `FullFeedbackAittaGenerator` in `full_feedback.py` — not the old
+  opening-only `EvidenceAittaGenerator` seam;
+- receives observed aggregate evidence, the validated selected bundle and
+  per-focus plans, the deterministic baseline, fixed worked review examples,
+  and safe per-topic practice status/task descriptions — **no** practice
+  answer keys, raw practice question/options, or KT probabilities;
+- does not score, select questions or topics, or invent worked solutions;
+- failure preserves the selected bundle and practice contexts with the
+  deterministic baseline text.
+
+Aligned KT practice (same 40-answer end checkpoint):
+
+- runs only for the Jev-selected review skills: eligibility excludes
+  assessed question IDs/normalized prompts, unassessed or error-free
+  skills, and any skill not selected in the bundle;
+- picks at most one question per selected skill (0–2 overall) inside the
+  explicitly configured inclusive band, using the existing error-count /
+  error-fraction / midpoint-distance / question-ID ordering — the band and
+  ranking are unchanged;
+- predicts each candidate independently from the same 40-response history —
+  no candidate is appended as though already answered;
+- abstains per slot when nothing is eligible or in-band, reports
+  `unavailable` on prediction/validation/queue failure, and `disabled`
+  when no pool+band is configured; all-correct sessions make no predictor
+  call and select no question;
+- never broadens the band, picks an unrelated topic, or adds a second
+  question for the same skill; this alignment is experimental — it does
+  not establish learning benefit or optimal difficulty.
 
 `CaptureCache` reuses a recorded response only when the effective provider
-request matches. Reuse is real captured provider output but is not a fresh or
-independent provider trial. The dashboard distinguishes fresh hosted, cached
-hosted, local resolution, deterministic fallback, and unverified provenance.
+request matches — the cached body includes the prompt, so the new multi
+prompt versions isolate old single-mode captures without deleting them.
+Reuse is real captured provider output but is not a fresh or independent
+provider trial. The default per-process cap is 12 new calls;
+`--unlimited-calls` removes it (mutually exclusive with `--call-budget`).
+Normally at most one Jev call plus one Aitta call run per completed
+scenario — not one per focus. The dashboard distinguishes fresh hosted,
+cached hosted, local resolution, deterministic fallback, and unverified
+provenance; terminal "Captured" logs show only new calls.
 
 The UI's English labels and question translations are display-layer prototype
 text. They do not change answer indices, scoring, provider inputs, stored
@@ -380,7 +489,10 @@ Student routes must not expose:
 - KT probabilities;
 - conformal intervals or statuses;
 - teacher-only graph detail;
-- provider execution internals.
+- provider execution internals;
+- practice question IDs, `p_correct` estimates, band internals, and raw
+  item metadata (released practice cards carry only sanitized text and
+  options).
 
 Teacher routes may show private answer keys, response records, provider
 execution records, and research diagnostics. They require the local teacher
@@ -388,8 +500,10 @@ cookie issued by PIN unlock. `artifacts/` contains private key-derived and
 provider-capture data and must remain local/private.
 
 KT uses the frozen variant-D model (`skill_item_content_option`) and does not
-retrain; it remains `exploratory_only_not_fixed_bank_validated` and is not
-used for student advice. Conformal is not computed in the active runtime —
+retrain; it remains `exploratory_only_not_fixed_bank_validated`. KT estimates
+stay teacher-private; KT-assisted practice is projected into the approved
+synthetic package as sanitized cards — it establishes no mastery or
+difficulty claim. Conformal is not computed in the active runtime —
 its historical outputs are preserved offline artifacts only.
 
 ## 8. Demo API surface
@@ -407,6 +521,8 @@ its historical outputs are preserved offline artifacts only.
 | `/api/teacher/sessions/{sid}` | GET | private session detail |
 | `/api/teacher/sessions/{sid}/export` | GET | private JSON export |
 | `/api/teacher/sessions/{sid}/reviews` | POST | store educator review |
+| `/api/teacher/sessions/{sid}/feedback-edits` | POST | save narrative edits bound to preview hash |
+| `/api/teacher/sessions/{sid}/release` | POST | approve and release the whole end package to the student |
 | `/api/teacher/scenarios` | GET | derived summary and saved case index |
 | `/api/teacher/scenarios/{id}` | GET | private original case plus shared detail view |
 | `/api/teacher/scenarios/{id}/export` | GET | original case export |
@@ -436,6 +552,7 @@ and is not the current UI backend.
 | Session/scoring/persistence | `mcq_service.py`, `session_store.py`, `schemas.py` |
 | Evidence and graph | `evidence_feedback.py`, `feedback_service.py`, `assessment_taxonomy_draft.json` |
 | Feedback policy/rendering | `evidence_feedback_policy.py`, `render_evidence_feedback.py`, `educator_review_contract.py` |
+| Multi-topic feedback + aligned practice | `full_feedback.py`, `feedback_practice.py`, `shadow_practice.py`, `research_runtime.py` |
 | Providers and capture cache | `evidence_providers.py`, `jev_selector.py`, `aitta_generator.py`, `replay_provider_scenarios.py`, `transport_diagnostics.py` |
 | Live diagnostics | `live_diagnostics.py`, `kt_adapter.py` |
 | Batch replay/evaluation | `integrated_synthetic_pipeline.py`, `evaluate_evidence_feedback.py`, `evaluate_scenarios.py`, `compare_scenarios.py`, `scenario_runner.py`, `scenario_report.py`, `render_provider_replay.py`, `visualize_scenarios.py` |
@@ -535,7 +652,7 @@ provenance.
 Narrow local checks:
 
 ```powershell
-python -m unittest tests.test_demo_api tests.test_demo_service tests.test_live_diagnostics tests.test_research_workspace tests.test_scenario_replays
+python -m unittest tests.test_demo_api tests.test_demo_service tests.test_scenario_replays tests.test_evidence_feedback tests.test_evidence_providers tests.test_full_feedback tests.test_feedback_practice tests.test_future_practice
 node --check web_demo/app.js
 node --check web_demo/research.js
 ```
@@ -585,8 +702,19 @@ coordinate the server before a memory-heavy full test run.
 - No real student data may be entered.
 - Feedback is not approved for learner delivery.
 - A Jev selection differing from the baseline is not automatically better.
-- Aitta does not currently generate individualized mathematical advice.
-- KT/conformal do not control Jev selection or student feedback.
+- Aitta writes a shared draft narrative only; it does not author scores,
+  worked solutions, or topic/question selection — it phrases the supplied
+  observed-evidence actions. It does not independently choose instructional
+  content or establish validated personalised teaching.
+- KT does not control review-focus selection; aligned practice strictly
+  follows the Jev-selected skills and remains experimental — two aligned
+  questions are not a validated learning benefit.
+- Teacher approval/release in this demo is an application workflow, not
+  formal educator sign-off or learner-delivery approval.
+- Worked review examples are author-checked prototypes pending independent
+  educator review; UI translations are draft display text.
+- Answering or scoring a selected practice activity inside the app is not
+  implemented; the cards are review content only.
 - Sparse subtopic counts cannot establish mastery or misconceptions.
 - The bank is assessment content, not an approved practice-activity bank.
 - The local PIN/cookie model is demo separation only; production requires
