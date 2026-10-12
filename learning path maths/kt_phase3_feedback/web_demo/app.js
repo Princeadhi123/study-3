@@ -596,13 +596,67 @@ function renderStructuredFeedback(container, payload) {
         `${englishSkillName(example.for_subtopic_name)}`
       : (example.title || "Worked review example");
     box.appendChild(el("h3", heading));
-    if (example.prompt) box.appendChild(el("p", example.prompt, "sec"));
-    if (example.explanation) {
-      box.appendChild(el("p", example.explanation, "sec"));
+    if (example.source === "incorrect_assessment_response") {
+      const displayPrompt =
+        englishQuestionText({text: example.prompt});
+      const rawPrompt = normalizeDisplayText(example.prompt);
+      const rawOptions =
+        (example.options || []).map(normalizeDisplayText);
+      const displayOptions =
+        (example.options || []).map(englishOptionText);
+      box.appendChild(el("p", displayPrompt, "sec"));
+      const list = el("ul", null, "practice-options");
+      displayOptions.forEach((option) => {
+        list.appendChild(el("li", option));
+      });
+      box.appendChild(list);
+      box.appendChild(el("p",
+        `Your selected answer: ${englishOptionText(
+          example.selected_answer)}`, "sec"));
+      box.appendChild(el("p",
+        `Correct answer: ${englishOptionText(
+          example.correct_answer)}`, "sec"));
+      if (Array.isArray(example.steps) && example.steps.length) {
+        const steps = el("ol", null, "worked-steps");
+        example.steps.forEach((step) => {
+          steps.appendChild(el("li", step));
+        });
+        box.appendChild(steps);
+      }
+      if (example.reasoning_question) {
+        box.appendChild(el("p",
+          `Explain your reasoning: ${example.reasoning_question}`,
+          "sec"));
+      }
+      if (displayPrompt !== rawPrompt
+          || displayOptions.join("\n") !== rawOptions.join("\n")) {
+        box.appendChild(el("p",
+          "English display wording is a draft translation; original " +
+          "text is preserved.", "meta small"));
+        const original = el("details", null, "raw");
+        original.dataset.disclosureKey =
+          `worked-review-original:${example.question_id}`;
+        original.appendChild(el("summary", "Original question wording"));
+        original.appendChild(el("p", rawPrompt, "sec"));
+        const rawList = el("ul", null, "practice-options");
+        rawOptions.forEach((option) => {
+          rawList.appendChild(el("li", option));
+        });
+        original.appendChild(rawList);
+        box.appendChild(original);
+      }
+    } else {
+      if (example.prompt) box.appendChild(el("p", example.prompt, "sec"));
+      if (example.explanation) {
+        box.appendChild(el("p", example.explanation, "sec"));
+      }
     }
     if (example.notice) box.appendChild(el("p", example.notice, "meta"));
     container.appendChild(box);
   });
+  if (payload.worked_review_notice) {
+    container.appendChild(el("p", payload.worked_review_notice, "meta"));
+  }
   const activities = payload.practice_activities ||
     (payload.practice ? [payload.practice] : []);
   activities.forEach((practice, index) => {

@@ -24,7 +24,10 @@ from pathlib import Path
 
 import educator_review_contract
 import phase3_paths
+import worked_review_math
 from aitta_generator import AittaGenerator
+from assessment_worked_review import (
+    ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION)
 from active_payload import active_payload
 from evidence_feedback import (
     build_evidence, build_research_evidence, canonical_digest, run_feedback,
@@ -222,6 +225,58 @@ class DemoService:
         builder = (build_evidence if meta.get("bank_mode", "demo") == "demo"
                    else build_research_evidence)
         return builder(context["bank"], context["taxonomy"], rows)
+
+    def _assessment_context(self, meta, rows=None):
+        if (meta.get("worked_review_version")
+                != ASSESSMENT_WORKED_REVIEW_VERSION):
+            return None
+        if rows is None:
+            rows = self._rows(meta["session_id"])
+        if len(rows) != FULL_LENGTH:
+            raise ValueError(
+                "grounded worked review requires 40 recorded answers")
+        context = self._context_for(meta)
+        return {"bank": context["bank"],
+                "taxonomy": context["taxonomy"],
+                "responses": rows}
+
+    @staticmethod
+    def _is_grounded(meta):
+        return (meta.get("worked_review_version")
+                == ASSESSMENT_WORKED_REVIEW_VERSION)
+
+    @staticmethod
+    def _grounded_unavailable(review):
+        from full_feedback import multi_baseline_sections
+        safe = review["sanitized_evidence"]
+
+        def det(cands):
+            sections = multi_baseline_sections(
+                safe, cands, review_examples=[])
+            return {"sections": sections,
+                    "text": "\n\n".join(
+                        s["text"] for s in sections if s["text"])}
+
+        review["message"] = det(review["selected_candidates"])
+        baseline = next(
+            b for b in review["candidates"]
+            if b["candidate_id"] == review["baseline_candidate_id"])
+        review["template_baseline"] = det(baseline["review_candidates"])
+        review["review_examples"] = []
+        review["worked_review_version"] = ASSESSMENT_WORKED_REVIEW_VERSION
+        review["worked_review_status"] = "unavailable"
+        review["worked_review_notice"] = (
+            "Assessment-answer grounding is unavailable. Ask your "
+            "teacher to review the assessment answers; no worked "
+            "example has been substituted.")
+        review["trace"]["worked_review_context_status"] = "unavailable"
+        review["trace"]["phrasing_source"] = "deterministic"
+        review["trace"]["validation"] = (
+            "deterministic_evidence_and_draft_actions")
+        if not review["trace"].get("fallback_reason"):
+            review["trace"]["fallback_reason"] = (
+                "assessment_grounding_unavailable")
+        return review
 
     @staticmethod
     def available_banks():
@@ -446,6 +501,8 @@ class DemoService:
         if self.review_mode == "aligned_two_topic":
             meta["feedback_selection_version"] = (
                 MULTI_REVIEW_POLICY_VERSION)
+            meta["worked_review_version"] = (
+                ASSESSMENT_WORKED_REVIEW_VERSION)
         return meta
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
@@ -604,8 +661,11 @@ class DemoService:
         if review is None or evidence is None:
             return None
         sections = structured_sections(review)
+        grounded = (meta.get("worked_review_version")
+                    == ASSESSMENT_WORKED_REVIEW_VERSION)
         preview = {
-            "template_version": MULTI_INTEGRATED_TEMPLATE_VERSION,
+            "template_version": (GROUNDED_TEMPLATE_VERSION if grounded
+                                 else MULTI_INTEGRATED_TEMPLATE_VERSION),
             "sections": sections,
             "text": "\n\n".join(s["text"] for s in sections if s["text"]),
             "total": {"correct": evidence["total"]["correct"],
@@ -618,16 +678,28 @@ class DemoService:
                 for row in evidence["skills"]],
             "requires_educator_review": True}
         originals = review.get("selected_candidates") or []
-        examples = []
-        for candidate in originals:
-            example = review_example(candidate)
-            if example is not None:
-                example["for_subtopic_name"] = (
-                    candidate["focus"] or {}).get("subtopic_name")
-                examples.append(example)
-        if examples:
-            preview["review_examples"] = examples
-            preview["review_example"] = examples[0]
+        if grounded:
+            preview["worked_review_version"] = review.get(
+                "worked_review_version", ASSESSMENT_WORKED_REVIEW_VERSION)
+            preview["review_examples"] = copy.deepcopy(
+                review.get("review_examples") or [])
+            if review.get("worked_review_status") is not None:
+                preview["worked_review_status"] = review[
+                    "worked_review_status"]
+            if review.get("worked_review_notice") is not None:
+                preview["worked_review_notice"] = review[
+                    "worked_review_notice"]
+        else:
+            examples = []
+            for candidate in originals:
+                example = review_example(candidate)
+                if example is not None:
+                    example["for_subtopic_name"] = (
+                        candidate["focus"] or {}).get("subtopic_name")
+                    examples.append(example)
+            if examples:
+                preview["review_examples"] = examples
+                preview["review_example"] = examples[0]
         by_id = {c["candidate_id"]: c for c in originals}
         activities = []
         for slot in end.get("practice_contexts") or []:
@@ -788,7 +860,16 @@ class DemoService:
         multi = self._is_multi(meta)
         self._admit_diagnostics(session_id, meta, "end", rows)
         if multi:
-            end["baseline_student"] = run_multi_feedback(evidence)
+            try:
+                end["baseline_student"] = run_multi_feedback(
+                    evidence,
+                    assessment_context=self._assessment_context(
+                        meta, rows))
+            except ValueError:
+                review = run_multi_feedback(evidence)
+                end["baseline_student"] = (
+                    self._grounded_unavailable(review)
+                    if self._is_grounded(meta) else review)
             self._admit_provider_job(session_id, meta, evidence)
             end["provider_job"] = copy.deepcopy(meta["provider_job"])
             return
@@ -1044,7 +1125,7 @@ class DemoService:
                 == MULTI_REVIEW_POLICY_VERSION)
 
     def _multi_baseline_review(self, meta, evidence, reason,
-                             practice_contexts=None):
+                             practice_contexts=None, rows=None):
         end = meta["checkpoints"]["end"]
         recorded = end.get("multi_selection") or {}
         bundle = recorded.get("bundle")
@@ -1055,13 +1136,28 @@ class DemoService:
             selection = {"bundle": bundle, "trace": trace}
         else:
             selection = None
+        grounded = self._is_grounded(meta)
+        try:
+            assessment_ctx = self._assessment_context(meta, rows)
+        except Exception:
+            assessment_ctx = None
         try:
             review = run_multi_feedback(
                 evidence, selection=selection,
-                practice_contexts=practice_contexts)
+                practice_contexts=practice_contexts,
+                assessment_context=assessment_ctx)
         except ValueError:
-            review = run_multi_feedback(
-                evidence, practice_contexts=practice_contexts)
+            try:
+                review = run_multi_feedback(
+                    evidence, practice_contexts=practice_contexts,
+                    assessment_context=assessment_ctx)
+            except ValueError:
+                review = run_multi_feedback(
+                    evidence, practice_contexts=practice_contexts)
+                assessment_ctx = None
+        if grounded and (assessment_ctx is None
+                         or "review_examples" not in review):
+            review = self._grounded_unavailable(review)
         review["trace"]["fallback_reason"] = reason
         return review
 
@@ -1470,28 +1566,44 @@ class DemoService:
                         and hasattr(self.generator, "execution")):
                     self.generator.execution = None
                 try:
-                    review = run_multi_feedback(
-                        evidence, selection=selection,
-                        generator=(
-                            self.generator
-                            if (mode == "hosted"
-                                and not selection["trace"]
-                                ["selector_failed"])
-                            else None),
-                        practice_contexts=[
-                            c["context"] for c in contexts])
+                    assessment_ctx = self._assessment_context(meta, rows)
+                except Exception:
+                    assessment_ctx = None
+                try:
+                    if self._is_grounded(meta) and assessment_ctx is None:
+                        review = self._grounded_unavailable(
+                            run_multi_feedback(
+                                evidence, selection=selection,
+                                practice_contexts=[
+                                    c["context"] for c in contexts]))
+                    else:
+                        review = run_multi_feedback(
+                            evidence, selection=selection,
+                            generator=(
+                                self.generator
+                                if (mode == "hosted"
+                                    and not selection["trace"]
+                                    ["selector_failed"])
+                                else None),
+                            practice_contexts=[
+                                c["context"] for c in contexts],
+                            assessment_context=assessment_ctx)
                 except (Exception, SystemExit):
                     review = run_multi_feedback(
                         evidence, selection=selection,
                         practice_contexts=[
-                            c["context"] for c in contexts])
+                            c["context"] for c in contexts],
+                        assessment_context=assessment_ctx)
                     review["trace"]["fallback_reason"] = "provider_error"
                 generator_exec = (
                     copy.deepcopy(getattr(self.generator, "execution", None))
                     if self.generator is not None else None)
                 if generator_exec is None:
                     generator_exec = (
-                        {"status": "skipped_selector_failure"}
+                        {"status": "skipped_grounding_unavailable"}
+                        if review.get("worked_review_status")
+                        == "unavailable"
+                        else {"status": "skipped_selector_failure"}
                         if selection["trace"]["selector_failed"]
                         else {"status": "rules_mode_no_providers"}
                         if mode == "rules"
@@ -1606,12 +1718,22 @@ class DemoService:
             if self._is_multi(meta):
                 contexts = self._multi_terminal(meta, evidence, rows)
                 if end.get("baseline_student") is None:
-                    end["baseline_student"] = run_multi_feedback(evidence)
+                    try:
+                        end["baseline_student"] = run_multi_feedback(
+                            evidence,
+                            assessment_context=self._assessment_context(
+                                meta, rows))
+                    except ValueError:
+                        review = run_multi_feedback(evidence)
+                        end["baseline_student"] = (
+                            self._grounded_unavailable(review)
+                            if self._is_grounded(meta) else review)
                 if end.get("student_review") is None:
                     end["student_review"] = self._multi_baseline_review(
                         meta, evidence, "interrupted_by_restart",
                         practice_contexts=[
-                            c["context"] for c in contexts])
+                            c["context"] for c in contexts],
+                        rows=rows)
                 return
             ctx = (end.get("practice_context")
                    if meta.get("feedback_bundle_version")
@@ -1674,6 +1796,10 @@ class DemoService:
             "generation_prompt_version": (
                 MULTI_FULL_FEEDBACK_PROMPT_VERSION if multi
                 else FULL_FEEDBACK_PROMPT_VERSION),
+            "worked_review_version": (
+                ASSESSMENT_WORKED_REVIEW_VERSION if multi else None),
+            "worked_solution_version": (
+                worked_review_math.SOLUTION_VERSION if multi else None),
             "questions": copy.deepcopy(self.bank["questions"]),
             "skill_names": copy.deepcopy(self.bank["skill_names"]),
             "taxonomy": copy.deepcopy(self.taxonomy),

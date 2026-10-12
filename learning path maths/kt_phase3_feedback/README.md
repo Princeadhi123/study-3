@@ -165,8 +165,9 @@ authentication.
 - hides scores at midpoint (deterministic neutral pause, no provider call);
 - shows only observed totals at the end until the teacher approves;
 - displays the approved end package — review-focus narrative, worked review
-  examples, and all included aligned practice activities (up to two each) —
-  after release.
+  cards revisiting the student's own earliest incorrect assessment answers
+  (with the recorded selection, correct answer, and checked steps), and all
+  included aligned practice activities (up to two each) — after release.
 
 ### Teacher dashboard
 
@@ -438,10 +439,14 @@ Aitta (current `aligned_two_topic` mode):
   `FullFeedbackAittaGenerator` in `full_feedback.py` — not the old
   opening-only `EvidenceAittaGenerator` seam;
 - receives observed aggregate evidence, the validated selected bundle and
-  per-focus plans, the deterministic baseline, fixed worked review examples,
-  and safe per-topic practice status/task descriptions — **no** practice
-  answer keys, raw practice question/options, or KT probabilities;
-- does not score, select questions or topics, or invent worked solutions;
+  per-focus plans, the deterministic baseline, the grounded worked review
+  cards (each selected focus's earliest incorrectly answered assessment
+  question with its recorded selection, correct answer, and checked steps),
+  and safe per-topic practice status/task descriptions — **no** raw bank or
+  responses, answer indices, practice answer keys, raw practice
+  question/options, or KT probabilities;
+- does not score, select questions or topics, or invent worked solutions
+  (the application owns the checked steps);
 - failure preserves the selected bundle and practice contexts with the
   deterministic baseline text.
 
@@ -711,8 +716,11 @@ coordinate the server before a memory-heavy full test run.
   questions are not a validated learning benefit.
 - Teacher approval/release in this demo is an application workflow, not
   formal educator sign-off or learner-delivery approval.
-- Worked review examples are author-checked prototypes pending independent
-  educator review; UI translations are draft display text.
+- Worked review cards revisit the student's own assessment answers and
+  carry author-checked solutions pending independent educator review; a
+  card without checked coverage stays marked unavailable for teacher
+  review rather than substituting an invented example. UI translations
+  are draft display text; the original Finnish wording stays expandable.
 - Answering or scoring a selected practice activity inside the app is not
   implemented; the cards are review content only.
 - Sparse subtopic counts cannot establish mastery or misconceptions.

@@ -1,0 +1,1214 @@
+import copy
+import json
+import tempfile
+import unittest
+from fractions import Fraction
+from pathlib import Path
+
+import phase3_paths  # noqa: F401
+import worked_review_math
+from assessment_worked_review import (
+    ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION,
+    build_assessment_review_examples)
+from aitta_generator import AittaGenerator
+from demo_service import ConflictError, DemoService
+from evidence_feedback import (
+    build_evidence, build_research_evidence, canonical_digest,
+    run_multi_feedback)
+from evidence_feedback_policy import (
+    build_candidates, build_review_bundles)
+from feedback_practice import MULTI_INTEGRATED_TEMPLATE_VERSION
+from full_feedback import (
+    CachedFullFeedbackGenerator, FULL_FEEDBACK_SECTION_KEYS,
+    FullFeedbackAittaGenerator, MULTI_FULL_FEEDBACK_SCHEMA,
+    build_multi_full_input, multi_baseline_sections,
+    validate_full_input)
+from replay_provider_scenarios import CaptureCache
+from research_runtime import load_research_bank
+from session_store import bank_fingerprint
+from tests.test_kt_adapter import FakeKT
+from live_diagnostics import LiveDiagnostics
+
+
+API_KEY = "test-aitta-key-0123456789abcdef"
+BASE_URL = "https://aitta.example.test"
+MODEL = "openai/gpt-oss-120b"
+VALID_SECTIONS = {
+    "assessment_summary": "You have completed the assessment.",
+    "observed_strengths": "Your observed answers provide a starting point.",
+    "review_focus": "Review the selected assessed content with support.",
+    "next_steps": "Work through the supplied example with your teacher."}
+
+SKILLS = ("pct", "alg", "div", "fri")
+SKILL_NAMES = {"pct": "Prosenttilaskenta", "alg": "Algebra",
+               "div": "Jaollisuus", "fri": "Murtoluvut"}
+SUBTOPICS = {"pct": ("percentage_amount", "Percentage of an amount"),
+             "alg": ("combine_like_terms", "Combining like terms"),
+             "div": ("divisibility", "Divisibility"),
+             "fri": ("fraction_product", "Fraction products")}
+
+
+def _item(skill, i):
+    if skill == "pct":
+        percent, whole = 10 * (i + 1), 50 + 10 * i
+        answer = percent * whole // 100
+        return (f"Kuinka paljon on {percent} % luvusta {whole}?",
+                [str(answer - 2), str(answer), str(answer + 4)])
+    if skill == "alg":
+        a, b = i + 3, i + 2
+        return (f"Sievennä {a}x + {b}x",
+                [f"{a + b - 1}x", f"{a + b}x", f"{a + b + 1}x"])
+    if skill == "div":
+        return (f"{12 * (i + 2)} on jaollinen luvulla...",
+                ["5", "3", "7"])
+    return (f"{i + 1}/8 · 1/2",
+            [f"{i + 1}/8", f"{i + 1}/16", f"{i + 1}/32"])
+
+
+def make_grounded_bank(unsupported_fri=False):
+    questions = []
+    for half in (0, 1):
+        for slot in range(5):
+            for skill in SKILLS:
+                index = half * 5 + slot
+                text, options = _item(skill, index)
+                if unsupported_fri and skill == "fri" and index == 0:
+                    text = "Perustele omin sanoin laskusi."
+                questions.append({
+                    "question_id": f"{skill}__q{index}",
+                    "skill_id": skill,
+                    "item_id": f"item-{skill}-{index}",
+                    "exercise_id": f"ex-{skill}-{index}",
+                    "text": text,
+                    "options": options,
+                    "answer_index": 1,
+                    "content_text": f"{text} [OPTIONS] " + " | ".join(options)})
+    return {"protocol": "offline_mcq_demo_only",
+            "review_status": "approved",
+            "skill_names": dict(SKILL_NAMES),
+            "questions": questions}
+
+
+def make_grounded_taxonomy(bank):
+    return {
+        "schema": "phase3_assessment_taxonomy_draft_v1",
+        "status": "approved_for_descriptive_research_prototype",
+        "student_feedback_status": "observed_counts_only_no_subtopic_mastery_or_conformal",
+        "bank_fingerprint": bank_fingerprint(bank),
+        "relation": "is_part_of_not_prerequisite",
+        "topics": [{"skill_id": sid, "skill_name": SKILL_NAMES[sid],
+                    "subtopics": [{
+                        "id": SUBTOPICS[sid][0], "name": SUBTOPICS[sid][1],
+                        "question_ids": [q["question_id"] for q in
+                                         bank["questions"]
+                                         if q["skill_id"] == sid]}]}
+                   for sid in SKILLS]}
+
+
+def grounded_rows(bank, wrong_positions=(), offset=1):
+    rows = []
+    for index, q in enumerate(bank["questions"]):
+        selected = q["answer_index"]
+        if index in wrong_positions:
+            selected = (q["answer_index"] + offset) % len(q["options"])
+        rows.append({"question_id": q["question_id"],
+                     "selected_index": selected})
+    return rows
+
+
+def positions(bank, skill, half):
+    return [i for i, q in enumerate(bank["questions"])
+            if q["skill_id"] == skill and i // 20 == half]
+
+
+def context_for(bank, taxonomy, rows):
+    return {"bank": bank, "taxonomy": taxonomy, "responses": rows}
+
+
+def candidate_for(evidence, subtopic_id):
+    return next(c for c in build_candidates(evidence, "end")
+                if (c["focus"] or {}).get("subtopic_id") == subtopic_id)
+
+
+class RecordingOpener:
+    def __init__(self, payload=None, error=None):
+        self.payload = payload
+        self.error = error
+        self.calls = []
+
+    def open(self, request, timeout=None):
+        self.calls.append({
+            "body": json.loads(request.data.decode("utf-8")),
+            "headers": dict(request.header_items())})
+        if self.error is not None:
+            raise self.error
+        class _Response:
+            def __init__(self, data):
+                self._data = json.dumps(data).encode("utf-8")
+
+            def read(self, limit=-1):
+                return self._data
+
+            def close(self):
+                pass
+        return _Response(self.payload)
+
+
+def wire_reply(candidate_id, sections=None):
+    return {"choices": [{"finish_reason": "stop",
+                         "message": {"role": "assistant",
+                                     "content": json.dumps(
+                                         {"candidate_id": candidate_id,
+                                          "sections": sections
+                                          or dict(VALID_SECTIONS)})}}],
+            "model": MODEL,
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                      "total_tokens": 30}}
+
+
+class GroundedBuilderTests(unittest.TestCase):
+    def setUp(self):
+        self.bank = make_grounded_bank()
+        self.taxonomy = make_grounded_taxonomy(self.bank)
+
+    def _evidence(self, rows):
+        return build_evidence(self.bank, self.taxonomy, rows)
+
+    def test_earliest_incorrect_percentage_and_algebra(self):
+        wrong = sorted({positions(self.bank, "pct", 0)[1],
+                        positions(self.bank, "pct", 1)[0],
+                        positions(self.bank, "alg", 0)[2],
+                        positions(self.bank, "alg", 0)[3]})
+        rows = grounded_rows(self.bank, wrong)
+        evidence = self._evidence(rows)
+        ctx = context_for(self.bank, self.taxonomy, rows)
+        candidates = [candidate_for(evidence, "percentage_amount"),
+                      candidate_for(evidence, "combine_like_terms")]
+        cards = build_assessment_review_examples(
+            evidence, candidates, ctx)
+        self.assertEqual(len(cards), 2)
+        expected_qids = [self.bank["questions"][wrong[0]]["question_id"],
+                         self.bank["questions"][wrong[1]]["question_id"]]
+        for card, qid, cand in zip(cards, expected_qids, candidates):
+            self.assertEqual(card["source"],
+                             "incorrect_assessment_response")
+            self.assertEqual(card["version"],
+                             ASSESSMENT_WORKED_REVIEW_VERSION)
+            self.assertEqual(
+                card["selection_policy"],
+                "earliest_incorrect_in_selected_subtopic_v1")
+            self.assertEqual(card["title"],
+                             "Worked review of your assessment answer")
+            self.assertEqual(card["candidate_id"],
+                             cand["candidate_id"])
+            self.assertEqual(card["question_id"], qid)
+            question = next(q for q in self.bank["questions"]
+                            if q["question_id"] == qid)
+            self.assertEqual(card["skill_id"], question["skill_id"])
+            self.assertEqual(card["subtopic_id"],
+                             cand["focus"]["subtopic_id"])
+            self.assertEqual(card["for_subtopic_name"],
+                             cand["focus"]["subtopic_name"])
+            self.assertEqual(card["prompt"], question["text"])
+            self.assertEqual(card["options"], question["options"])
+            wrong_index = next(
+                r["selected_index"] for r in ctx["responses"]
+                if r["question_id"] == qid)
+            self.assertEqual(card["selected_answer"],
+                             question["options"][wrong_index])
+            self.assertEqual(card["correct_answer"],
+                             question["options"][question["answer_index"]])
+            self.assertEqual(card["status"], "ready")
+            self.assertTrue(card["steps"])
+            self.assertEqual(card["explanation"], "\n".join(card["steps"]))
+            self.assertTrue(card["reasoning_question"])
+            self.assertEqual(card["solution_version"],
+                             worked_review_math.SOLUTION_VERSION)
+            self.assertTrue(card["notice"])
+            for forbidden in ("answer_index", "selected_index",
+                              "item_id", "exercise_id", "content_text"):
+                self.assertNotIn(forbidden, card)
+        prompts = {c["prompt"] for c in cards}
+        self.assertNotIn("Find 30% of 90.", prompts)
+        self.assertNotIn("Simplify 7a − 2a.", prompts)
+
+    def test_wrong_option_variants_share_source_and_steps(self):
+        pos = positions(self.bank, "pct", 0)[0]
+        cards = []
+        for offset in (1, 2):
+            rows = grounded_rows(self.bank, [pos], offset=offset)
+            evidence = self._evidence(rows)
+            ctx = context_for(self.bank, self.taxonomy, rows)
+            card = build_assessment_review_examples(
+                evidence, [candidate_for(evidence, "percentage_amount")],
+                ctx)[0]
+            cards.append(card)
+        self.assertEqual(cards[0]["question_id"], cards[1]["question_id"])
+        self.assertEqual(cards[0]["steps"], cards[1]["steps"])
+        self.assertNotEqual(cards[0]["selected_answer"],
+                            cards[1]["selected_answer"])
+        self.assertNotEqual(
+            canonical_digest(cards[0]), canonical_digest(cards[1]))
+
+    def test_earliest_correct_selects_next_incorrect(self):
+        pos = positions(self.bank, "pct", 0)
+        rows = grounded_rows(self.bank, [pos[2]])
+        evidence = self._evidence(rows)
+        card = build_assessment_review_examples(
+            evidence, [candidate_for(evidence, "percentage_amount")],
+            context_for(self.bank, self.taxonomy, rows))[0]
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][pos[2]]["question_id"])
+
+    def test_never_earlier_wrong_in_different_subtopic(self):
+        alg_first = positions(self.bank, "alg", 0)[0]
+        pct_later = positions(self.bank, "pct", 0)[3]
+        rows = grounded_rows(self.bank, [alg_first, pct_later])
+        evidence = self._evidence(rows)
+        card = build_assessment_review_examples(
+            evidence, [candidate_for(evidence, "percentage_amount")],
+            context_for(self.bank, self.taxonomy, rows))[0]
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][pct_later]["question_id"])
+
+    def test_one_focus_exactly_one_card_all_correct_zero(self):
+        rows = grounded_rows(self.bank, positions(self.bank, "div", 0))
+        evidence = self._evidence(rows)
+        cards = build_assessment_review_examples(
+            evidence, [candidate_for(evidence, "divisibility")],
+            context_for(self.bank, self.taxonomy, rows))
+        self.assertEqual(len(cards), 1)
+        rows_ok = grounded_rows(self.bank)
+        evidence_ok = self._evidence(rows_ok)
+        only = build_candidates(evidence_ok, "end")
+        self.assertEqual(
+            build_assessment_review_examples(
+                evidence_ok, only,
+                context_for(self.bank, self.taxonomy, rows_ok)), [])
+
+    def test_none_context_returns_no_examples(self):
+        rows = grounded_rows(self.bank, [positions(self.bank, "pct", 0)[0]])
+        evidence = self._evidence(rows)
+        self.assertEqual(build_assessment_review_examples(
+            evidence, [candidate_for(evidence, "percentage_amount")]), [])
+        self.assertEqual(build_assessment_review_examples(
+            evidence, [candidate_for(evidence, "percentage_amount")],
+            None), [])
+
+    def test_unsupported_question_keeps_source_unavailable(self):
+        bank = make_grounded_bank(unsupported_fri=True)
+        taxonomy = make_grounded_taxonomy(bank)
+        pos = positions(bank, "fri", 0)[0]
+        rows = grounded_rows(bank, [pos])
+        evidence = build_evidence(bank, taxonomy, rows)
+        cand = next(c for c in build_candidates(evidence, "end")
+                    if (c["focus"] or {}).get("subtopic_id")
+                    == "fraction_product")
+        card = build_assessment_review_examples(
+            evidence, [cand],
+            {"bank": bank, "taxonomy": taxonomy, "responses": rows})[0]
+        question = bank["questions"][pos]
+        self.assertEqual(card["question_id"], question["question_id"])
+        self.assertEqual(card["prompt"], question["text"])
+        self.assertEqual(card["status"], "unavailable")
+        self.assertEqual(card["steps"], [])
+        self.assertEqual(card["explanation"], "")
+        self.assertIsNone(card["solution_version"])
+        self.assertEqual(
+            card["reasoning_question"],
+            "Explain your approach to this question to your teacher, "
+            "then work through it together.")
+        self.assertIn("no replacement example has been invented",
+                      card["notice"])
+        self.assertEqual(card["selected_answer"],
+                         question["options"][2])
+        self.assertEqual(card["correct_answer"],
+                         question["options"][question["answer_index"]])
+
+    def test_candidate_must_be_permitted(self):
+        rows = grounded_rows(self.bank, [positions(self.bank, "pct", 0)[0]])
+        evidence = self._evidence(rows)
+        ctx = context_for(self.bank, self.taxonomy, rows)
+        forged = copy.deepcopy(
+            candidate_for(evidence, "percentage_amount"))
+        forged["candidate_id"] = "review_forged"
+        with self.assertRaises(ValueError):
+            build_assessment_review_examples(evidence, [forged], ctx)
+
+    def test_tampered_inputs_rejected(self):
+        pos = positions(self.bank, "pct", 0)[0]
+        rows = grounded_rows(self.bank, [pos])
+        evidence = self._evidence(rows)
+        ctx = context_for(self.bank, self.taxonomy, rows)
+        cand = [candidate_for(evidence, "percentage_amount")]
+        mutations = []
+        bad_rows = copy.deepcopy(rows)
+        bad_rows[0]["selected_index"] = True
+        mutations.append(dict(ctx, responses=bad_rows))
+        bad_rows = copy.deepcopy(rows)
+        bad_rows[0]["selected_index"] = 99
+        mutations.append(dict(ctx, responses=bad_rows))
+        bad_rows = list(reversed(rows))
+        mutations.append(dict(ctx, responses=bad_rows))
+        bad_rows = copy.deepcopy(rows)
+        bad_rows[pos]["selected_index"] = self.bank["questions"][pos][
+            "answer_index"]
+        mutations.append(dict(ctx, responses=bad_rows))
+        bad_bank = copy.deepcopy(self.bank)
+        bad_bank["questions"][pos]["answer_index"] = 0
+        mutations.append(dict(ctx, bank=bad_bank))
+        bad_bank = copy.deepcopy(self.bank)
+        bad_bank["questions"][pos]["text"] = "Muutettu kysymys?"
+        mutations.append(dict(ctx, bank=bad_bank))
+        bad_bank = copy.deepcopy(self.bank)
+        bad_bank["questions"][pos]["options"] = ["x", "y", "z"]
+        mutations.append(dict(ctx, bank=bad_bank))
+        bad_tax = copy.deepcopy(self.taxonomy)
+        bad_tax["topics"][0]["subtopics"][0]["question_ids"] = [
+            q["question_id"] for q in self.bank["questions"]
+            if q["skill_id"] == "alg"]
+        mutations.append(dict(ctx, taxonomy=bad_tax))
+        mutations.append({"bank": self.bank, "taxonomy": self.taxonomy})
+        mutations.append("not-a-dict")
+        for bad in mutations:
+            with self.assertRaises(ValueError):
+                build_assessment_review_examples(evidence, cand, bad)
+        bad_evidence = copy.deepcopy(evidence)
+        bad_evidence["subtopics"][0]["incorrect"] += 1
+        with self.assertRaises(ValueError):
+            build_assessment_review_examples(bad_evidence, cand, ctx)
+
+
+class WorkedSolutionMathTests(unittest.TestCase):
+    def _solved(self, text, options, answer_index, subtopic):
+        question = {"question_id": "q", "skill_id": "s", "text": text,
+                    "options": options, "answer_index": answer_index,
+                    "exercise_id": "e"}
+        return worked_review_math.solution(question, subtopic)
+
+    def test_percentage_amount(self):
+        solved = self._solved("Kuinka paljon on 50 % luvusta 500?",
+                              ["200", "250", "300"], 1,
+                              "percentage_amount")
+        self.assertIn("250", solved["steps"][-1])
+
+    def test_negative_like_terms(self):
+        solved = self._solved("Sievennä -3x - 2x", ["-5x", "-x", "5x"], 0,
+                              "combine_like_terms")
+        self.assertIn("-5x", solved["steps"][-1])
+
+    def test_implied_coefficient_like_terms(self):
+        solved = self._solved("Sievennä x + 6x", ["6x", "7x", "x"], 1,
+                              "combine_like_terms")
+        self.assertIn("7x", solved["steps"][-1])
+
+    def test_retain_unlike_terms(self):
+        solved = self._solved("Sievennä -2x - y", ["-3xy", "-2x - y", "-2xy"],
+                              1, "retain_unlike_terms")
+        self.assertIn("-2x - y", solved["steps"][-1])
+        with self.assertRaises(ValueError):
+            self._solved("Sievennä x + x + y", ["2x + y"], 0,
+                         "retain_unlike_terms")
+
+    def test_fraction_products(self):
+        solved = self._solved("4/6 · 5/4", ["20/24", "9/10", "5/6"], 0,
+                              "fraction_product")
+        self.assertTrue(any("20/24" in s for s in solved["steps"]))
+        self.assertTrue(any("5/6" in s for s in solved["steps"]))
+        solved = self._solved("1/7 · 11", ["11/7", "12/7", "11/77"], 0,
+                              "fraction_times_integer")
+        self.assertIn("11/7", solved["steps"][-1])
+
+    def test_prime_and_composite(self):
+        solved = self._solved("Alkuluku?", ["5", "9", "12"], 0,
+                              "prime_recognition")
+        self.assertTrue(solved["steps"])
+        with self.assertRaises(ValueError):
+            self._solved("Alkuluku?", ["5", "9", "12"], 1,
+                         "prime_recognition")
+
+    def test_divisibility(self):
+        solved = self._solved("25 on jaollinen luvulla...",
+                              ["5", "3", "7"], 0, "divisibility")
+        self.assertTrue(any("25" in s for s in solved["steps"]))
+        with self.assertRaises(ValueError):
+            self._solved("25 on jaollinen luvulla...",
+                         ["3", "5", "7"], 0, "divisibility")
+
+    def test_decimal_price_expressions(self):
+        solved = self._solved("10 € - 2,5 €", ["7.5", "8.5", "12.5"], 0,
+                              "price_subtraction")
+        self.assertTrue(any("7.5" in s for s in solved["steps"]))
+        solved = self._solved(
+            "250 gramman suklaapatukka maksaa 2,20 euroa. Mikä on "
+            "suklaapatukan kilohinta?", ["8.8", "5.5", "0.88"], 0,
+            "price_unit_price")
+        self.assertTrue(any("8.8" in s for s in solved["steps"]))
+        solved = self._solved(
+            "2,5 desilitran limutölkki maksaa 2,65 euroa. Mikä on limun "
+            "litrahinta?", ["10.6", "1.06", "6.62"], 0,
+            "price_unit_price")
+        self.assertTrue(any("10.6" in s for s in solved["steps"]))
+
+    def test_decimal_display(self):
+        self.assertEqual(worked_review_math.decimal_display(
+            Fraction(1, 4)), "0.25")
+        self.assertEqual(worked_review_math.decimal_display(
+            Fraction(-3, 2)), "−1.5")
+        self.assertEqual(worked_review_math.decimal_display(
+            Fraction(1, 3)), "1/3")
+
+    def test_precedence_emits_multiplication_before_additions(self):
+        value, steps = worked_review_math.arithmetic("7+22+3*5")
+        self.assertEqual(value, 44)
+        self.assertTrue(steps[0].startswith("3 × (5)"))
+        self.assertEqual(steps[-1], "29 + (15) = 44.")
+
+    def test_unsupported_constructs_rejected(self):
+        for expression in ("__import__('os')", "2**3", "x+1",
+                           "eval('1+1')"):
+            with self.assertRaises(ValueError):
+                worked_review_math.arithmetic(expression)
+        with self.assertRaises(ValueError):
+            worked_review_math.solution(
+                {"question_id": "q", "skill_id": "s",
+                 "text": "Kuinka paljon on 50 % luvusta 500?",
+                 "options": ["200", "999", "250"], "answer_index": 1,
+                 "exercise_id": "e"}, "percentage_amount")
+
+    def test_tampered_correct_option_disagrees_solution(self):
+        with self.assertRaises(ValueError):
+            self._solved("Kuinka paljon on 50 % luvusta 500?",
+                         ["200", "251", "300"], 1, "percentage_amount")
+
+    def test_algebra_term_parser_accepts_valid_forms(self):
+        for expression in ("x+y", "-2x-y", "3x-1", "x+6x", "-3x-2x",
+                           "-3+2x", "0x+3x", " x + y ", "x − y"):
+            self.assertTrue(worked_review_math._algebra_terms(expression),
+                            expression)
+        self.assertEqual(worked_review_math.algebra("x + x + y"),
+                         {"x": 2, "y": 1})
+        self.assertEqual(worked_review_math.algebra("0x+3x"), {"x": 3})
+
+    def test_algebra_term_parser_rejects_malformed(self):
+        for expression in ("xx", "2x3x", "x++y", "x+", "+", "2*x",
+                           "x^2", "x/2", "x+y!", "9" * 10000 + "!",
+                           "x" * 10000):
+            with self.assertRaises(ValueError, msg=expression[:20]):
+                worked_review_math._algebra_terms(expression)
+
+    def test_no_findall_algebra_parsing_remains(self):
+        import inspect
+        source = inspect.getsource(worked_review_math)
+        self.assertNotIn("re.findall", source)
+
+
+class GroundedPipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.bank = make_grounded_bank()
+        self.taxonomy = make_grounded_taxonomy(self.bank)
+        self.wrong = sorted({positions(self.bank, "pct", 0)[0],
+                             positions(self.bank, "alg", 0)[0]})
+        self.rows = grounded_rows(self.bank, self.wrong)
+        self.evidence = build_evidence(
+            self.bank, self.taxonomy, self.rows)
+        self.context = context_for(self.bank, self.taxonomy, self.rows)
+        self.bundle = next(
+            b for b in build_review_bundles(self.evidence)
+            if {c["focus"]["subtopic_id"]
+                for c in b["review_candidates"] if c["focus"]}
+            == {"percentage_amount", "combine_like_terms"})
+        self.slots = [{"schema": "phase3_feedback_practice_context_v1",
+                       "status": "abstained", "selected_question_id": None,
+                       "pool_sha256": None}
+                      for _ in self.bundle["review_candidates"]
+                      if _["focus"] is not None]
+
+    def _generator(self, opener):
+        inner = AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                               opener=opener)
+        return FullFeedbackAittaGenerator(inner)
+
+    def _payload(self):
+        return build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots,
+            assessment_context=self.context)
+
+    def test_payload_carries_context_and_grounded_examples(self):
+        payload = self._payload()
+        self.assertEqual(payload["assessment_context"], self.context)
+        self.assertIsNot(payload["assessment_context"], self.context)
+        self.assertEqual(len(payload["review_examples"]), 2)
+        self.assertTrue(all(e["source"] == "incorrect_assessment_response"
+                            for e in payload["review_examples"]))
+        normalized = validate_full_input(copy.deepcopy(payload))
+        self.assertEqual(normalized, payload)
+
+    def test_validate_rejects_tampered_examples_and_context(self):
+        for mutate in (
+                lambda p: p["review_examples"][0].update(
+                    selected_answer="forged"),
+                lambda p: p["review_examples"][0]["steps"].append("fake"),
+                lambda p: p["review_examples"].pop(),
+                lambda p: p.update(assessment_context=None),
+                lambda p: p["assessment_context"]["responses"][0].update(
+                    selected_index=0),
+                lambda p: p["assessment_context"]["bank"]["questions"][0]
+                    .update(answer_index=0),
+                lambda p: p["assessment_context"]["taxonomy"]["topics"][0]
+                    .update(skill_name="Forged")):
+            payload = self._payload()
+            with self.assertRaises(ValueError):
+                mutate(payload)
+                validate_full_input(payload)
+
+    def test_none_context_payload_has_empty_examples(self):
+        payload = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots)
+        self.assertIsNone(payload["assessment_context"])
+        self.assertEqual(payload["review_examples"], [])
+        normalized = validate_full_input(copy.deepcopy(payload))
+        self.assertEqual(normalized, payload)
+
+    def test_wire_contains_only_selected_cards(self):
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        self._generator(opener).generate(copy.deepcopy(self._payload()))
+        body = opener.calls[0]["body"]
+        context = json.loads(body["messages"][1]["content"])
+        self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
+        self.assertNotIn("assessment_context", context)
+        self.assertNotIn("responses", context)
+        self.assertNotIn("taxonomy", context)
+        self.assertNotIn("bank", context)
+        cards = context["review_examples"]
+        self.assertEqual(len(cards), 2)
+        selected_qids = {c["question_id"] for c in cards}
+        raw = json.dumps(context)
+        for question in self.bank["questions"]:
+            if question["question_id"] in selected_qids:
+                continue
+            self.assertNotIn(question["text"], raw,
+                             question["question_id"])
+            self.assertNotIn(question["question_id"], raw)
+        for forbidden in ('"answer_index"', '"selected_index"',
+                          '"item_id"', '"exercise_id"', '"content_text"',
+                          '"bank_sha256"', "p_correct", "pool_q"):
+            self.assertNotIn(forbidden, raw)
+
+    def test_run_multi_feedback_grounded_review_and_fallback(self):
+        review = run_multi_feedback(
+            self.evidence, practice_contexts=self.slots,
+            assessment_context=self.context)
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        cards = review["review_examples"]
+        self.assertEqual(len(cards), 2)
+        self.assertTrue(all(c["status"] == "ready" for c in cards))
+        self.assertTrue(all(c["source"] == "incorrect_assessment_response"
+                            for c in cards))
+        next_steps = next(s for s in review["message"]["sections"]
+                          if s["kind"] == "next_steps")
+        self.assertIn("assessment answer", next_steps["text"])
+        opener = RecordingOpener(error=RuntimeError("down"))
+        review2 = run_multi_feedback(
+            self.evidence, generator=self._generator(opener),
+            practice_contexts=self.slots,
+            assessment_context=self.context)
+        self.assertEqual(review2["trace"]["fallback_reason"],
+                         "generator_error")
+        self.assertEqual(review2["review_examples"], cards)
+        self.assertEqual(review2["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+
+    def test_generator_mutation_cannot_change_stored_examples(self):
+        review = run_multi_feedback(
+            self.evidence, practice_contexts=self.slots,
+            assessment_context=self.context)
+
+        class Mutating:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                payload["review_examples"][0]["steps"] = ["injected"]
+                return {"candidate_id": payload["selected_candidate"]
+                        ["candidate_id"], "sections": dict(VALID_SECTIONS)}
+
+        review2 = run_multi_feedback(
+            self.evidence, generator=Mutating(),
+            practice_contexts=self.slots,
+            assessment_context=self.context)
+        self.assertEqual(review2["review_examples"],
+                         review["review_examples"])
+
+    def test_run_multi_feedback_without_context_keeps_examples_empty(self):
+        review = run_multi_feedback(
+            self.evidence, practice_contexts=self.slots)
+        self.assertNotIn("worked_review_version", review)
+        self.assertNotIn("review_examples", review)
+
+    def test_baseline_grounded_and_legacy_wording(self):
+        cards = build_assessment_review_examples(
+            self.evidence, self.bundle["review_candidates"],
+            self.context)
+        grounded = multi_baseline_sections(
+            self.evidence, self.bundle["review_candidates"],
+            review_examples=cards)
+        legacy = multi_baseline_sections(
+            self.evidence, self.bundle["review_candidates"])
+        g_next = next(s for s in grounded if s["kind"] == "next_steps")
+        l_next = next(s for s in legacy if s["kind"] == "next_steps")
+        self.assertIn("assessment answer", g_next["text"])
+        self.assertIn("checked worked steps", g_next["text"])
+        self.assertNotEqual(g_next["text"], l_next["text"])
+
+    def test_aggregate_only_baseline_uses_empty_grounded_wording(self):
+        payload = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots)
+        self.assertEqual(payload["review_examples"], [])
+        baseline = {s["kind"]: s["text"]
+                    for s in payload["baseline_sections"]}
+        self.assertNotIn("below", baseline["next_steps"])
+        review = run_multi_feedback(
+            self.evidence, practice_contexts=self.slots)
+        steps = {s["kind"]: s["text"]
+                 for s in review["message"]["sections"]}
+        self.assertIn("below", steps["next_steps"])
+        empty = multi_baseline_sections(
+            self.evidence, self.bundle["review_candidates"],
+            review_examples=[])
+        e_steps = {s["kind"]: s["text"] for s in empty}
+        self.assertNotIn("below", e_steps["next_steps"])
+
+    def test_observed_strengths_variants(self):
+        zero_rows = grounded_rows(
+            self.bank, range(len(self.bank["questions"])))
+        zero_evidence = build_evidence(
+            self.bank, self.taxonomy, zero_rows)
+        zero_candidates = build_candidates(zero_evidence, "end")[:1]
+        strengths = next(
+            s["text"] for s in multi_baseline_sections(
+                self.evidence, self.bundle["review_candidates"],
+                review_examples=[])
+            if s["kind"] == "observed_strengths")
+        self.assertIn("answered questions correctly", strengths)
+
+        def observed(examples):
+            return next(s["text"] for s in multi_baseline_sections(
+                zero_evidence, zero_candidates,
+                review_examples=examples)
+                if s["kind"] == "observed_strengths")
+
+        card = {"candidate_id": zero_candidates[0]["candidate_id"],
+                "status": "unavailable"}
+        self.assertEqual(observed(None), observed([card]))
+        self.assertIn("review examples", observed(None))
+        self.assertNotEqual(observed([]), observed(None))
+        self.assertIn("assessment answers with your teacher",
+                      observed([]))
+        for examples in (None, [], [card]):
+            with_strengths = next(
+                s["text"] for s in multi_baseline_sections(
+                    self.evidence, self.bundle["review_candidates"],
+                    review_examples=examples)
+                if s["kind"] == "observed_strengths")
+            self.assertEqual(with_strengths, strengths)
+
+    def test_ab_wrong_options_change_wire_and_reuse_cache(self):
+        payloads = []
+        for offset in (1, 2):
+            rows = copy.deepcopy(self.rows)
+            question = self.bank["questions"][self.wrong[0]]
+            rows[self.wrong[0]] = {
+                "question_id": question["question_id"],
+                "selected_index": ((question["answer_index"] + offset)
+                                   % len(question["options"]))}
+            payloads.append(build_multi_full_input(
+                self.evidence, "student", self.bundle, self.slots,
+                assessment_context=context_for(
+                    self.bank, self.taxonomy, rows)))
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), 4)
+            opener = RecordingOpener(
+                wire_reply(candidate_id=self.bundle["candidate_id"]))
+            cached = CachedFullFeedbackGenerator(
+                self._generator(opener), cache, MODEL,
+                "endpointhash" * 8)
+            cached.generate(copy.deepcopy(payloads[0]))
+            self.assertFalse(cached.execution["reused"])
+            cached.generate(copy.deepcopy(payloads[1]))
+            self.assertFalse(cached.execution["reused"])
+            self.assertEqual(len(opener.calls), 2)
+            bodies = [json.loads(c["body"]["messages"][1]["content"])
+                      for c in opener.calls]
+            self.assertNotEqual(
+                bodies[0]["review_examples"][0]["selected_answer"],
+                bodies[1]["review_examples"][0]["selected_answer"])
+            self.assertEqual(
+                bodies[0]["review_examples"][0]["question_id"],
+                bodies[1]["review_examples"][0]["question_id"])
+            cached.generate(copy.deepcopy(payloads[0]))
+            self.assertTrue(cached.execution["reused"])
+            self.assertEqual(len(opener.calls), 2)
+            self.assertEqual(
+                len(list(Path(tmp).glob("aitta_full_*.json"))), 2)
+
+    def test_tampered_payload_rejected_before_http(self):
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        generator = self._generator(opener)
+        payload = self._payload()
+        payload["assessment_context"]["responses"][0][
+            "selected_index"] = 0
+        with self.assertRaises(ValueError):
+            generator.generate(payload)
+        self.assertEqual(opener.calls, [])
+
+    def test_generator_systemexit_preserves_grounded_cards(self):
+        review = run_multi_feedback(
+            self.evidence, practice_contexts=self.slots,
+            assessment_context=self.context)
+
+        class Aborting:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                raise SystemExit("abort")
+
+        aborted = run_multi_feedback(
+            self.evidence, generator=Aborting(),
+            practice_contexts=self.slots,
+            assessment_context=self.context)
+        self.assertEqual(aborted["trace"]["fallback_reason"],
+                         "generator_error")
+        self.assertEqual(aborted["review_examples"],
+                         review["review_examples"])
+        self.assertTrue(all(
+            c["source"] == "incorrect_assessment_response"
+            for c in aborted["review_examples"]))
+
+
+class WarmBankGroundedTests(unittest.TestCase):
+    def setUp(self):
+        self.bank, self.taxonomy, _ = load_research_bank("warm")
+        self.qpos = {q["question_id"]: i
+                     for i, q in enumerate(self.bank["questions"])}
+        self.leaves = {}
+        for topic in self.taxonomy["topics"]:
+            for leaf in topic["subtopics"]:
+                self.leaves[leaf["id"]] = leaf
+
+    def _rows(self, wrong_qids):
+        wrong = set(wrong_qids)
+        return [{"question_id": q["question_id"],
+                 "selected_index": (
+                     (q["answer_index"] + 1) % len(q["options"])
+                     if q["question_id"] in wrong
+                     else q["answer_index"])}
+                for q in self.bank["questions"]]
+
+    def test_alternating_warm_percentage_and_algebra(self):
+        pct = self.leaves["percentage_amount"]
+        alg = self.leaves["combine_like_terms"]
+        wrong = [qid for leaf in (pct, alg)
+                 for i, qid in enumerate(leaf["question_ids"])
+                 if i % 2 == 1]
+        rows = self._rows(wrong)
+        evidence = build_research_evidence(
+            self.bank, self.taxonomy, rows)
+        ctx = {"bank": self.bank, "taxonomy": self.taxonomy,
+               "responses": rows}
+        candidates = [candidate_for(evidence, "percentage_amount"),
+                      candidate_for(evidence, "combine_like_terms")]
+        cards = build_assessment_review_examples(
+            evidence, candidates, ctx)
+        self.assertEqual(len(cards), 2)
+        for card, leaf, cand in zip(cards, (pct, alg), candidates):
+            self.assertEqual(card["question_id"],
+                             leaf["question_ids"][1])
+            question = self.bank["questions"][
+                self.qpos[card["question_id"]]]
+            self.assertEqual(card["status"], "ready")
+            self.assertTrue(card["steps"])
+            self.assertEqual(card["prompt"], question["text"])
+            self.assertEqual(card["options"], question["options"])
+            self.assertEqual(
+                card["selected_answer"],
+                question["options"][
+                    (question["answer_index"] + 1)
+                    % len(question["options"])])
+            self.assertEqual(
+                card["correct_answer"],
+                question["options"][question["answer_index"]])
+            self.assertEqual(card["candidate_id"],
+                             cand["candidate_id"])
+            self.assertEqual(card["skill_id"],
+                             cand["focus"]["skill_id"])
+            self.assertEqual(card["subtopic_id"], leaf["id"])
+
+    def test_same_skill_leaf_never_borrows_earlier_wrong(self):
+        combine = self.leaves["combine_like_terms"]
+        retain = self.leaves["retain_unlike_terms"]
+        first_leaf, second_leaf = sorted(
+            (combine, retain),
+            key=lambda s: self.qpos[s["question_ids"][0]])
+        wrong = [first_leaf["question_ids"][0],
+                 second_leaf["question_ids"][1]]
+        rows = self._rows(wrong)
+        evidence = build_research_evidence(
+            self.bank, self.taxonomy, rows)
+        ctx = {"bank": self.bank, "taxonomy": self.taxonomy,
+               "responses": rows}
+        cand = candidate_for(evidence, second_leaf["id"])
+        card = build_assessment_review_examples(
+            evidence, [cand], ctx)[0]
+        self.assertEqual(card["question_id"],
+                         second_leaf["question_ids"][1])
+        self.assertNotEqual(card["question_id"],
+                            first_leaf["question_ids"][0])
+        self.assertEqual(card["skill_id"], cand["focus"]["skill_id"])
+        self.assertEqual(card["subtopic_id"], second_leaf["id"])
+        self.assertIn(card["status"], ("ready", "unavailable"))
+
+
+class GroundedServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bank = make_grounded_bank()
+        self.taxonomy = make_grounded_taxonomy(self.bank)
+
+    def _service(self, **kwargs):
+        kwargs.setdefault(
+            "diagnostics",
+            LiveDiagnostics(model_loader=lambda: FakeKT(self.bank)))
+        service = DemoService(root=Path(self.tmp.name), bank=self.bank,
+                              taxonomy=self.taxonomy, **kwargs)
+        self.addCleanup(service.close, wait=True)
+        return service
+
+    def _complete(self, service, wrong):
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        snapshot = None
+        for row in grounded_rows(self.bank, wrong):
+            snapshot = service.submit_response(sid, token, row)
+        return sid, token, snapshot
+
+    def _wait(self, service, sid, timeout=15.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if service._load_meta(sid)["provider_job"]["status"] in (
+                    "ready", "fallback"):
+                return
+            time.sleep(0.05)
+        self.fail("provider job did not finish")
+
+    def test_new_multi_session_stores_grounded_cards(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertTrue(review["review_examples"])
+        detail = service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        self.assertEqual(preview["template_version"],
+                         GROUNDED_TEMPLATE_VERSION)
+        self.assertIn("review_examples", preview)
+        cards = preview["review_examples"]
+        self.assertTrue(all(c["source"] == "incorrect_assessment_response"
+                            for c in cards))
+        self.assertNotIn("review_example", preview)
+        for card in cards:
+            self.assertIn("selected_answer", card)
+            self.assertIn("correct_answer", card)
+        released = service.release_feedback(
+            sid, {"message_sha256": detail["feedback_delivery"]
+                  ["preview_sha256"], "reviewer_label": "t"})
+        self.assertTrue(released["released"])
+        released_cards = service.teacher_session(sid)[
+            "feedback_delivery"]["released_feedback"]["review_examples"]
+        self.assertEqual(released_cards, cards)
+
+    def test_stale_hash_rejected_and_answer_change_alters_hash(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        detail = service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        self.assertTrue(preview["review_examples"])
+        tampered = copy.deepcopy(preview)
+        tampered["review_examples"][0]["selected_answer"] = "forged"
+        self.assertNotEqual(canonical_digest(tampered),
+                            canonical_digest(preview))
+        with self.assertRaises(ConflictError):
+            service.release_feedback(
+                sid, {"message_sha256": "0" * 64})
+        self.assertIsNone(
+            detail["feedback_delivery"]["released_feedback"])
+
+    def test_restart_recovers_grounded_cards(self):
+        root = Path(self.tmp.name)
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        first = service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        service.close(wait=True)
+        reopened = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.addCleanup(reopened.close, wait=True)
+        second = reopened.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        self.assertEqual(second["template_version"],
+                         GROUNDED_TEMPLATE_VERSION)
+        self.assertEqual(second["review_examples"],
+                         first["review_examples"])
+
+    def test_legacy_single_mode_unchanged(self):
+        service = self._service(review_mode="legacy_single")
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        self.assertNotIn("worked_review_version", meta)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertNotIn("worked_review_version", review)
+        self.assertNotIn("review_examples", review)
+
+    def test_public_snapshot_hidden_until_release(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+        detail = service.teacher_session(sid)
+        preview_cards = detail["feedback_delivery"]["preview"][
+            "review_examples"]
+        released = service.release_feedback(
+            sid, {"message_sha256": detail["feedback_delivery"]
+                  ["preview_sha256"], "reviewer_label": "t"})
+        self.assertTrue(released["released"])
+        after = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(after["review_examples"], preview_cards)
+
+    def test_unmarked_historical_multi_session_releases_v4(self):
+        root = Path(self.tmp.name)
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        meta.pop("worked_review_version", None)
+        review = meta["checkpoints"]["end"]["student_review"]
+        review.pop("review_examples", None)
+        review.pop("worked_review_version", None)
+        service._save_meta(meta)
+        detail = service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        self.assertEqual(preview["template_version"],
+                         MULTI_INTEGRATED_TEMPLATE_VERSION)
+        released = service.release_feedback(
+            sid, {"message_sha256": detail["feedback_delivery"]
+                  ["preview_sha256"], "reviewer_label": "t"})
+        self.assertTrue(released["released"])
+        expected = service.teacher_session(sid)[
+            "feedback_delivery"]["released_feedback"]
+        self.assertIsNotNone(expected)
+        service.close(wait=True)
+        reopened = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.addCleanup(reopened.close, wait=True)
+        meta2 = reopened._load_meta(sid)
+        self.assertNotIn("worked_review_version", meta2)
+        after = reopened.teacher_session(sid)[
+            "feedback_delivery"]["released_feedback"]
+        self.assertEqual(after["template_version"],
+                         MULTI_INTEGRATED_TEMPLATE_VERSION)
+        self.assertEqual(after, expected)
+
+    def test_grounding_unavailable_terminal_fallback(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        evidence = meta["checkpoints"]["end"]["evidence"]
+        original = service._assessment_context
+
+        def broken(meta_, rows=None):
+            raise ValueError("grounding broken")
+
+        service._assessment_context = broken
+        try:
+            review = service._multi_baseline_review(
+                meta, evidence, "grounding_unavailable_test")
+        finally:
+            service._assessment_context = original
+        self.assertEqual(review["review_examples"], [])
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertEqual(review["worked_review_status"], "unavailable")
+        self.assertIn("no worked example has been substituted",
+                      review["worked_review_notice"])
+        self.assertEqual(
+            review["trace"]["worked_review_context_status"],
+            "unavailable")
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "grounding_unavailable_test")
+        sections = {s["kind"]: s["text"]
+                    for s in review["message"]["sections"]}
+        self.assertNotIn("below", sections["next_steps"])
+        blob = json.dumps(review["message"])
+        self.assertNotIn("Find 30% of 90", blob)
+        meta["checkpoints"]["end"]["student_review"] = review
+        service._save_meta(meta)
+        preview = service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        self.assertEqual(preview["worked_review_status"],
+                         "unavailable")
+        self.assertIn("no worked example has been substituted",
+                      preview["worked_review_notice"])
+        self.assertEqual(preview["review_examples"], [])
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+
+    def test_worker_grounding_unavailable_never_calls_generator(self):
+        calls = []
+
+        class FakeGenerator:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                calls.append(payload)
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS)}
+
+        generator = FakeGenerator()
+        service = self._service(provider_mode="hosted",
+                                generator=generator)
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        self.assertEqual(len(calls), 1)
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["provider_job"]["status"], "ready")
+        meta["provider_job"]["status"] = "pending"
+        service._save_meta(meta)
+        original = service._assessment_context
+
+        def broken(meta_, rows=None):
+            raise ValueError("grounding broken")
+
+        service._assessment_context = broken
+        try:
+            service._run_multi_provider_job(sid)
+        finally:
+            service._assessment_context = original
+        self.assertEqual(len(calls), 1)
+        meta = service._load_meta(sid)
+        job = meta["provider_job"]
+        self.assertEqual(job["status"], "fallback")
+        self.assertEqual(
+            job["executions"]["student"]["generator"],
+            {"status": "skipped_grounding_unavailable"})
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertEqual(review["worked_review_status"], "unavailable")
+        self.assertEqual(review["review_examples"], [])
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "assessment_grounding_unavailable")
+        self.assertEqual(review["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertIn("no worked example has been substituted",
+                      review["worked_review_notice"])
+        self.assertTrue(review["selected_candidates"])
+        focus = next(s["text"] for s in review["message"]["sections"]
+                     if s["kind"] == "review_focus")
+        self.assertIn("Percentage of an amount", focus)
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+
+    def test_interrupted_pending_provider_recovers_grounded(self):
+        root = Path(self.tmp.name)
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        meta["provider_job"]["status"] = "pending"
+        meta["checkpoints"]["end"]["student_review"] = None
+        service._save_meta(meta)
+        service.close(wait=True)
+        reopened = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.addCleanup(reopened.close, wait=True)
+        meta2 = reopened._load_meta(sid)
+        self.assertEqual(meta2["provider_job"]["status"], "fallback")
+        review = meta2["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "interrupted_by_restart")
+        self.assertTrue(review["review_examples"])
+        self.assertTrue(all(
+            c["source"] == "incorrect_assessment_response"
+            for c in review["review_examples"]))
+
+    def test_queue_capacity_fallback_still_grounded(self):
+        service = self._service(max_pending_jobs=0)
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        self.assertEqual(meta["provider_job"]["reason"],
+                         "demo_provider_queue_capacity")
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertTrue(review["review_examples"])
+
+    def test_service_closing_fallback_still_grounded(self):
+        service = self._service()
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        rows = grounded_rows(
+            self.bank, [positions(self.bank, "pct", 0)[0]])
+        for row in rows[:-1]:
+            service.submit_response(sid, token, row)
+        service._closing = True
+        service.submit_response(sid, token, rows[-1])
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        self.assertEqual(meta["provider_job"]["reason"],
+                         "service_closing")
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["worked_review_version"],
+                         ASSESSMENT_WORKED_REVIEW_VERSION)
+        self.assertTrue(review["review_examples"])
+
+
+if __name__ == "__main__":
+    unittest.main()

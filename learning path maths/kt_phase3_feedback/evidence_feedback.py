@@ -498,8 +498,12 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
 
 
 def run_multi_feedback(evidence, selection=None, selector=None,
-                       generator=None, practice_contexts=None):
+                       generator=None, practice_contexts=None,
+                       assessment_context=None):
     from full_feedback import multi_baseline_sections
+    from assessment_worked_review import (
+        ASSESSMENT_WORKED_REVIEW_VERSION,
+        build_assessment_review_examples)
     payload = bundle_selection_payload(evidence)
     safe = payload["evidence"]
     bundles = payload["candidates"]
@@ -510,6 +514,8 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         raise ValueError("selected bundle is not a permitted bundle")
     selected = matched[0]
     originals = selected["review_candidates"]
+    examples = build_assessment_review_examples(
+        safe, originals, assessment_context)
     plans = [copy.deepcopy(build_feedback_plan(c)) for c in originals]
     sel_trace = selection["trace"]
     fallback_reason = sel_trace["fallback_reason"]
@@ -523,7 +529,8 @@ def run_multi_feedback(evidence, selection=None, selector=None,
             full_message_sections, validate_full_reply)
         generation_prompt_version = MULTI_FULL_FEEDBACK_PROMPT_VERSION
         full_input = build_multi_full_input(
-            safe, "student", selected, practice_contexts or [])
+            safe, "student", selected, practice_contexts or [],
+            assessment_context=assessment_context)
         callback_payload = copy.deepcopy(full_input)
         try:
             reply = generator.generate(callback_payload)
@@ -539,12 +546,22 @@ def run_multi_feedback(evidence, selection=None, selector=None,
                     s["text"] for s in full_message["sections"])
                 phrasing_source = "injected_generator_full_sections"
 
-    def deterministic(cands):
-        sections = multi_baseline_sections(safe, cands)
+    def deterministic(cands, exs=None):
+        sections = multi_baseline_sections(safe, cands,
+                                           review_examples=exs)
         return {"sections": sections,
                 "text": "\n\n".join(s["text"] for s in sections if s["text"])}
 
-    return {
+    if assessment_context is not None:
+        baseline_examples = build_assessment_review_examples(
+            safe, bundles[0]["review_candidates"], assessment_context)
+        template_baseline = deterministic(
+            bundles[0]["review_candidates"], baseline_examples)
+        message = deterministic(originals, examples)
+    else:
+        template_baseline = deterministic(bundles[0]["review_candidates"])
+        message = deterministic(originals)
+    review = {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
         "audience": "student", "checkpoint": "end",
         "sanitized_evidence": copy.deepcopy(safe),
@@ -555,10 +572,9 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         "selected_candidates": copy.deepcopy(originals),
         "feedback_plans": plans,
         "feedback_plan": copy.deepcopy(plans[0]),
-        "template_baseline": deterministic(
-            bundles[0]["review_candidates"]),
+        "template_baseline": template_baseline,
         "message": (copy.deepcopy(full_message)
-                    if full_message is not None else deterministic(originals)),
+                    if full_message is not None else message),
         "requires_human_review": True,
         "trace": {
             "policy_version": MULTI_REVIEW_POLICY_VERSION,
@@ -574,3 +590,7 @@ def run_multi_feedback(evidence, selection=None, selector=None,
                 if full_message is not None
                 else "deterministic_evidence_and_draft_actions"),
             "provider_advantage_demonstrated": False}}
+    if assessment_context is not None:
+        review["review_examples"] = copy.deepcopy(examples)
+        review["worked_review_version"] = ASSESSMENT_WORKED_REVIEW_VERSION
+    return review

@@ -19,8 +19,8 @@ Completed answers (40) -> deterministic scoring + descriptive graph
   -> one Jev bundle selection (or local bypass when one bundle exists)
   -> aligned KT practice recommendation (0-2 questions, one per selected skill)
   -> one Aitta shared four-section student draft
-  -> application adds fixed scores, worked review examples, practice cards,
-     and the scope disclaimer
+  -> application adds fixed scores, assessment-grounded worked review
+     cards, practice cards, and the scope disclaimer
   -> teacher edits the four narrative sections -> one approval
   -> student receives the approved snapshot's content unchanged
 ```
@@ -47,30 +47,47 @@ Key contracts:
   (no pool+band). All-correct sessions make no predictor call.
 - **Aitta** writes one shared student-facing draft through
   `FullFeedbackAittaGenerator`'s multi schema
-  `phase3_multi_topic_feedback_generation_v1`, prompt
-  `aitta_aligned_two_topic_feedback_v1`. It receives observed aggregate
-  evidence, the validated bundle and per-focus plans, the deterministic
-  baseline, fixed worked examples, and safe practice status/task
-  descriptions — never answer keys, raw practice questions/options, or
-  KT probabilities. Payload validation rebuilds every field and rejects
-  tampering; it is interface validation, not semantic verification.
-- **Worked examples** come from the fixed 23-entry `REVIEW_EXAMPLES` map in
-  `feedback_practice.py`, matched by review `subtopic_id` — not the KT pool,
-  not Aitta, not random. Up to two examples for recognized focuses; the same
-  focus across different cases shows the same fixed example, and related
-  focuses may share an example. Sample entries:
-
-  | review focus | fixed worked example |
-  |---|---|
-  | `percentage_amount` | Find 30% of 90. (= 27) |
-  | `combine_like_terms` | Simplify 7a − 2a. |
-  | `retain_unlike_terms` | Simplify 2a + 5b. |
-
-  They are implementation-author checked, not independently
-  educator-approved, and are separate from the 0–2 selected practice
-  questions. No error focus means no example; an unmapped focus contributes
-  no example, while another mapped focus can still have one. An abstained
-  practice slot is a status card, not an assigned question.
+  `phase3_multi_topic_feedback_generation_v2`, prompt
+  `aitta_assessment_grounded_two_topic_feedback_v2`. It receives observed
+  aggregate evidence, the validated bundle and per-focus plans, the
+  deterministic baseline, the grounded review cards (see below), and safe
+  practice status/task descriptions — never the whole bank, raw responses,
+  answer indices, other assessed questions, practice answer keys/options,
+  or KT probabilities. Payload validation rebuilds every field (evidence,
+  bundle, plans, baseline, practice contexts, review examples, and the
+  local assessment context) and rejects tampering; it is interface
+  validation, not semantic verification.
+- **Worked review cards** are built by `assessment_worked_review.py`
+  (`assessment_grounded_worked_review_v1`) from the session's own
+  assessment record: for each selected error focus, the card shows the
+  **earliest incorrectly answered assessment question** inside that
+  focus's exact taxonomy leaf (`earliest_incorrect_in_selected_subtopic_v1`
+  — bank order, no KT/model ranking, never a correct response, never a
+  different subtopic or skill). Each card carries the original prompt and
+  options, the recorded selected option, the bank's correct option, and a
+  deterministic checked solution from `worked_review_math.py`
+  (`assessment_worked_solution_v1`). The LLM writes only the narrative
+  sections; the application owns the steps. When the checked solution
+  cannot cover a question, the same actual question stays with
+  `status: unavailable`, no steps, and a teacher-review notice — no
+  replacement example is invented. If grounding itself fails on a
+  marked session (missing/incomplete response rows or failed
+  revalidation), the review instead records
+  `worked_review_status: unavailable`, an empty `review_examples`
+  array, `trace.worked_review_context_status: unavailable`, and an
+  explicit teacher-review notice; the provider is never called and no
+  fixed example is substituted. The grounding context
+  (`{bank, taxonomy, responses}`) stays local and must rebuild the
+  validated evidence exactly, so altered responses, banks, options, keys,
+  or taxonomies fail before any provider request. Cards disclose the
+  selected assessment question's wording and both answers to teacher and
+  student; practice answer keys remain hidden.
+- **Legacy worked examples**: the fixed 23-entry `REVIEW_EXAMPLES` map in
+  `feedback_practice.py` is retained only for sessions saved before the
+  grounded pipeline (no `worked_review_version` marker); those records
+  keep template v4 and the old reconstruction path unchanged. New aligned
+  sessions never silently swap in a generic fixed example, and callers
+  without a local assessment context receive no examples at all.
 - **Approval**: the preview is unavailable until selection, practice, and
   generation are all terminal; the teacher edits only the four narrative
   sections (scores, examples, and questions are fixed). One approval
@@ -82,7 +99,13 @@ Key contracts:
 - **Version identifiers**: primitives `observed_subtopic_feedback_v3`;
   multi review marker `observed_distinct_skill_review_v1`; selection
   schema/prompt above; aligned KT policy above; preview template
-  `phase3_student_feedback_template_v4`. Retained single-mode identifiers:
+  `phase3_student_feedback_template_v5` for grounded sessions
+  (`worked_review_version`
+  `assessment_grounded_worked_review_v1`, selection policy
+  `earliest_incorrect_in_selected_subtopic_v1`, solution version
+  `assessment_worked_solution_v1`). Sessions saved without the marker
+  keep template `phase3_student_feedback_template_v4`. Retained
+  single-mode identifiers:
   full schema `phase3_full_feedback_generation_v2`, prompt
   `aitta_feedback_with_practice_v3`, template
   `phase3_student_feedback_template_v3`. Practice context schema
@@ -92,11 +115,20 @@ Key contracts:
   (original focuses inside the chosen bundle), `feedback_plans`,
   `practice_contexts` (per-focus terminal slots),
   `recommendation.topic_selections` / `selected_question_ids`, and
-  `preview.practice_activities` / `review_examples`. Legacy first-item
-  aliases `practice` and `review_example` remain readable; the renderer
-  prefers the plural fields when present. Old single-mode records, edits,
-  and releases stay readable and exact — a `feedback_selection_version`
-  marker distinguishes new multi records.
+  `preview.practice_activities` / `review_examples` (an explicit array,
+  possibly empty, on v5 previews; grounded sessions also store
+  `review.review_examples`, `review.worked_review_version`, and — when
+  grounding cannot be validated — `worked_review_status` /
+  `worked_review_notice`, forwarded to the preview and rendered as
+  plain text even with zero cards). Legacy
+  first-item aliases `practice` and `review_example` remain readable on
+  old records; the renderer prefers the plural fields when present. Old
+  single-mode records, edits, and releases stay readable and exact —
+  `feedback_selection_version` and `worked_review_version` markers
+  distinguish new multi records. A running demo server must be restarted
+  to serve the grounded pipeline; scenario replays already enforce the
+  code-hash restart guard, which now also covers
+  `assessment_worked_review.py` and `worked_review_math.py`.
 - **Failure and restart**: a completed selector execution (fresh or cached)
   is preserved even when the aligned practice or generation stage fails;
   a generator that ran and failed is recorded as failed, one never started

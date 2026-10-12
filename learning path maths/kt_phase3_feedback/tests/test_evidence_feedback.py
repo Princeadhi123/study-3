@@ -1149,7 +1149,7 @@ class MultiBundleTests(unittest.TestCase):
                 "pool_sha256": None}] * 2)
         self.assertEqual(len(generator.payloads), 1)
         self.assertEqual(generator.payloads[0]["schema"],
-                         "phase3_multi_topic_feedback_generation_v1")
+                         "phase3_multi_topic_feedback_generation_v2")
         self.assertEqual(review["trace"]["phrasing_source"],
                          "injected_generator_full_sections")
 

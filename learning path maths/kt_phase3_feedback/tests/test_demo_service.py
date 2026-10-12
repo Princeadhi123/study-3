@@ -2019,7 +2019,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v4")
+                         "phase3_student_feedback_template_v5")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2112,7 +2112,7 @@ class MultiModeTests(unittest.TestCase):
         preview = delivery["preview"]
         self.assertEqual(preview["practice"]["status"], "abstained")
         self.assertIsNone(preview["practice"]["question"])
-        self.assertNotIn("review_examples", preview)
+        self.assertEqual(preview["review_examples"], [])
 
     def test_selector_failure_explicit_fallback_keeps_alignment(self):
         selector = MultiSelector(error=RuntimeError("down"))

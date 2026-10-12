@@ -48,8 +48,8 @@ behavior claims.
 | Historical result preservation | Original report remains immutable; completed replay snapshots remain readable after policy/taxonomy/bank changes |
 | Blind baseline-vs-selected comparison | Implemented pilot tooling: balanced A/B, persisted shuffled order, immutable judgments, completion-only reveal |
 | Evidence Lab responsive UI | Implemented: three workspaces, session search, keyboard controls, synthetic consent |
-| Richer Aitta evidence explanation | Implemented for the shared-draft seam (bounded context; no keys/probabilities) |
-| Reviewed practice questions / worked solutions / practice loop | **Pending** (worked examples are author-checked fixed mappings; in-app practice answering/scoring is a separate unbuilt feature) |
+| Richer Aitta evidence explanation | Implemented for the shared-draft seam (bounded context; the selected assessment question's own wording/answers are disclosed, while practice answer keys and probabilities stay hidden) |
+| Reviewed practice questions / worked solutions / practice loop | **Pending** (worked review cards revisit the student's own earliest incorrect assessment answers with author-checked solutions; in-app practice answering/scoring is a separate unbuilt feature) |
 | Independent educator preference benchmark | **Pending** |
 | Calibration validity on a fixed assessment | **Pending** |
 | Real-student privacy review + production deployment | **Pending** |
@@ -253,9 +253,13 @@ claims are generated. Completed reviews are not learner-delivery approval.
 - Aitta (current aligned mode) writes one shared four-section student draft
   for the whole bundle via `FullFeedbackAittaGenerator`; the wire carries the
   observed aggregate evidence, validated bundle and per-focus plans,
-  deterministic baseline, fixed worked examples, and safe practice status /
-  task descriptions — never answer keys, raw practice questions/options, or
-  KT probabilities. `legacy_single` uses the same full structured draft
+  deterministic baseline, assessment-grounded worked review cards
+  (`assessment_grounded_worked_review_v1`: each selected focus's earliest
+  incorrectly answered assessment question, recorded selection, correct
+  answer, and `assessment_worked_solution_v1` checked steps), and safe
+  practice status / task descriptions — never the raw bank, responses,
+  answer indices, practice answer keys/options, or KT probabilities.
+  `legacy_single` uses the same full structured draft
   generator with the retained v3 prompt — the older opening-only
   `EvidenceAittaGenerator` contract exists only in the legacy offline/batch
   provider seam, not in either live review mode.
@@ -384,7 +388,9 @@ student routes.
   `replay_provider_scenarios.py`), `transport_diagnostics.py`
 - Review contract: `educator_review_contract.py`
 - Multi-topic feedback: `full_feedback.py` (shared-draft input/generator),
-  `feedback_practice.py` (worked examples, practice context projection),
+  `assessment_worked_review.py` + `worked_review_math.py` (grounded
+  incorrect-answer cards and checked solutions), `feedback_practice.py`
+  (legacy fixed worked examples, practice context projection),
   `shadow_practice.py` (aligned KT selection), `research_runtime.py`
 - Batch/replay (legacy context): `scenario_runner.py`,
   `compare_scenarios.py`, `evaluate_scenarios.py`, `scenario_report.py`,
@@ -568,6 +574,38 @@ two-topic path has not been run.
   single-focus contract; old records/edits/releases stay readable. Stage
   run: 249 tests OK (1 skip) plus focused provider/cache/HTTP coverage and
   2 focused browser tests; earlier staged runs are listed in the table above.
+- **2026-10-12 — Assessment-grounded worked review.** New aligned sessions
+  replace the generic fixed worked examples with cards revisiting the
+  student's own earliest incorrect assessment answer per selected subtopic
+  (`earliest_incorrect_in_selected_subtopic_v1`), including recorded
+  selected answer, correct answer, and checked deterministic steps or an
+  explicit unavailable notice (no invented fallback). Multi schema v2 /
+  prompt v2 / template v5; grounding context stays local and is revalidated
+  before any provider request; fallback/queue/restart paths keep the same
+  grounding. Sessions saved without the `worked_review_version` marker
+  keep template v4, the legacy 23-entry `REVIEW_EXAMPLES` map, and their
+  exact released snapshots. A running server must be restarted to serve
+  this pipeline; replay code hashes now cover both new modules. A
+  marked session whose grounding context is missing or fails
+  revalidation falls back to an explicit `worked_review_status:
+  unavailable` review (empty `review_examples`, teacher-review notice,
+  `trace.worked_review_context_status: unavailable`) without calling
+  any generator or substituting fixed examples. Stage verification:
+  one consolidated targeted gate of the grounding, full-feedback,
+  demo-service, demo-api, evidence-feedback, display-translation, and
+  browser modules — 272 tests, OK with one opt-in browser test skipped;
+  the new grounding module alone contributes 45 tests covering the real
+  warm bank, wire/cache scoping, and service fallback paths (logs:
+  `artifacts/grounded_review_verification.log`). A separate opted-in
+  headless-Edge run of the focused browser test passed, covering
+  labeled answers, ordered steps, reasoning, the original-wording
+  disclosure, and literal-text rendering of a markup-bearing prompt
+  (log: `artifacts/grounded_review_browser.log`). A later follow-up
+  hardened the grounding-failure path (explicit
+  `assessment_grounding_unavailable` fallback reason, skipped
+  generator-execution record, worker-path coverage); its verification
+  ran the grounding module alone — 46 tests, OK (log:
+  `artifacts/grounded_review_followup.log`).
 - **Earlier (recorded previously)** — `--unlimited-calls` flag and cache
   isolation; shared single student-facing end package replacing dual
   audience drafts; usability/UI rework with fixed worked examples and

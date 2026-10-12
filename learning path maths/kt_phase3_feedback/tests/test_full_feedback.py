@@ -613,8 +613,9 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 set(ctx), {"status", "topic", "selection"})
         raw = json.dumps(context)
         for forbidden in ("pool_q", "Pool practice prompt",
-                          "p_correct", "answer_index", '"options"',
-                          "item_id", "sha256"):
+                          "p_correct", '"answer_index"',
+                          '"selected_index"', '"assessment_context"',
+                          '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
     def test_run_multi_feedback_records_generated_sections(self):
