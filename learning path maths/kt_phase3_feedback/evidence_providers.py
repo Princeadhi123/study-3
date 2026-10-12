@@ -53,8 +53,9 @@ import copy
 import evidence_feedback
 from aitta_generator import AittaGenerationError, AittaGenerator
 from evidence_feedback_policy import (
-    GENERATION_SCHEMA, REVIEW_STATUS, SELECTION_INSTRUCTIONS,
-    SELECTION_PROMPT_VERSION)
+    GENERATION_SCHEMA, MULTI_SELECTION_INSTRUCTIONS,
+    MULTI_SELECTION_PROMPT_VERSION, MULTI_SELECTION_SCHEMA, REVIEW_STATUS,
+    SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from jev_selector import (
     MODEL, QUESTION_ID, JevSelectionError, JevSelector, _parse_response)
 from synthetic_feedback import (
@@ -86,9 +87,10 @@ _FIXTURE_SKILLS = [
 ]
 
 
-def _selector_metadata(status, model=None, usage=None):
+def _selector_metadata(status, model=None, usage=None,
+                       prompt_version=SELECTION_PROMPT_VERSION):
     return {"status": status, "model_version": model, "usage": usage,
-            "prompt_version": SELECTION_PROMPT_VERSION}
+            "prompt_version": prompt_version}
 
 
 def _generator_metadata(status, model=None, usage=None):
@@ -168,10 +170,16 @@ class EvidenceJevSelector(JevSelector):
     def select(self, payload: dict) -> dict:
         self._last_metadata = _selector_metadata("not_called")
         normalized = evidence_feedback.validate_selection_payload(payload)
+        multi = normalized["schema"] == MULTI_SELECTION_SCHEMA
+        instructions = (MULTI_SELECTION_INSTRUCTIONS if multi
+                        else SELECTION_INSTRUCTIONS)
+        prompt_version = (MULTI_SELECTION_PROMPT_VERSION if multi
+                          else SELECTION_PROMPT_VERSION)
         candidates = normalized["candidates"]
         if len(candidates) == 1:
             self._last_metadata = _selector_metadata(
-                "not_called_single_candidate")
+                "not_called_single_candidate",
+                prompt_version=prompt_version)
             return {"candidate_id": candidates[0]["candidate_id"]}
         state = {"audience": normalized["audience"],
                  "checkpoint": normalized["checkpoint"],
@@ -180,7 +188,7 @@ class EvidenceJevSelector(JevSelector):
         body = {"model": MODEL, "state": state,
                 "questions": {QUESTION_ID: {
                     "type": "choice",
-                    "instructions": SELECTION_INSTRUCTIONS,
+                    "instructions": instructions,
                     "criteria": {
                         c["candidate_id"]: (c["action"]
                                             if c["action"] is not None
@@ -193,9 +201,11 @@ class EvidenceJevSelector(JevSelector):
             if self._api_key in model:
                 raise JevSelectionError("Jev request failed")
         except JevSelectionError:
-            self._last_metadata = _selector_metadata("failed")
+            self._last_metadata = _selector_metadata(
+                "failed", prompt_version=prompt_version)
             raise
-        self._last_metadata = _selector_metadata("completed", model, usage)
+        self._last_metadata = _selector_metadata(
+            "completed", model, usage, prompt_version=prompt_version)
         return {"candidate_id": choice}
 
 

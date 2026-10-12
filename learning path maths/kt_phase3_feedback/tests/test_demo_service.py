@@ -150,6 +150,7 @@ class DemoServiceTests(unittest.TestCase):
 
     def _service(self, **kwargs):
         kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
+        kwargs.setdefault("review_mode", "legacy_single")
         service = DemoService(root=Path(self.tmp.name),
                               bank=self.bank, taxonomy=self.taxonomy,
                               **kwargs)
@@ -1349,6 +1350,7 @@ class IntegratedPracticeTests(unittest.TestCase):
 
     def _service(self, **kwargs):
         kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
+        kwargs.setdefault("review_mode", "legacy_single")
         service = DemoService(root=Path(self.tmp.name),
                               bank=self.bank, taxonomy=self.taxonomy,
                               **kwargs)
@@ -1824,6 +1826,553 @@ class IntegratedPracticeTests(unittest.TestCase):
             "message_sha256": delivery["preview_sha256"]})
         released = service.snapshot(sid, token)["feedback"]["end"]
         self.assertNotIn("practice", released)
+
+
+MULTI_SECTIONS = {
+    "assessment_summary": "You have completed this assessment.",
+    "observed_strengths":
+        "Your observed answers provide a starting point for review.",
+    "review_focus":
+        "A possible review starting point is listed below.",
+    "next_steps": "Work through each example with your teacher."}
+
+
+class MultiSelector:
+    def __init__(self, events=None, index=0, error=None, prefer=None):
+        self.events = events
+        self.index = index
+        self.error = error
+        self.prefer = prefer
+        self.execution = None
+        self.calls = 0
+
+    def select(self, payload):
+        self.calls += 1
+        if self.events is not None:
+            self.events.append("select")
+        if self.error is not None:
+            raise self.error
+        self.execution = {"status": "fake_completed"}
+        candidates = payload["candidates"]
+        if self.prefer is not None:
+            for bundle in candidates:
+                skills = {c["focus"]["skill_id"]
+                          for c in bundle["review_candidates"]
+                          if c.get("focus")}
+                if skills == set(self.prefer):
+                    return {"candidate_id": bundle["candidate_id"]}
+        return {"candidate_id": candidates[self.index]["candidate_id"]}
+
+
+class MultiGenerator:
+    supports_full_feedback = True
+
+    def __init__(self, events=None):
+        self.events = events
+        self.execution = None
+        self.calls = 0
+        self.audiences = []
+
+    def generate(self, payload):
+        self.calls += 1
+        if self.events is not None:
+            self.events.append("generate")
+        self.audiences.append(payload["audience"])
+        self.execution = {"status": "fake_completed"}
+        return {"candidate_id":
+                payload["selected_candidate"]["candidate_id"],
+                "sections": dict(MULTI_SECTIONS)}
+
+
+class RecordingPredictor:
+    def __init__(self, probabilities=None, events=None):
+        self.probabilities = probabilities or {}
+        self.events = events
+        self.calls = []
+
+    def __call__(self, bank, rows, candidates):
+        self.calls.append(copy.deepcopy(candidates))
+        if self.events is not None:
+            self.events.append("predict")
+        return {"predictions": [
+            {"question_id": q["question_id"], "skill_id": q["skill_id"],
+             "item_id": q["item_id"], "regime": "warm",
+             "p_correct": self.probabilities.get(q["question_id"], 0.6)}
+            for q in candidates]}
+
+
+class FakeAlignedRecommender:
+    def __init__(self, pool, predictor, band=(0.4, 0.8)):
+        from shadow_practice import ShadowPracticeRecommender
+        self._inner = ShadowPracticeRecommender(pool, band, predictor)
+        self.band = tuple(band)
+        self.calls = []
+
+    def recommend_for_reviews(self, bank, taxonomy, rows,
+                              review_skill_ids, research=False):
+        self.calls.append(list(review_skill_ids))
+        return self._inner.recommend_for_reviews(
+            bank, taxonomy, rows, review_skill_ids, research=research)
+
+
+class MultiModeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        import feedback_practice
+        import research_runtime
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.pool = make_pool(("sA", "sB"))
+        from unittest import mock
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    research_runtime, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(self.pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _service(self, **kwargs):
+        kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
+        kwargs.setdefault("provider_mode", "hosted")
+        service = DemoService(root=Path(self.tmp.name),
+                              bank=self.bank, taxonomy=self.taxonomy,
+                              **kwargs)
+        self.addCleanup(service.close, wait=True)
+        return service
+
+    def _rows_wrong(self, skills=("sA", "sB")):
+        rows = []
+        for q in self.bank["questions"]:
+            index = q["answer_index"]
+            if q["skill_id"] in skills:
+                index = (index + 1) % len(q["options"])
+            rows.append({"question_id": q["question_id"],
+                         "selected_index": index})
+        return rows
+
+    def _complete(self, service, rows):
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in rows:
+            service.submit_response(sid, token, row)
+        return sid, token
+
+    def _end(self, service, sid):
+        return service.teacher_session(sid)["checkpoints"]["end"]
+
+    def _wait_done(self, service, sid):
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] in ("ready", "fallback")))
+
+    def _delivery(self, service, sid):
+        return service.teacher_session(sid)["feedback_delivery"]
+
+    def _aligned(self, probabilities=None, events=None):
+        predictor = RecordingPredictor(probabilities, events)
+        recommender = FakeAlignedRecommender(self.pool, predictor)
+        return recommender, predictor
+
+    def test_two_topics_two_questions_ordered_once(self):
+        events = []
+        selector = MultiSelector(events, prefer=("sA", "sB"))
+        generator = MultiGenerator(events)
+        recommender, predictor = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55}, events)
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self._wait_done(service, sid)
+        self.assertEqual(events, ["select", "predict", "generate"])
+        self.assertEqual(selector.calls, 1)
+        self.assertEqual(len(predictor.calls), 1)
+        self.assertEqual(generator.calls, 1)
+        self.assertEqual(generator.audiences, ["student"])
+        self.assertEqual(
+            {q["skill_id"] for q in predictor.calls[0]}, {"sA", "sB"})
+        self.assertEqual(len(recommender.calls), 1)
+        self.assertEqual(set(recommender.calls[0]), {"sA", "sB"})
+        end = self._end(service, sid)
+        review = end["student_review"]
+        self.assertEqual(
+            len(review["selected_candidates"]), 2)
+        self.assertEqual(
+            {c["focus"]["skill_id"]
+             for c in review["selected_candidates"]}, {"sA", "sB"})
+        self.assertEqual(
+            sorted(end["recommendation"]["selected_question_ids"]),
+            ["pool_q1", "pool_q2"])
+        contexts = end["practice_contexts"]
+        self.assertEqual(len(contexts), 2)
+        self.assertTrue(
+            all(c["context"]["status"] == "selected"
+                for c in contexts))
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v4")
+        activities = preview["practice_activities"]
+        self.assertEqual(len(activities), 2)
+        self.assertEqual(
+            {a["question"]["skill_name"] for a in activities},
+            {"Skill sA", "Skill sB"})
+        for activity in activities:
+            self.assertEqual(activity["status"], "selected")
+            self.assertEqual(activity["relationship"]["kind"],
+                             "same_topic_different_content")
+            self.assertTrue(
+                activity["topic_label"].startswith("Subtopic"))
+        public = service.snapshot(sid, token)
+        blob = json.dumps(public)
+        for needle in ("pool_q", "Pool practice prompt", "p_correct",
+                       "answer_index", "practice_context",
+                       "topic_selections", "review_bundle_"):
+            self.assertNotIn(needle, blob)
+        self.assertIsNone(public["feedback"]["end"])
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["practice_activities"], activities)
+        self.assertEqual(released["sections"], preview["sections"])
+        self.assertEqual(released["text"], preview["text"])
+
+    def test_one_qualifying_one_abstained(self):
+        selector = MultiSelector()
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.95})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, _ = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        end = self._end(service, sid)
+        self.assertEqual(end["recommendation"]["status"], "selected")
+        slots = {s["skill_id"]: s for s in
+                 end["recommendation"]["topic_selections"]}
+        self.assertEqual(slots["sA"]["status"], "selected")
+        self.assertEqual(slots["sA"]["selected_question_id"], "pool_q1")
+        self.assertEqual(slots["sB"]["status"], "abstained")
+        statuses = {c["skill_id"]: c["context"]["status"]
+                    for c in end["practice_contexts"]}
+        self.assertEqual(statuses, {"sA": "selected", "sB": "abstained"})
+        activities = self._delivery(service, sid)["preview"][
+            "practice_activities"]
+        self.assertEqual(len(activities), 2)
+        by_label = {a["topic_label"]: a for a in activities}
+        self.assertEqual(
+            {a["status"] for a in activities},
+            {"selected", "abstained"})
+        selected = next(a for a in activities
+                        if a["status"] == "selected")
+        self.assertEqual(selected["question"]["text"],
+                         "Pool practice prompt 1?")
+        abstained = next(a for a in activities
+                         if a["status"] == "abstained")
+        self.assertIsNone(abstained["question"])
+
+    def test_all_correct_no_focus_no_predictor(self):
+        selector = MultiSelector()
+        generator = MultiGenerator()
+        recommender, predictor = self._aligned({"pool_q1": 0.6})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        rows = responses(self.bank)
+        sid, _ = self._complete(service, rows)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] == "ready"))
+        end = self._end(service, sid)
+        self.assertEqual(selector.calls, 0)
+        self.assertEqual(generator.calls, 1)
+        self.assertEqual(predictor.calls, [])
+        self.assertEqual(recommender.calls, [])
+        self.assertEqual(end["recommendation"]["status"], "abstained")
+        self.assertEqual(end["practice_contexts"], [])
+        review = end["student_review"]
+        self.assertIsNone(review["trace"]["fallback_reason"])
+        self.assertTrue(all(
+            (c.get("focus") or {}).get("incorrect") in (None, 0)
+            or c.get("focus") is None
+            for c in review["selected_candidates"]))
+        focus = next(
+            s["text"] for s in
+            review["template_baseline"]["sections"]
+            if s["kind"] == "review_focus")
+        self.assertIn("no error-based review priority", focus)
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(preview["practice"]["status"], "abstained")
+        self.assertIsNone(preview["practice"]["question"])
+        self.assertNotIn("review_examples", preview)
+
+    def test_selector_failure_explicit_fallback_keeps_alignment(self):
+        selector = MultiSelector(error=RuntimeError("down"))
+        generator = MultiGenerator()
+        recommender, predictor = self._aligned({"pool_q1": 0.6})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, _ = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] == "fallback"))
+        end = self._end(service, sid)
+        self.assertEqual(
+            end["student_review"]["trace"]["fallback_reason"],
+            "selector_error")
+        self.assertEqual(generator.calls, 0)
+        self.assertEqual(len(predictor.calls), 1)
+        self.assertIsNotNone(
+            self._delivery(service, sid)["preview"])
+
+    def test_teacher_edit_release_and_stale_hash(self):
+        selector = MultiSelector()
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        delivery = self._delivery(service, sid)
+        sha = delivery["preview_sha256"]
+        with self.assertRaises(ConflictError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": "f" * 64,
+                "sections": dict(MULTI_SECTIONS)})
+        with self.assertRaises(ConflictError):
+            service.release_feedback(
+                sid, {"message_sha256": "f" * 64})
+        edited = dict(MULTI_SECTIONS)
+        edited["next_steps"] = "Review each example with your teacher."
+        service.save_feedback_edit(sid, {
+            "message_sha256": sha, "sections": edited})
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        texts = {s["kind"]: s["text"] for s in preview["sections"]}
+        self.assertEqual(texts["next_steps"], edited["next_steps"])
+        self.assertEqual(len(preview["practice_activities"]), 2)
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["sections"], preview["sections"])
+        self.assertEqual(released["practice_activities"],
+                         preview["practice_activities"])
+
+    def test_aligned_stage_failure_terminal_fallback(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, predictor = self._aligned({"pool_q1": 0.6})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        real_submit = service.diag_pool.submit
+
+        def flaky(fn, *args, **kwargs):
+            if fn == service._aligned_recommendation:
+                raise RuntimeError("queue down")
+            return real_submit(fn, *args, **kwargs)
+
+        service.diag_pool.submit = flaky
+        sid, token = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] == "fallback"))
+        end = self._end(service, sid)
+        self.assertEqual(end["recommendation_job"]["status"],
+                         "unavailable")
+        self.assertEqual(end["recommendation_job"]["reason"],
+                         "provider_error")
+        statuses = [c["context"]["status"]
+                    for c in end["practice_contexts"]]
+        self.assertEqual(statuses, ["unavailable", "unavailable"])
+        executions = end["provider_job"]["executions"]["student"]
+        self.assertEqual(executions["selector"]["status"],
+                         "fake_completed")
+        self.assertEqual(executions["generator"]["status"],
+                         "skipped_after_worker_error")
+        self.assertEqual(service._pending_diag, 0)
+        self.assertEqual(service._pending_provider, 0)
+        public = service.snapshot(sid, token)
+        self.assertIsNone(public["feedback"]["end"])
+        self.assertNotIn("pool_q", json.dumps(public))
+
+    def test_queue_capacity_marks_slots_unavailable(self):
+        generator = MultiGenerator()
+        recommender, _ = self._aligned({"pool_q1": 0.6})
+        service = self._service(generator=generator,
+                                recommender=recommender)
+        rows = self._rows_wrong()
+        created = service.create_session()
+        sid, _ = created["session_id"], created["student_token"]
+        for row in rows[:-1]:
+            service.submit_response(sid, created["student_token"], row)
+        service._pending_diag = service.max_pending_jobs
+        service.submit_response(sid, created["student_token"], rows[-1])
+        self._wait_done(service, sid)
+        end = self._end(service, sid)
+        self.assertEqual(end["recommendation_job"]["status"],
+                         "unavailable")
+        self.assertEqual(end["recommendation_job"]["reason"],
+                         "demo_diagnostics_queue_capacity")
+        statuses = [c["context"]["status"]
+                    for c in end["practice_contexts"]]
+        self.assertEqual(statuses, ["unavailable", "unavailable"])
+
+    def test_closing_fallback_contexts_per_mode(self):
+        generator = MultiGenerator()
+        recommender, _ = self._aligned({"pool_q1": 0.6})
+        service = self._service(generator=generator,
+                                recommender=recommender)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        rows = self._rows_wrong()
+        for row in rows[:-1]:
+            service.submit_response(sid, token, row)
+        service._closing = True
+        service.submit_response(sid, token, rows[-1])
+        end = self._end(service, sid)
+        self.assertEqual(end["provider_job"]["status"], "fallback")
+        statuses = [c["context"]["status"]
+                    for c in end["practice_contexts"]]
+        self.assertEqual(statuses, ["unavailable", "unavailable"])
+
+        root2 = Path(self.tmp.name) / "no_rec"
+        service2 = DemoService(root=root2, bank=self.bank,
+                               taxonomy=self.taxonomy,
+                               diagnostics=fake_diagnostics(self.bank),
+                               provider_mode="hosted",
+                               generator=MultiGenerator())
+        self.addCleanup(service2.close, wait=True)
+        created = service2.create_session()
+        sid2, token2 = created["session_id"], created["student_token"]
+        for row in rows[:-1]:
+            service2.submit_response(sid2, token2, row)
+        service2._closing = True
+        service2.submit_response(sid2, token2, rows[-1])
+        end2 = self._end(service2, sid2)
+        self.assertEqual(end2["provider_job"]["status"], "fallback")
+        statuses2 = [c["context"]["status"]
+                     for c in end2["practice_contexts"]]
+        self.assertEqual(statuses2, ["disabled", "disabled"])
+
+    def test_interrupted_practice_recovery_unavailable(self):
+        generator = MultiGenerator()
+        recommender, _ = self._aligned({"pool_q1": 0.6})
+        service = self._service(generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        for key in ("student_review", "recommendation",
+                    "recommendation_job", "practice_contexts",
+                    "practice_context"):
+            end.pop(key, None)
+        meta["provider_job"].update(
+            {"status": "pending", "executions": {"student": {
+                "selector": {"status": "completed"}}}})
+        service._save_meta(meta)
+        service.close(wait=True)
+        reopened = DemoService(
+            root=Path(self.tmp.name), bank=self.bank,
+            taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank),
+            provider_mode="hosted", generator=MultiGenerator(),
+            recommender=recommender)
+        self.addCleanup(reopened.close, wait=True)
+        meta = reopened._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        statuses = [c["context"]["status"]
+                    for c in end["practice_contexts"]]
+        self.assertEqual(statuses, ["unavailable", "unavailable"])
+        self.assertIsNotNone(end.get("student_review"))
+        public = reopened.snapshot(sid, token)
+        self.assertIsNone(public["feedback"]["end"])
+
+    def test_teacher_config_reflects_review_mode(self):
+        from evidence_feedback_policy import (
+            MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
+            POLICY_VERSION, SELECTION_INSTRUCTIONS)
+        from full_feedback import (
+            FULL_FEEDBACK_INSTRUCTIONS, FULL_FEEDBACK_PROMPT_VERSION,
+            MULTI_FULL_FEEDBACK_INSTRUCTIONS,
+            MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        multi = self._service(provider_mode="rules")
+        config = multi.teacher_config()
+        self.assertEqual(config["review_mode"], "aligned_two_topic")
+        self.assertEqual(config["selection_instructions"],
+                         MULTI_SELECTION_INSTRUCTIONS)
+        self.assertEqual(config["generation_instructions"],
+                         MULTI_FULL_FEEDBACK_INSTRUCTIONS)
+        self.assertEqual(config["generation_prompt_version"],
+                         MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        self.assertEqual(config["review_selection_policy_version"],
+                         MULTI_REVIEW_POLICY_VERSION)
+        self.assertEqual(config["policy_version"], POLICY_VERSION)
+        self.assertEqual(config["review_topic_limit"], 2)
+        self.assertEqual(config["practice_question_limit"], 2)
+        self.assertEqual(config["practice_alignment"],
+                         "selected_review_skills")
+        legacy = DemoService(
+            root=Path(self.tmp.name) / "legacy", bank=self.bank,
+            taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank),
+            review_mode="legacy_single")
+        self.addCleanup(legacy.close, wait=True)
+        config = legacy.teacher_config()
+        self.assertEqual(config["review_mode"], "legacy_single")
+        self.assertEqual(config["selection_instructions"],
+                         SELECTION_INSTRUCTIONS)
+        self.assertEqual(config["generation_instructions"],
+                         FULL_FEEDBACK_INSTRUCTIONS)
+        self.assertEqual(config["generation_prompt_version"],
+                         FULL_FEEDBACK_PROMPT_VERSION)
+        self.assertEqual(config["review_selection_policy_version"],
+                         POLICY_VERSION)
+        self.assertEqual(config["review_topic_limit"], 1)
+        self.assertEqual(config["practice_question_limit"], 1)
+        self.assertIsNone(config["practice_alignment"])
+
+    def test_restart_preserves_released_package_and_old_meta(self):
+        selector = MultiSelector()
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        delivery = self._delivery(service, sid)
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        meta = service._load_meta(sid)
+        self.assertEqual(
+            meta["feedback_selection_version"],
+            "observed_distinct_skill_review_v1")
+        meta.pop("feedback_selection_version")
+        service._save_meta(meta)
+        service.close(wait=True)
+        reopened = DemoService(root=Path(self.tmp.name),
+                               bank=self.bank, taxonomy=self.taxonomy,
+                               diagnostics=fake_diagnostics(self.bank))
+        self.addCleanup(reopened.close, wait=True)
+        meta = reopened._load_meta(sid)
+        self.assertNotIn("feedback_selection_version", meta)
+        self.assertEqual(
+            reopened.snapshot(sid, token)["feedback"]["end"], released)
 
 
 if __name__ == "__main__":

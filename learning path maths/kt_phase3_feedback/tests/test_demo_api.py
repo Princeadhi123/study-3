@@ -38,32 +38,7 @@ def wait_for(predicate, timeout=15.0):
     return False
 
 
-class DemoAPITests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.bank = make_bank()
-        report_path = Path(self.tmp.name) / "report.json"
-        report_path.write_text(json.dumps(make_report(2)), encoding="utf-8")
-        self.service = DemoService(
-            root=Path(self.tmp.name), bank=self.bank,
-            taxonomy=make_taxonomy(self.bank), replay_report=report_path,
-            diagnostics=LiveDiagnostics(
-                model_loader=lambda: FakeKT(self.bank)))
-        self.server = make_server(self.service, PIN)
-        self.thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-        host, port = self.server.server_address[:2]
-        self.url = f"http://{host}:{port}"
-        self.port = port
-
-    def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-        self.service.close(wait=True)
-        self.tmp.cleanup()
-
+class ApiClientMixin:
     def request(self, method, path, body=None, headers=None,
                 raw_headers=None):
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -119,6 +94,34 @@ class DemoAPITests(unittest.TestCase):
 
     def cookie_from(self, meta):
         return meta["Set-Cookie"].split(";")[0].split("=", 1)[1]
+
+
+class DemoAPITests(ApiClientMixin, unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bank = make_bank()
+        report_path = Path(self.tmp.name) / "report.json"
+        report_path.write_text(json.dumps(make_report(2)), encoding="utf-8")
+        self.service = DemoService(
+            root=Path(self.tmp.name), bank=self.bank,
+            taxonomy=make_taxonomy(self.bank), replay_report=report_path,
+            review_mode="legacy_single",
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.server = make_server(self.service, PIN)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.url = f"http://{host}:{port}"
+        self.port = port
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.service.close(wait=True)
+        self.tmp.cleanup()
 
     # ---------- student surface ----------
 
@@ -661,6 +664,34 @@ class DemoAPITests(unittest.TestCase):
                                         headers={"X-Phase3-Role": "researcher"})
             self.assertEqual(status, 403, path)
 
+    def test_route_family_auth_order_and_invalid_method_404(self):
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        headers = {"Cookie": f"demo_teacher={cookie}"}
+        sid = "a" * 32
+        for method, path, body, expected in (
+                ("GET", "/api/teacher/replays-bad", None, 403),
+                ("POST", "/api/teacher/config", {}, 404),
+                ("GET", f"/api/sessions/{sid}/responses", None, 404),
+                ("POST", f"/api/sessions/{sid}", {}, 404),
+                ("GET", "/api/teacher/unlock", None, 404),
+                ("GET", "/api/banks", None, 200)):
+            status, _, _ = self.request(method, path, body)
+            self.assertEqual(status, expected, (method, path))
+        for method, path, body in (
+                ("GET", "/api/teacher/replays-bad", None),
+                ("GET", f"/api/teacher/replays/{sid}/unknown", None),
+                ("GET", f"/api/teacher/replays/{sid}/cancel", None),
+                ("POST", f"/api/teacher/replays/{sid}/export", {}),
+                ("POST", f"/api/teacher/scenarios/{sid}", {}),
+                ("POST", f"/api/teacher/comparisons/{sid}", {}),
+                ("GET", f"/api/teacher/comparisons/{sid}/reviews", None),
+                ("POST", f"/api/teacher/sessions/{sid}/export", {}),
+                ("GET", f"/api/teacher/sessions/{sid}/reviews", None)):
+            status, _, _ = self.request(method, path, body,
+                                        headers=headers)
+            self.assertEqual(status, 404, (method, path))
+
     def test_research_library_and_blind_review_over_http(self):
         _, _, meta = self.unlock()
         cookie = self.cookie_from(meta)
@@ -858,6 +889,120 @@ class IntegratedPracticeAPITests(DemoAPITests):
             self.assertNotIn(needle, blob)
 
 
+class MultiModeAPITests(ApiClientMixin, unittest.TestCase):
+    def setUp(self):
+        import copy
+        import feedback_practice
+        import research_runtime
+        from tests.test_demo_service import (
+            FakeAlignedRecommender, MultiGenerator, MultiSelector,
+            RecordingPredictor)
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bank = make_bank()
+        report_path = Path(self.tmp.name) / "report.json"
+        report_path.write_text(json.dumps(make_report(2)), encoding="utf-8")
+        pool = make_pool(("sA", "sB"))
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(pool)),
+                mock.patch.object(
+                    research_runtime, "load_current_practice_pool",
+                    return_value=copy.deepcopy(pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.service = DemoService(
+            root=Path(self.tmp.name) / "runtime", bank=self.bank,
+            taxonomy=make_taxonomy(self.bank), replay_report=report_path,
+            provider_mode="hosted",
+            selector=MultiSelector(prefer=("sA", "sB")),
+            generator=MultiGenerator(),
+            recommender=FakeAlignedRecommender(
+                pool, RecordingPredictor(
+                    {"pool_q1": 0.6, "pool_q2": 0.55})),
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.server = make_server(self.service, PIN)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.url = f"http://{host}:{port}"
+        self.port = port
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.service.close(wait=True)
+        self.tmp.cleanup()
+
+    def test_multi_preview_edit_release_over_http(self):
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(self.bank, correct=False):
+            snap = self.service.snapshot(sid, token)
+            public_row = {
+                "question_token":
+                    snap["current_question"]["question_token"],
+                "selected_index": row["selected_index"]}
+            status, _, _ = self.request(
+                "POST", f"/api/sessions/{sid}/responses", public_row,
+                headers={"X-Demo-Session-Token": token})
+            self.assertEqual(status, 200)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)
+            ["provider_job"]["status"] == "ready"))
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        status, view, _ = self.teacher_get(
+            f"/api/teacher/sessions/{sid}", cookie)
+        self.assertEqual(status, 200)
+        delivery = view["feedback_delivery"]
+        self.assertEqual(delivery["review_mode"], "aligned_two_topic")
+        preview = delivery["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v4")
+        activities = preview["practice_activities"]
+        self.assertEqual(len(activities), 2)
+        self.assertEqual(
+            {a["question"]["skill_name"] for a in activities},
+            {"Skill sA", "Skill sB"})
+        sections = {
+            "assessment_summary": "Assessment summary. Edited draft.",
+            "observed_strengths": "Observed strengths. Edited draft.",
+            "review_focus": "Review focus. Edited draft.",
+            "next_steps": "Next steps. Edited draft."}
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/feedback-edits",
+            {"message_sha256": delivery["preview_sha256"],
+             "sections": sections},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        status, _, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": result["preview_sha256"]},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(status, 200)
+        released = snap["feedback"]["end"]
+        self.assertEqual(released["practice_activities"], activities)
+        self.assertEqual(
+            {s["kind"]: s["text"] for s in released["sections"]}
+            ["next_steps"], sections["next_steps"])
+        blob = json.dumps(snap)
+        for needle in ("pool_q", "p_correct", "answer_index",
+                       "review_bundle_"):
+            self.assertNotIn(needle, blob)
+
+
 class DemoApiCliTests(unittest.TestCase):
     def run_main(self, argv):
         with mock.patch.object(demo_api, "DemoService") as service_cls, \
@@ -879,6 +1024,14 @@ class DemoApiCliTests(unittest.TestCase):
     def test_budget_flags_are_mutually_exclusive(self):
         with self.assertRaises(SystemExit):
             demo_api.main(["--unlimited-calls", "--call-budget", "5"])
+
+    def test_review_mode_flag_forwarding(self):
+        self.assertEqual(
+            self.run_main([]).call_args.kwargs["review_mode"],
+            "aligned_two_topic")
+        self.assertEqual(
+            self.run_main(["--review-mode", "legacy_single"])
+            .call_args.kwargs["review_mode"], "legacy_single")
 
 
 if __name__ == "__main__":

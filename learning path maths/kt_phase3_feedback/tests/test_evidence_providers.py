@@ -4,23 +4,29 @@ Fully offline: fake openers only, no network. These verify the wire
 contracts and sanitized failure behaviour, not educational quality.
 """
 import json
+import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
 
 import evidence_feedback
 from evidence_feedback import build_evidence, run_feedback
 from evidence_feedback_policy import (
-    GENERATION_SCHEMA, REVIEW_STATUS, SELECTION_INSTRUCTIONS,
-    SELECTION_PROMPT_VERSION)
+    GENERATION_SCHEMA, MULTI_SELECTION_INSTRUCTIONS,
+    MULTI_SELECTION_PROMPT_VERSION, REVIEW_STATUS,
+    SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from evidence_providers import (
     EvidenceAittaGenerator, EvidenceJevSelector)
 from aitta_generator import AittaGenerationError, AittaGenerator
+from integrated_synthetic_pipeline import (
+    CachedReviewSelector, jev_request)
 from jev_selector import ENDPOINT, MODEL, QUESTION_ID, JevSelectionError
+from replay_provider_scenarios import CaptureCache
 from synthetic_feedback import GENERATION_INSTRUCTIONS, PROMPT_VERSION
 from tests.helpers import make_bank, make_taxonomy
 from tests.test_aitta_generator import (
     BASE_URL, FAKE_KEY as AITTA_KEY, ok_body as aitta_ok_body)
-from tests.test_evidence_feedback import submissions
+from tests.test_evidence_feedback import positions, submissions
 from tests.test_jev_selector import (
     FakeOpener, ok_body as jev_ok_body)
 
@@ -486,6 +492,71 @@ class GeneratorPayloadValidationTests(unittest.TestCase):
         self.assert_rejected_without_request(
             opening_payload("student", "end", "review_" + "s" * 81,
                             "focused_review"))
+
+
+class MultiBundleSelectorTests(unittest.TestCase):
+    def _payload(self):
+        bank = make_bank()
+        wrong = (set(positions(bank, "sA")) | set(positions(bank, "sB"))
+                 | set(positions(bank, "sC")))
+        evidence = build_evidence(
+            bank, make_taxonomy(bank), submissions(bank, wrong))
+        return evidence_feedback.bundle_selection_payload(evidence)
+
+    def test_posts_multi_bundle_contract_and_pipeline_body(self):
+        payload = self._payload()
+        self.assertGreaterEqual(len(payload["candidates"]), 3)
+        choice = payload["candidates"][1]["candidate_id"]
+        opener = FakeOpener(jev_ok_body(choice=choice))
+        selector = jev(opener)
+        self.assertEqual(selector.select(payload),
+                         {"candidate_id": choice})
+        self.assertEqual(len(opener.requests), 1)
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body, jev_request(payload)["body"])
+        question = body["questions"][QUESTION_ID]
+        self.assertEqual(question["instructions"],
+                         MULTI_SELECTION_INSTRUCTIONS)
+        self.assertEqual(set(question["criteria"]),
+                         {c["candidate_id"]
+                          for c in payload["candidates"]})
+        self.assertEqual(selector.last_metadata["prompt_version"],
+                         MULTI_SELECTION_PROMPT_VERSION)
+        self.assertNotIn(JEV_KEY, json.dumps(body))
+
+    def test_tampered_bundle_rejected_before_request(self):
+        payload = self._payload()
+        payload["candidates"][0]["review_candidates"][0]["focus"][
+            "incorrect"] = 0
+        opener = FakeOpener(jev_ok_body())
+        with self.assertRaises(ValueError):
+            jev(opener).select(payload)
+        self.assertEqual(opener.requests, [])
+
+    def test_cached_multi_reuse_and_legacy_isolation(self):
+        payload = self._payload()
+        choice = payload["candidates"][1]["candidate_id"]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), None)
+            native = jev(FakeOpener(jev_ok_body(choice=choice)))
+            selector = CachedReviewSelector(native, cache)
+            self.assertEqual(selector.select(payload),
+                             {"candidate_id": choice})
+            self.assertEqual(cache.new_calls, 1)
+            other = CachedReviewSelector(
+                jev(FakeOpener(jev_ok_body(
+                    choice=payload["candidates"][2]["candidate_id"]))),
+                cache)
+            self.assertEqual(other.select(payload),
+                             {"candidate_id": choice})
+            self.assertTrue(other.execution["reused"])
+            self.assertEqual(cache.new_calls, 1)
+            legacy_native = jev(FakeOpener(
+                jev_ok_body(choice="review_sub_sA")))
+            legacy = CachedReviewSelector(legacy_native, cache)
+            legacy.select(selection("student", "end"))
+            self.assertFalse(legacy.execution["reused"])
+            self.assertEqual(cache.new_calls, 2)
 
 
 if __name__ == "__main__":

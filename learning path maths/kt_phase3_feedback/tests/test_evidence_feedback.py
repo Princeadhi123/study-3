@@ -898,5 +898,261 @@ class GeneratorFallbackTests(unittest.TestCase):
             review["trace"]["provider_advantage_demonstrated"])
 
 
+class MultiBundleTests(unittest.TestCase):
+    def evidence(self, wrong=(), bank=None, taxonomy=None):
+        return end_evidence(wrong, bank=bank, taxonomy=taxonomy)
+
+    def test_two_distinct_skills_even_when_most_errors_share_one(self):
+        bank = make_bank()
+        sA_ids = [q["question_id"] for q in bank["questions"]
+                  if q["skill_id"] == "sA"]
+        taxonomy = split_taxonomy(bank, sA_ids[:5])
+        wrong = set(positions(bank, "sA")) | set(positions(bank, "sB"))
+        evidence = self.evidence(wrong, bank=bank, taxonomy=taxonomy)
+        from evidence_feedback_policy import build_review_bundles
+        bundles = build_review_bundles(evidence)
+        self.assertEqual(len(bundles), 2)
+        for bundle in bundles:
+            skills = [c["focus"]["skill_id"]
+                      for c in bundle["review_candidates"]]
+            self.assertEqual(len(set(skills)), len(skills))
+            self.assertIn("sB", skills)
+
+    def test_one_error_skill_yields_exactly_one_bundle(self):
+        from evidence_feedback_policy import build_review_bundles
+        evidence = self.evidence(set(positions(make_bank(), "sA")))
+        bundles = build_review_bundles(evidence)
+        self.assertEqual(len(bundles), 1)
+        originals = bundles[0]["review_candidates"]
+        self.assertEqual(len(originals), 1)
+        self.assertEqual(originals[0]["focus"]["skill_id"], "sA")
+
+    def test_all_correct_optional_consolidation_no_error_focus(self):
+        from evidence_feedback_policy import build_review_bundles
+        evidence = self.evidence()
+        bundles = build_review_bundles(evidence)
+        self.assertEqual(len(bundles), 1)
+        originals = bundles[0]["review_candidates"]
+        self.assertEqual(len(originals), 1)
+        self.assertIsNone(originals[0]["focus"])
+        selector = RecordingSelector()
+        selection = evidence_feedback.select_review_bundle(
+            evidence, selector)
+        self.assertEqual(selector.payloads, [])
+        self.assertEqual(selection["trace"]["selection_source"],
+                         "rules_single_candidate")
+
+    def test_bundle_ids_deterministic_and_mutation_rebuilds(self):
+        from evidence_feedback_policy import build_review_bundles
+        wrong = set(positions(make_bank(), "sA")) | set(
+            positions(make_bank(), "sB"))
+        evidence = self.evidence(wrong)
+        first = build_review_bundles(evidence)
+        self.assertEqual(first, build_review_bundles(evidence))
+        for bundle in first:
+            self.assertTrue(
+                bundle["candidate_id"].startswith("review_bundle_"))
+        mutated = copy.deepcopy(evidence)
+        mutated["subtopics"] = list(reversed(mutated["subtopics"]))
+        rebuilt = build_review_bundles(mutated)
+        self.assertEqual(len(rebuilt), len(first))
+        self.assertEqual(rebuilt, build_review_bundles(mutated))
+
+    def _three_skill_evidence(self):
+        return self.evidence(
+            set(positions(make_bank(), "sA"))
+            | set(positions(make_bank(), "sB"))
+            | set(positions(make_bank(), "sC")))
+
+    def test_selection_payload_multi_schema_and_dispatch(self):
+        evidence = self._three_skill_evidence()
+        payload = evidence_feedback.bundle_selection_payload(evidence)
+        self.assertEqual(set(payload), {"schema", "audience",
+                                        "checkpoint", "evidence",
+                                        "candidates"})
+        self.assertEqual(payload["schema"],
+                         evidence_feedback.MULTI_SELECTION_SCHEMA)
+        self.assertEqual(payload["audience"], "student")
+        self.assertEqual(payload["checkpoint"], "end")
+        normalized = evidence_feedback.validate_selection_payload(
+            copy.deepcopy(payload))
+        self.assertEqual(normalized["schema"],
+                         evidence_feedback.MULTI_SELECTION_SCHEMA)
+        self.assertEqual(normalized["candidates"], payload["candidates"])
+        tampered = copy.deepcopy(payload)
+        tampered["candidates"] = payload["candidates"][:1]
+        with self.assertRaises(ValueError):
+            evidence_feedback.validate_selection_payload(tampered)
+        forged = copy.deepcopy(payload)
+        forged["candidates"][0] = dict(forged["candidates"][0])
+        forged["candidates"][0]["candidate_id"] = "review_bundle_forged"
+        with self.assertRaises(ValueError):
+            evidence_feedback.validate_selection_payload(forged)
+        extra = copy.deepcopy(payload)
+        extra["internal"] = True
+        with self.assertRaises(ValueError):
+            evidence_feedback.validate_selection_payload(extra)
+        legacy = selection_payload(
+            self.evidence(set(positions(make_bank(), "sA"))),
+            "student", "end")
+        self.assertEqual(
+            evidence_feedback.validate_selection_payload(legacy)
+            ["schema"], evidence_feedback.SELECTION_SCHEMA)
+
+    def test_one_jev_call_selects_exactly_one_bundle(self):
+        evidence = self._three_skill_evidence()
+        bundles = evidence_feedback.bundle_selection_payload(
+            evidence)["candidates"]
+        selector = RecordingSelector(
+            {"candidate_id": bundles[1]["candidate_id"]})
+        selection = evidence_feedback.select_review_bundle(
+            evidence, selector)
+        self.assertEqual(len(selector.payloads), 1)
+        self.assertEqual(selector.payloads[0]["schema"],
+                         evidence_feedback.MULTI_SELECTION_SCHEMA)
+        self.assertEqual(selection["bundle"]["candidate_id"],
+                         bundles[1]["candidate_id"])
+        self.assertEqual(selection["trace"]["selection_source"],
+                         "injected_selector")
+        self.assertFalse(
+            selection["trace"]["selection_matches_baseline"])
+
+    def test_selector_failures_fall_back_to_first_bundle(self):
+        evidence = self._three_skill_evidence()
+        baseline = evidence_feedback.bundle_selection_payload(
+            evidence)["candidates"][0]
+        cases = [
+            (RecordingSelector(reply=RuntimeError("down")),
+             "selector_error"),
+            (RecordingSelector({"candidate_id": "review_bundle_forged"}),
+             "invalid_selection"),
+            (RecordingSelector({"candidate_id": 3, "extra": True}),
+             "invalid_selection"),
+            (RecordingSelector(
+                {"candidate_id": baseline["candidate_id"]},
+                mutate=lambda p: p.update(
+                    {"candidates": p["candidates"][:1]})),
+             "mutated_selection_payload"),
+        ]
+        for selector, reason in cases:
+            selection = evidence_feedback.select_review_bundle(
+                evidence, selector)
+            self.assertEqual(selection["bundle"]["candidate_id"],
+                             baseline["candidate_id"])
+            self.assertEqual(
+                selection["trace"]["fallback_reason"], reason)
+            self.assertTrue(selection["trace"]["selector_failed"])
+
+    def test_budget_exhaustion_is_explicit_fallback(self):
+        class Exhausted:
+            execution = None
+
+            def select(self, payload):
+                raise SystemExit(BaseException("budget"))
+        evidence = self._three_skill_evidence()
+        selection = evidence_feedback.select_review_bundle(
+            evidence, Exhausted())
+        self.assertEqual(selection["trace"]["fallback_reason"],
+                         "demo_call_budget_exhausted")
+        self.assertTrue(selection["trace"]["selector_failed"])
+
+    def test_multi_review_result_shape(self):
+        evidence = self.evidence(set(positions(make_bank(), "sA"))
+                                 | set(positions(make_bank(), "sB")))
+        review = evidence_feedback.run_multi_feedback(evidence)
+        bundles = review["candidates"]
+        self.assertEqual(review["selected_candidate_id"],
+                         bundles[0]["candidate_id"])
+        self.assertEqual(review["baseline_candidate_id"],
+                         bundles[0]["candidate_id"])
+        originals = review["selected_candidates"]
+        self.assertEqual(
+            review["selected_candidate_ids"],
+            [c["candidate_id"] for c in originals])
+        self.assertEqual(len(review["feedback_plans"]),
+                         len(originals))
+        self.assertEqual(review["feedback_plan"],
+                         review["feedback_plans"][0])
+        self.assertEqual(
+            review["feedback_plans"][0]["candidate_id"],
+            originals[0]["candidate_id"])
+        trace = review["trace"]
+        self.assertEqual(trace["policy_version"],
+                         evidence_feedback.MULTI_REVIEW_POLICY_VERSION)
+        self.assertEqual(trace["selection_prompt_version"],
+                         evidence_feedback.MULTI_SELECTION_PROMPT_VERSION)
+        self.assertTrue(trace["selection_matches_baseline"])
+        self.assertEqual(
+            {s["kind"] for s in review["message"]["sections"]},
+            {"assessment_summary", "observed_strengths",
+             "review_focus", "next_steps"})
+        focus_text = next(
+            s["text"] for s in review["message"]["sections"]
+            if s["kind"] == "review_focus")
+        self.assertIn("A possible review starting point is",
+                      focus_text)
+
+    def test_selector_failure_skips_generation(self):
+        evidence = self._three_skill_evidence()
+
+        class FullGen:
+            supports_full_feedback = True
+            execution = None
+            calls = 0
+
+            def generate(self, payload):
+                self.calls += 1
+                return {"candidate_id": payload["selected_candidate"]
+                        ["candidate_id"],
+                        "sections": {
+                            "assessment_summary": "Draft.",
+                            "observed_strengths": "Draft.",
+                            "review_focus": "Draft.",
+                            "next_steps": "Draft."}}
+        generator = FullGen()
+        review = evidence_feedback.run_multi_feedback(
+            evidence,
+            selector=RecordingSelector(reply=RuntimeError("down")),
+            generator=generator)
+        self.assertEqual(generator.calls, 0)
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "selector_error")
+
+    def test_generator_success_records_full_phrasing(self):
+        evidence = self.evidence(set(positions(make_bank(), "sA"))
+                                 | set(positions(make_bank(), "sB")))
+
+        class FullGen:
+            supports_full_feedback = True
+            execution = None
+            payloads = []
+
+            def generate(self, payload):
+                self.payloads.append(copy.deepcopy(payload))
+                return {"candidate_id": payload["selected_candidate"]
+                        ["candidate_id"],
+                        "sections": {
+                            "assessment_summary":
+                                "You completed this assessment.",
+                            "observed_strengths":
+                                "Answers were recorded correctly.",
+                            "review_focus":
+                                "One area is offered for review.",
+                            "next_steps":
+                                "Review the worked example."}}
+        generator = FullGen()
+        review = evidence_feedback.run_multi_feedback(
+            evidence, generator=generator,
+            practice_contexts=[{"schema": (
+                "phase3_feedback_practice_context_v1"),
+                "status": "disabled", "selected_question_id": None,
+                "pool_sha256": None}] * 2)
+        self.assertEqual(len(generator.payloads), 1)
+        self.assertEqual(generator.payloads[0]["schema"],
+                         "phase3_multi_topic_feedback_generation_v1")
+        self.assertEqual(review["trace"]["phrasing_source"],
+                         "injected_generator_full_sections")
+
+
 if __name__ == "__main__":
     unittest.main()

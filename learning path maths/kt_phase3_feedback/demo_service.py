@@ -28,20 +28,24 @@ from aitta_generator import AittaGenerator
 from active_payload import active_payload
 from evidence_feedback import (
     build_evidence, build_research_evidence, canonical_digest, run_feedback,
-    validate_evidence)
+    run_multi_feedback, select_review_bundle, validate_evidence)
 from evidence_feedback_policy import (
+    MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
+    MULTI_SELECTION_PROMPT_VERSION,
     POLICY_VERSION, SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
 from evidence_providers import EvidenceJevSelector
 from feedback_practice import (
     FEEDBACK_BUNDLE_VERSION, INTEGRATED_TEMPLATE_VERSION,
-    PRACTICE_STATUS_MESSAGES, empty_context, project_practice_context,
-    resolve_practice, review_example)
+    MULTI_INTEGRATED_TEMPLATE_VERSION, PRACTICE_STATUS_MESSAGES,
+    empty_context, project_practice_context, resolve_practice,
+    review_example, validate_practice_context)
 from feedback_service import assessment_feedback_graph
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
     FULL_FEEDBACK_INSTRUCTIONS, FULL_FEEDBACK_PROMPT_VERSION,
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_TITLES,
-    structured_sections)
+    MULTI_FULL_FEEDBACK_INSTRUCTIONS,
+    MULTI_FULL_FEEDBACK_PROMPT_VERSION, structured_sections)
 from integrated_synthetic_pipeline import CachedReviewSelector
 from jev_selector import _read_env_file
 from live_diagnostics import LiveDiagnostics
@@ -104,7 +108,8 @@ class DemoService:
                  selector=None, generator=None, max_pending_jobs=16,
                  replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE,
                  practice_pool=None, practice_target_band=None,
-                 recommender=None, replay_bank_mode="demo"):
+                 recommender=None, replay_bank_mode="demo",
+                 review_mode="aligned_two_topic"):
         # Validate opt-in shadow wiring before any directory/pool/provider
         # side effects.
         if (practice_pool is None) != (practice_target_band is None):
@@ -125,6 +130,9 @@ class DemoService:
         if (not isinstance(replay_bank_mode, str)
                 or replay_bank_mode not in BANK_LABELS):
             raise ValueError("unknown replay bank mode")
+        if review_mode not in ("aligned_two_topic", "legacy_single"):
+            raise ValueError("unknown review mode")
+        self.review_mode = review_mode
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -313,15 +321,16 @@ class DemoService:
                       == FEEDBACK_BUNDLE_VERSION):
                     job["status"] = "fallback"
                     job["interrupted"] = True
-                    try:
-                        evidence = meta["checkpoints"]["end"].get(
-                            "evidence")
-                        if evidence is not None:
-                            self._terminal_practice(meta, evidence)
-                    except Exception:
-                        meta["checkpoints"]["end"][
-                            "practice_context"] = empty_context(
-                                "unavailable")
+                    if not self._is_multi(meta):
+                        try:
+                            evidence = meta["checkpoints"]["end"].get(
+                                "evidence")
+                            if evidence is not None:
+                                self._terminal_practice(meta, evidence)
+                        except Exception:
+                            meta["checkpoints"]["end"][
+                                "practice_context"] = empty_context(
+                                    "unavailable")
                     self._publish_baselines(meta)
                     changed = True
                 if changed:
@@ -400,7 +409,7 @@ class DemoService:
 
     def _new_meta(self, session_id, token, label=None, simulated=None, bank_mode="demo"):
         context = self._bank_context(bank_mode)
-        return {
+        meta = {
             "session_id": session_id,
             "schema": META_SCHEMA,
             "synthetic": True,
@@ -434,6 +443,10 @@ class DemoService:
             "feedback_release": None,
             "feedback_edit": None,
             "feedback_bundle_version": FEEDBACK_BUNDLE_VERSION}
+        if self.review_mode == "aligned_two_topic":
+            meta["feedback_selection_version"] = (
+                MULTI_REVIEW_POLICY_VERSION)
+        return meta
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
                        bank_mode="demo"):
@@ -523,11 +536,14 @@ class DemoService:
         end = meta["checkpoints"]["end"]
         integrated = (meta.get("feedback_bundle_version")
                       == FEEDBACK_BUNDLE_VERSION)
-        if integrated and end.get("practice_context") is None:
+        multi = self._is_multi(meta)
+        if not multi and integrated and end.get("practice_context") is None:
             return None
         edit = meta.get("feedback_edit")
         if edit is not None:
             return copy.deepcopy(edit["preview"])
+        if multi:
+            return self._multi_preview(meta, session)
         job = meta["provider_job"]
         # A stored student result is safe to show even when the
         # aggregate job fell back because the teacher leg failed.
@@ -575,6 +591,73 @@ class DemoService:
                 example = review_example(selected)
                 if example is not None:
                     preview["review_example"] = example
+        return preview
+
+    def _multi_preview(self, meta, session):
+        end = meta["checkpoints"]["end"]
+        evidence = end.get("evidence")
+        job = meta["provider_job"]
+        review = None
+        if (job["status"] in ("ready", "fallback")
+                and end.get("student_review") is not None):
+            review = end["student_review"]
+        if review is None or evidence is None:
+            return None
+        sections = structured_sections(review)
+        preview = {
+            "template_version": MULTI_INTEGRATED_TEMPLATE_VERSION,
+            "sections": sections,
+            "text": "\n\n".join(s["text"] for s in sections if s["text"]),
+            "total": {"correct": evidence["total"]["correct"],
+                      "out_of": evidence["total"]["out_of"]},
+            "skills": [
+                {"skill_id": row["skill_id"],
+                 "skill_name": row["skill_name"],
+                 "correct": row["correct"],
+                 "out_of": row["out_of"]}
+                for row in evidence["skills"]],
+            "requires_educator_review": True}
+        originals = review.get("selected_candidates") or []
+        examples = []
+        for candidate in originals:
+            example = review_example(candidate)
+            if example is not None:
+                example["for_subtopic_name"] = (
+                    candidate["focus"] or {}).get("subtopic_name")
+                examples.append(example)
+        if examples:
+            preview["review_examples"] = examples
+            preview["review_example"] = examples[0]
+        by_id = {c["candidate_id"]: c for c in originals}
+        activities = []
+        for slot in end.get("practice_contexts") or []:
+            candidate = by_id.get(slot.get("candidate_id"))
+            try:
+                card = resolve_practice(
+                    slot["context"], evidence, candidate=candidate,
+                    aligned=True)["card"]
+            except Exception:
+                card = {
+                    "status": "unavailable",
+                    "message": PRACTICE_STATUS_MESSAGES["unavailable"],
+                    "notice": None, "question": None}
+                focus = (candidate or {}).get("focus") or {}
+                if focus.get("subtopic_name"):
+                    card["topic_label"] = focus["subtopic_name"]
+            activities.append(card)
+        if activities:
+            preview["practice_activities"] = activities
+            preview["practice"] = activities[0]
+        else:
+            try:
+                preview["practice"] = resolve_practice(
+                    end.get("practice_context")
+                    or empty_context("abstained"), evidence)["card"]
+            except Exception:
+                preview["practice"] = {
+                    "status": "unavailable",
+                    "message": PRACTICE_STATUS_MESSAGES["unavailable"],
+                    "notice": None, "question": None}
         return preview
 
     @staticmethod
@@ -702,7 +785,13 @@ class DemoService:
         mode = meta["provider_job"]["provider_mode"]
         integrated = (meta.get("feedback_bundle_version")
                       == FEEDBACK_BUNDLE_VERSION)
+        multi = self._is_multi(meta)
         self._admit_diagnostics(session_id, meta, "end", rows)
+        if multi:
+            end["baseline_student"] = run_multi_feedback(evidence)
+            self._admit_provider_job(session_id, meta, evidence)
+            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            return
         self._admit_recommendation(session_id, meta, rows)
         if integrated and end["recommendation_job"]["status"] == "pending":
             meta["provider_job"] = {
@@ -736,9 +825,18 @@ class DemoService:
                 evidence, audience, "end", practice_context=ctx)
         return ctx
 
+    def _multi_fallback(self, meta, evidence, reason):
+        end = meta["checkpoints"]["end"]
+        contexts = self._multi_terminal(meta, evidence)
+        end["student_review"] = self._multi_baseline_review(
+            meta, evidence, reason,
+            practice_contexts=[c["context"] for c in contexts])
+        end["provider_job"] = copy.deepcopy(meta["provider_job"])
+
     def _admit_provider_job(self, session_id, meta, evidence):
         end = meta["checkpoints"]["end"]
         mode = meta["provider_job"]["provider_mode"]
+        multi = self._is_multi(meta)
         ctx = (end.get("practice_context")
                if meta.get("feedback_bundle_version")
                == FEEDBACK_BUNDLE_VERSION else None)
@@ -748,9 +846,12 @@ class DemoService:
                 "provider_mode": mode,
                 "queued_at": utc_now(), "finished_at": utc_now(),
                 "reason": "service_closing"}
-            for audience in ("student",):
-                end[f"{audience}_review"] = self._baseline_review(
-                    evidence, audience, "service_closing", ctx)
+            if multi:
+                self._multi_fallback(meta, evidence, "service_closing")
+            else:
+                for audience in ("student",):
+                    end[f"{audience}_review"] = self._baseline_review(
+                        evidence, audience, "service_closing", ctx)
             end["provider_job"] = copy.deepcopy(meta["provider_job"])
             return
         if self._pending_provider >= self.max_pending_jobs:
@@ -759,10 +860,14 @@ class DemoService:
                 "provider_mode": mode,
                 "queued_at": utc_now(), "finished_at": utc_now(),
                 "reason": "demo_provider_queue_capacity"}
-            for audience in ("student",):
-                end[f"{audience}_review"] = self._baseline_review(
-                    evidence, audience, "demo_provider_queue_capacity",
-                    ctx)
+            if multi:
+                self._multi_fallback(
+                    meta, evidence, "demo_provider_queue_capacity")
+            else:
+                for audience in ("student",):
+                    end[f"{audience}_review"] = self._baseline_review(
+                        evidence, audience,
+                        "demo_provider_queue_capacity", ctx)
         else:
             self._pending_provider += 1
             meta["provider_job"] = {
@@ -770,7 +875,8 @@ class DemoService:
                 "queued_at": utc_now()}
             try:
                 self.provider_pool.submit(
-                    self._run_provider_job, session_id)
+                    self._run_multi_provider_job if multi
+                    else self._run_provider_job, session_id)
             except RuntimeError:
                 self._pending_provider -= 1
                 meta["provider_job"] = {
@@ -778,9 +884,13 @@ class DemoService:
                     "provider_mode": mode,
                     "queued_at": utc_now(), "finished_at": utc_now(),
                     "reason": "service_closing"}
-                for audience in ("student",):
-                    end[f"{audience}_review"] = self._baseline_review(
-                        evidence, audience, "service_closing", ctx)
+                if multi:
+                    self._multi_fallback(
+                        meta, evidence, "service_closing")
+                else:
+                    for audience in ("student",):
+                        end[f"{audience}_review"] = self._baseline_review(
+                            evidence, audience, "service_closing", ctx)
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
 
     def _admit_diagnostics(self, session_id, meta, checkpoint, rows):
@@ -927,6 +1037,109 @@ class DemoService:
         finally:
             with self.lock:
                 self._pending_diag = max(0, self._pending_diag - 1)
+
+    @staticmethod
+    def _is_multi(meta):
+        return (meta.get("feedback_selection_version")
+                == MULTI_REVIEW_POLICY_VERSION)
+
+    def _multi_baseline_review(self, meta, evidence, reason,
+                             practice_contexts=None):
+        end = meta["checkpoints"]["end"]
+        recorded = end.get("multi_selection") or {}
+        bundle = recorded.get("bundle")
+        trace = recorded.get("trace") or {
+            "selection_source": "rules", "selector_failed": False,
+            "fallback_reason": None, "selection_matches_baseline": None}
+        if bundle is not None:
+            selection = {"bundle": bundle, "trace": trace}
+        else:
+            selection = None
+        try:
+            review = run_multi_feedback(
+                evidence, selection=selection,
+                practice_contexts=practice_contexts)
+        except ValueError:
+            review = run_multi_feedback(
+                evidence, practice_contexts=practice_contexts)
+        review["trace"]["fallback_reason"] = reason
+        return review
+
+    def _multi_contexts(self, context, rows, evidence,
+                        candidates, result):
+        contexts = []
+        result = result or {}
+        slots = {s["skill_id"]: s
+                 for s in result.get("topic_selections") or []
+                 if isinstance(s, dict)}
+        for candidate in candidates:
+            focus = candidate.get("focus")
+            if focus is None:
+                continue
+            sid = focus["skill_id"]
+            slot = slots.get(sid)
+            if self.recommender is None:
+                ctx = empty_context("disabled")
+            elif slot is not None and slot.get("status") == "selected" \
+                    and slot.get("selected_question_id"):
+                view = dict(result)
+                view["status"] = "selected"
+                view["selected_question_id"] = slot[
+                    "selected_question_id"]
+                ctx, reason = project_practice_context(
+                    view, context["bank"], rows, evidence, self.recommender)
+                if ctx["status"] == "selected":
+                    try:
+                        import research_runtime
+                        pool = research_runtime.load_current_practice_pool()
+                        question = next(
+                            q for q in pool["questions"]
+                            if q["question_id"]
+                            == ctx["selected_question_id"])
+                        if question["skill_id"] != sid:
+                            raise ValueError
+                    except Exception:
+                        ctx = empty_context("unavailable")
+            elif slot is not None and slot.get("status") == "abstained":
+                ctx = empty_context("abstained")
+            elif (slot is not None
+                  and slot.get("status") == "unavailable"):
+                ctx = empty_context("unavailable")
+            elif (not result
+                  or result.get("status") in ("unavailable", "pending")):
+                ctx = empty_context("unavailable")
+            else:
+                ctx = empty_context("abstained")
+            contexts.append({"candidate_id": candidate["candidate_id"],
+                             "skill_id": sid, "context": ctx})
+        return contexts
+
+    def _multi_terminal(self, meta, evidence, rows=None):
+        end = meta["checkpoints"]["end"]
+        if end.get("practice_contexts") is not None:
+            return end["practice_contexts"]
+        recorded = end.get("multi_selection") or {}
+        if not recorded.get("bundle"):
+            selection = select_review_bundle(evidence)
+            end["multi_selection"] = {
+                "bundle": copy.deepcopy(selection["bundle"]),
+                "trace": copy.deepcopy(selection["trace"]),
+                "selector_execution":
+                    {"status": "rules_mode_no_providers"}}
+            recorded = end["multi_selection"]
+        if rows is None:
+            rows = self._rows(meta["session_id"])
+        context = self._context_for(meta)
+        candidates = recorded["bundle"].get("review_candidates") or []
+        result = end.get("recommendation")
+        contexts = self._multi_contexts(
+            context, rows, evidence, candidates, result)
+        end["practice_contexts"] = contexts
+        end["practice_context"] = (
+            contexts[0]["context"] if contexts else empty_context(
+                "unavailable" if self.recommender is not None
+                else "disabled"))
+        return contexts
 
     def _baseline_review(self, evidence, audience, reason,
                          practice_context=None):
@@ -1095,6 +1308,288 @@ class DemoService:
                 self._pending_provider = max(
                     0, self._pending_provider - 1)
 
+    def _aligned_recommendation(self, session_id, rows, skill_ids):
+        try:
+            with self.lock:
+                meta = self._load_meta(session_id)
+                context = self._context_for(meta)
+            result = self.recommender.recommend_for_reviews(
+                copy.deepcopy(context["bank"]),
+                copy.deepcopy(context["taxonomy"]), rows,
+                list(skill_ids),
+                research=meta.get("bank_mode", "demo") != "demo")
+            if not isinstance(result, dict):
+                raise ValueError("invalid recommendation result")
+            result["used_for_student_advice"] = False
+            result["used_for_feedback"] = False
+        except Exception:
+            result = {"status": "unavailable", "mode": "shadow_only",
+                      "reason": "future_recommendation_failed",
+                      "used_for_student_advice": False,
+                      "used_for_feedback": False,
+                      "topic_selections": [
+                          {"skill_id": sid, "status": "unavailable",
+                           "reason": "future_recommendation_failed",
+                           "selected_question_id": None,
+                           "baseline_question_id": None}
+                          for sid in skill_ids]}
+        status = result.get("status")
+        if status in ("selected", "abstained"):
+            job = {"status": status, "finished_at": utc_now()}
+        else:
+            job = {"status": "unavailable",
+                   "reason": result.get("reason", "unavailable"),
+                   "finished_at": utc_now()}
+        return result, job
+
+    def _run_multi_provider_job(self, session_id):
+        selector_exec = generator_exec = None
+        try:
+            try:
+                with self.lock:
+                    rows = self._rows(session_id)
+                    meta = self._load_meta(session_id)
+                    mode = meta["provider_job"]["provider_mode"]
+                evidence = self._evidence(meta, rows)
+                if (self.selector is not None
+                        and hasattr(self.selector, "execution")):
+                    self.selector.execution = None
+                selection = select_review_bundle(
+                    evidence, self.selector
+                    if mode == "hosted" else None)
+                if self.selector is not None:
+                    selector_exec = copy.deepcopy(
+                        getattr(self.selector, "execution", None))
+                if selector_exec is None:
+                    selector_exec = (
+                        {"status": "local_single_candidate"}
+                        if selection["trace"]["selection_source"]
+                        == "rules_single_candidate"
+                        else {"status": "rules_mode_no_providers"}
+                        if mode == "rules"
+                        else {"status": "no_execution_record"})
+            except Exception:
+                selection = selector_exec = None
+            if selection is None:
+                try:
+                    with self.lock:
+                        meta = self._load_meta(session_id)
+                        evidence = (meta["checkpoints"]["end"].get("evidence")
+                                    or self._evidence(meta, rows))
+                    selection = select_review_bundle(evidence)
+                    selection["trace"]["fallback_reason"] = (
+                        selection["trace"]["fallback_reason"]
+                        or "provider_error")
+                except Exception:
+                    selection = None
+            with self.lock:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return
+                end = meta["checkpoints"]["end"]
+                if selection is not None:
+                    end["multi_selection"] = {
+                        "bundle": copy.deepcopy(selection["bundle"]),
+                        "trace": copy.deepcopy(selection["trace"]),
+                        "selector_execution": selector_exec}
+                    meta["provider_job"]["status"] = (
+                        "waiting_for_practice")
+                    self._save_meta(meta)
+            if selection is not None:
+                originals = selection["bundle"]["review_candidates"]
+                skill_ids = [c["focus"]["skill_id"] for c in originals
+                             if c.get("focus")]
+                if self.recommender is None:
+                    rec_result = {
+                        "status": "disabled", "mode": "shadow_only",
+                        "reason": "shadow_practice_not_configured",
+                        "used_for_student_advice": False,
+                        "used_for_feedback": False}
+                    rec_job = {"status": "disabled",
+                               "reason": "shadow_practice_not_configured",
+                               "finished_at": utc_now()}
+                elif not skill_ids:
+                    rec_result = {
+                        "status": "abstained", "mode": "shadow_only",
+                        "reason": "no_selected_review_skills",
+                        "used_for_student_advice": False,
+                        "used_for_feedback": False,
+                        "topic_selections": []}
+                    rec_job = {"status": "abstained",
+                               "finished_at": utc_now()}
+                else:
+                    with self.lock:
+                        if self._pending_diag >= self.max_pending_jobs:
+                            rec_result = {
+                                "status": "unavailable",
+                                "mode": "shadow_only",
+                                "reason": "demo_diagnostics_queue_capacity",
+                                "used_for_student_advice": False,
+                                "used_for_feedback": False}
+                            rec_job = {
+                                "status": "unavailable",
+                                "reason": "demo_diagnostics_queue_capacity",
+                                "finished_at": utc_now()}
+                        else:
+                            rec_result = rec_job = None
+                            self._pending_diag += 1
+                            end["recommendation_job"] = {
+                                "status": "pending",
+                                "queued_at": utc_now()}
+                            self._save_meta(meta)
+                    if rec_result is None:
+                        try:
+                            future = self.diag_pool.submit(
+                                self._aligned_recommendation,
+                                session_id, copy.deepcopy(rows),
+                                list(skill_ids))
+                            rec_result, rec_job = future.result()
+                        finally:
+                            with self.lock:
+                                self._pending_diag = max(
+                                    0, self._pending_diag - 1)
+                with self.lock:
+                    meta = self._load_meta(session_id)
+                    end = meta["checkpoints"]["end"]
+                    end["recommendation"] = rec_result
+                    end["recommendation_job"] = rec_job
+                    context = self._context_for(meta)
+                    contexts = self._multi_contexts(
+                        context, rows, evidence, originals, rec_result)
+                    end["practice_contexts"] = contexts
+                    end["practice_context"] = (
+                        contexts[0]["context"] if contexts
+                        else empty_context(
+                            "abstained"
+                            if self.recommender is not None
+                            else "disabled"))
+                    meta["provider_job"]["status"] = "pending"
+                    self._save_meta(meta)
+                if (self.generator is not None
+                        and hasattr(self.generator, "execution")):
+                    self.generator.execution = None
+                try:
+                    review = run_multi_feedback(
+                        evidence, selection=selection,
+                        generator=(
+                            self.generator
+                            if (mode == "hosted"
+                                and not selection["trace"]
+                                ["selector_failed"])
+                            else None),
+                        practice_contexts=[
+                            c["context"] for c in contexts])
+                except (Exception, SystemExit):
+                    review = run_multi_feedback(
+                        evidence, selection=selection,
+                        practice_contexts=[
+                            c["context"] for c in contexts])
+                    review["trace"]["fallback_reason"] = "provider_error"
+                generator_exec = (
+                    copy.deepcopy(getattr(self.generator, "execution", None))
+                    if self.generator is not None else None)
+                if generator_exec is None:
+                    generator_exec = (
+                        {"status": "skipped_selector_failure"}
+                        if selection["trace"]["selector_failed"]
+                        else {"status": "rules_mode_no_providers"}
+                        if mode == "rules"
+                        else {"status": "no_execution_record"})
+                job_status = ("fallback"
+                              if review["trace"]["fallback_reason"]
+                              else "ready")
+            with self.lock:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return
+                end = meta["checkpoints"]["end"]
+                if selection is None:
+                    try:
+                        self._multi_fallback(meta, end.get("evidence"),
+                                             "provider_error")
+                    except Exception:
+                        pass
+                    meta["provider_job"].update(
+                        {"status": "fallback", "finished_at": utc_now(),
+                         "executions": {"student": {
+                             "selector": {"status": "worker_error"},
+                             "generator": {"status": "worker_error"}}}})
+                else:
+                    end["student_review"] = review
+                    meta["provider_job"].update({
+                        "status": job_status,
+                        "finished_at": utc_now(),
+                        "executions": {"student": {
+                            "selector": selector_exec,
+                            "generator": generator_exec}},
+                        "prompt_versions": {
+                            "selection": MULTI_SELECTION_PROMPT_VERSION,
+                            "generation": (
+                                MULTI_FULL_FEEDBACK_PROMPT_VERSION
+                                if getattr(self.generator,
+                                           "supports_full_feedback", False)
+                                else PROMPT_VERSION)}})
+                end["provider_job"] = copy.deepcopy(meta["provider_job"])
+                self._save_meta(meta)
+        except Exception:
+            self._multi_worker_failure(
+                session_id, selector_exec, generator_exec)
+        finally:
+            with self.lock:
+                self._pending_provider = max(
+                    0, self._pending_provider - 1)
+
+    def _multi_worker_failure(self, session_id, selector_exec=None,
+                              generator_exec=None):
+        with self.lock:
+            try:
+                meta = self._load_meta(session_id)
+            except FileNotFoundError:
+                return
+            end = meta["checkpoints"]["end"]
+            if meta["provider_job"].get("status") not in (
+                    "pending", "waiting_for_practice"):
+                return
+            try:
+                evidence = (end.get("evidence")
+                            or self._evidence(
+                                meta, self._rows(session_id)))
+                rec_job = end.get("recommendation_job") or {}
+                if (rec_job.get("status") in (None, "pending")
+                        or not end.get("recommendation")):
+                    if self.recommender is not None:
+                        end["recommendation"] = {
+                            "status": "unavailable",
+                            "mode": "shadow_only",
+                            "reason": "provider_error",
+                            "used_for_student_advice": False,
+                            "used_for_feedback": False}
+                        end["recommendation_job"] = {
+                            "status": "unavailable",
+                            "reason": "provider_error",
+                            "finished_at": utc_now()}
+                self._multi_fallback(meta, evidence, "provider_error")
+            except Exception:
+                pass
+            executions = ((meta["provider_job"].get("executions")
+                           or {}).get("student") or {})
+            recorded = (end.get("multi_selection") or {}).get(
+                "selector_execution")
+            meta["provider_job"].update({
+                "status": "fallback", "finished_at": utc_now(),
+                "executions": {"student": {
+                    "selector": (executions.get("selector")
+                                 or selector_exec or recorded
+                                 or {"status": "worker_error"}),
+                    "generator": (executions.get("generator")
+                                  or generator_exec
+                                  or {"status":
+                                      "skipped_after_worker_error"})}}})
+            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            self._save_meta(meta)
+
     def _publish_baselines(self, meta):
         """Ensure restart-interrupted jobs keep usable baselines."""
         end = meta["checkpoints"]["end"]
@@ -1108,6 +1603,16 @@ class DemoService:
             evidence = self._evidence(meta, rows)
             if end.get("evidence") is None:
                 end["evidence"] = evidence
+            if self._is_multi(meta):
+                contexts = self._multi_terminal(meta, evidence, rows)
+                if end.get("baseline_student") is None:
+                    end["baseline_student"] = run_multi_feedback(evidence)
+                if end.get("student_review") is None:
+                    end["student_review"] = self._multi_baseline_review(
+                        meta, evidence, "interrupted_by_restart",
+                        practice_contexts=[
+                            c["context"] for c in contexts])
+                return
             ctx = (end.get("practice_context")
                    if meta.get("feedback_bundle_version")
                    == FEEDBACK_BUNDLE_VERSION else None)
@@ -1136,11 +1641,17 @@ class DemoService:
             "bank_sha256": review["sanitized_evidence"]["bank_sha256"]})
 
     def teacher_config(self):
+        multi = self.review_mode == "aligned_two_topic"
         return active_payload({
             "synthetic": True,
             "available_banks": self.available_banks(),
             "simulation_profiles": [{"id": name, **case_display(name)} for name in SIMULATION_PROFILES],
             "provider_mode": self.provider_mode,
+            "review_mode": self.review_mode,
+            "review_topic_limit": 2 if multi else 1,
+            "practice_question_limit": 2 if multi else 1,
+            "practice_alignment": (
+                "selected_review_skills" if multi else None),
             "call_budget": {"limit": self.call_budget,
                             "used": self.cache.new_calls
                             if self.cache is not None else 0},
@@ -1152,9 +1663,17 @@ class DemoService:
             "bank_sha256": bank_fingerprint(self.bank),
             "taxonomy_sha256": canonical_digest(self.taxonomy),
             "policy_version": POLICY_VERSION,
-            "selection_instructions": SELECTION_INSTRUCTIONS,
-            "generation_instructions": FULL_FEEDBACK_INSTRUCTIONS,
-            "generation_prompt_version": FULL_FEEDBACK_PROMPT_VERSION,
+            "review_selection_policy_version": (
+                MULTI_REVIEW_POLICY_VERSION if multi else POLICY_VERSION),
+            "selection_instructions": (
+                MULTI_SELECTION_INSTRUCTIONS if multi
+                else SELECTION_INSTRUCTIONS),
+            "generation_instructions": (
+                MULTI_FULL_FEEDBACK_INSTRUCTIONS if multi
+                else FULL_FEEDBACK_INSTRUCTIONS),
+            "generation_prompt_version": (
+                MULTI_FULL_FEEDBACK_PROMPT_VERSION if multi
+                else FULL_FEEDBACK_PROMPT_VERSION),
             "questions": copy.deepcopy(self.bank["questions"]),
             "skill_names": copy.deepcopy(self.bank["skill_names"]),
             "taxonomy": copy.deepcopy(self.taxonomy),
@@ -1277,7 +1796,12 @@ class DemoService:
                 "bank_sha256": meta["bank_sha256"],
                 "taxonomy_sha256": meta["taxonomy_sha256"],
                 "policy_version": meta["policy_version"],
-                "selection_prompt_version": SELECTION_PROMPT_VERSION,
+                "review_selection_policy_version": (
+                    MULTI_REVIEW_POLICY_VERSION
+                    if self._is_multi(meta) else POLICY_VERSION),
+                "selection_prompt_version": (
+                    MULTI_SELECTION_PROMPT_VERSION
+                    if self._is_multi(meta) else SELECTION_PROMPT_VERSION),
                 "generation_prompt_version": PROMPT_VERSION}
             review_trace = ((end.get("student_review") or {}).get("trace")
                             or {})
@@ -1294,6 +1818,8 @@ class DemoService:
                 "status": self._delivery_status(session, meta),
                 "integrated": (meta.get("feedback_bundle_version")
                                == FEEDBACK_BUNDLE_VERSION),
+                "review_mode": ("aligned_two_topic" if self._is_multi(meta)
+                                else "legacy_single"),
                 "practice_status": None,
                 "practice_status_message": None,
                 "preview": preview,

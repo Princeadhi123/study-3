@@ -156,19 +156,24 @@ class ScenarioReplayTests(unittest.TestCase):
                      dict(self.request(), allow_provider_calls="false")):
             with self.assertRaises(ValueError):
                 self.service.replays.start(body)
+        bad_sha = dict(self.request(), report_sha256="0" * 64)
         with self.assertRaises(ResearchConflict):
-            self.service.replays.start(dict(self.request(), report_sha256="0" * 64))
+            self.service.replays.start(bad_sha)
         self.source_path.write_text("{}", encoding="utf-8")
+        empty_source = self.request()
         with self.assertRaises(ValueError):
-            self.service.replays.start(self.request())
+            self.service.replays.start(empty_source)
         self.assertEqual(self.service.replays.list()["runs"], [])
 
     def test_hosted_requires_configuration_and_explicit_consent(self):
+        unconfigured = self.request(mode="hosted")
         with self.assertRaises(ValueError):
-            self.service.replays.start(self.request(mode="hosted"))
+            self.service.replays.start(unconfigured)
         self.service.provider_mode = "hosted"
+        no_consent = dict(self.request(mode="hosted"),
+                          allow_provider_calls=False)
         with self.assertRaises(ValueError):
-            self.service.replays.start(dict(self.request(mode="hosted"), allow_provider_calls=False))
+            self.service.replays.start(no_consent)
         with patch.object(self.service, "_audience_result", wraps=self.service._audience_result) as call:
             final = self.wait(self.service.replays.start(self.request())["id"])
         self.assertEqual(final["status"], "complete")
@@ -211,7 +216,15 @@ class ScenarioReplayTests(unittest.TestCase):
         gate = threading.Event()
         self.addCleanup(gate.set)
         recommender = BoundRecommender(self.bank, pool, gate=gate)
+        self.service.close(wait=True)
+        self.service = DemoService(
+            root=self.root / "runtime", bank=self.bank,
+            taxonomy=self.taxonomy, diagnostics=fake_diagnostics(self.bank),
+            replay_report=self.report_path, replay_source=self.source_path,
+            review_mode="legacy_single")
+        self.addCleanup(self.service.close, wait=True)
         self.service.recommender = recommender
+        self.library = self.service.research.library()
         scenario_id = self.library["scenarios"][1]["id"]
         with patch.object(
                 feedback_practice, "load_current_practice_pool",

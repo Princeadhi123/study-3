@@ -38,6 +38,30 @@ SELECTION_INSTRUCTIONS = (
     "Return only the permitted candidate choice."
 )
 
+MULTI_REVIEW_POLICY_VERSION = "observed_distinct_skill_review_v1"
+MULTI_SELECTION_SCHEMA = "phase3_review_bundle_selection_v1"
+MULTI_SELECTION_PROMPT_VERSION = "jev_distinct_skill_review_bundles_v1"
+MULTI_SELECTION_INSTRUCTIONS = (
+    "Choose one permitted review bundle for a synthetic mathematics "
+    "assessment. Each bundle contains up to two supplied review candidates "
+    "from different assessed broad skills. When errors were observed in "
+    "two or more skills, each permitted bundle contains exactly two "
+    "different skills; when only one skill has errors, it contains one "
+    "candidate. An all-correct record permits optional consolidation only "
+    "and has no error-based review focus. Return only the supplied bundle "
+    "choice. Use the observed evidence to choose manageable review starting "
+    "points, not diagnoses. Do not add a candidate, change the bundle, "
+    "choose two subtopics within one skill, or infer mastery, misconceptions, "
+    "prerequisites, learning gains, fatigue, or causes of errors. Respect "
+    "each candidate's isolated-error, assessed-coverage and tie limitations. "
+    "Priority groups are presentation heuristics, not validated educational "
+    "need. Do not describe tied content as uniquely weakest. KT estimates "
+    "are not supplied and must not be inferred. Practice will be considered "
+    "separately for the selected skills after selection; do not select or "
+    "invent practice questions or claim an optimal learning path. All "
+    "content is a draft requiring teacher review."
+)
+
 SCOPE = (
     "These results describe answers on this assessment, not overall mastery. "
     "The suggested review step is a draft, not a diagnosis."
@@ -234,6 +258,32 @@ def build_candidates(evidence, checkpoint):
                     if candidate_priority(other) == candidate_priority(row)],
             }})
     return candidates
+
+
+def build_review_bundles(evidence):
+    from itertools import combinations
+    from evidence_feedback import canonical_digest
+    candidates = build_candidates(evidence, "end")
+    errors = [c for c in candidates if c["focus"] is not None]
+    skills = {c["focus"]["skill_id"] for c in errors}
+    if len(skills) >= 2:
+        groups = [list(pair) for pair in combinations(errors, 2)
+                  if pair[0]["focus"]["skill_id"]
+                  != pair[1]["focus"]["skill_id"]]
+    else:
+        groups = [[c] for c in candidates]
+    bundles = []
+    for group in groups:
+        ids = [c["candidate_id"] for c in group]
+        bundles.append({
+            "candidate_id": "review_bundle_" + canonical_digest(ids)[:24],
+            "strategy": "distinct_skill_review",
+            "review_status": REVIEW_STATUS,
+            "focus": None, "planning": None,
+            "action": "\n\n".join(c["action"] for c in group
+                                   if c["action"] is not None),
+            "review_candidates": group})
+    return bundles
 
 
 def build_feedback_plan(candidate):

@@ -1,6 +1,9 @@
 PRACTICE_CONTEXT_SCHEMA = "phase3_feedback_practice_context_v1"
 FEEDBACK_BUNDLE_VERSION = "phase3_feedback_practice_bundle_v1"
 INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v3"
+MULTI_INTEGRATED_TEMPLATE_VERSION = "phase3_student_feedback_template_v4"
+PRACTICE_ALIGNED_INSTRUCTION = (
+    "Choose an option and explain your reasoning.")
 PRACTICE_CONTEXT_KEYS = {
     "schema", "status", "selected_question_id", "pool_sha256"}
 PRACTICE_TERMINAL_STATUSES = {
@@ -27,6 +30,9 @@ PRACTICE_RELATIONSHIP_MESSAGES = {
         "This is separate practice on {concept_name}, another area where "
         "this assessment recorded incorrect answers. It does not practise "
         "the review focus, {subtopic_name}.",
+    "same_topic_different_content":
+        "This practice activity is in the same broad topic as the review "
+        "focus, but covers {concept_name} rather than {subtopic_name}.",
     "no_review_focus":
         "This practice activity is separate from the review suggestion.",
 }
@@ -270,10 +276,13 @@ def project_practice_context(result, bank, rows, evidence, recommender):
                 "practice_context_validation_failed")
 
 
-def resolve_practice(context, evidence, candidate=None):
+def resolve_practice(context, evidence, candidate=None, aligned=False):
     status = context["status"]
     card = {"status": status, "message": PRACTICE_STATUS_MESSAGES[status],
             "notice": PRACTICE_SELECTION_NOTICE, "question": None}
+    focus = (candidate or {}).get("focus") or {}
+    if aligned and focus.get("subtopic_name"):
+        card["topic_label"] = focus["subtopic_name"]
     if status != "selected":
         return {"card": card, "selection": None}
     validate_practice_context(context, evidence)
@@ -287,6 +296,8 @@ def resolve_practice(context, evidence, candidate=None):
                         "concept_name": row["concept_label"],
                         "text": question["text"],
                         "options": copy.deepcopy(question["options"])}
+    if aligned:
+        card["instruction"] = PRACTICE_ALIGNED_INSTRUCTION
     if candidate is not None:
         focus = candidate.get("focus")
         if focus is None:
@@ -299,6 +310,13 @@ def resolve_practice(context, evidence, candidate=None):
             card["relationship"] = {
                 "kind": "same_content",
                 "message": PRACTICE_RELATIONSHIP_MESSAGES["same_content"]}
+        elif aligned and focus.get("skill_id") == question["skill_id"]:
+            card["relationship"] = {
+                "kind": "same_topic_different_content",
+                "message": PRACTICE_RELATIONSHIP_MESSAGES[
+                    "same_topic_different_content"].format(
+                        concept_name=row["concept_label"],
+                        subtopic_name=focus.get("subtopic_name"))}
         else:
             card["relationship"] = {
                 "kind": "different_content",

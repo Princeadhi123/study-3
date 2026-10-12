@@ -20,7 +20,8 @@ from evidence_feedback import (
     canonical_digest, run_feedback, selection_payload, validate_evidence,
     validate_selection_payload)
 from evidence_feedback_policy import (
-    POLICY_VERSION, PRIORITY_DESCRIPTION, REPORT_SCHEMA, REVIEW_STATUS,
+    MULTI_SELECTION_INSTRUCTIONS, MULTI_SELECTION_SCHEMA, POLICY_VERSION,
+    PRIORITY_DESCRIPTION, REPORT_SCHEMA, REVIEW_STATUS,
     SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION, SELECTION_SCHEMA)
 from evidence_providers import (
     EvidenceJevSelector, _validated_opening_payload)
@@ -192,15 +193,18 @@ def prepare_snapshot(source, evidence_inputs, bank, taxonomy, names=None):
 def jev_request(payload):
     normalized = validate_selection_payload(payload)
     candidates = normalized["candidates"]
+    instructions = (MULTI_SELECTION_INSTRUCTIONS
+                    if normalized["schema"] == MULTI_SELECTION_SCHEMA
+                    else SELECTION_INSTRUCTIONS)
     return {
         "endpoint": ENDPOINT, "body": {
             "model": MODEL,
             "state": {key: normalized[key] for key in
                       ("audience", "checkpoint", "evidence", "candidates")},
             "questions": {QUESTION_ID: {
-                "type": "choice", "instructions": SELECTION_INSTRUCTIONS,
+                "type": "choice", "instructions": instructions,
                 "criteria": {
-                    c["candidate_id"]: c["action"] if c["action"] is not None
+                    c["candidate_id"]: c["action"] if c["action"]
                     else c["strategy"] for c in candidates}}}}}
 
 

@@ -53,6 +53,10 @@ SESSION_RE = re.compile(
 TEACHER_SESSION_RE = re.compile(
     r"\A/api/teacher/sessions/(?P<sid>[a-f0-9]{32})"
     r"(?:/(?P<action>export|reviews|release|feedback-edits))?\Z")
+REPLAY_ROOT = "/api/teacher/replays"
+SCENARIO_ROOT = "/api/teacher/scenarios"
+COMPARISON_ROOT = "/api/teacher/comparisons"
+ROUTE_NOT_FOUND = "route not found"
 
 
 def _host_ok(host_header, port):
@@ -116,25 +120,9 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         self._posted_body = None
         self._body_buffered = False
         try:
-            if not _host_ok(self.headers.get("Host"), self.server_port):
-                self._drain_body()
-                return self._error(400, "invalid_host")
-            if method == "POST":
-                if self.headers.get("Origin") is not None and not \
-                        _origin_ok(self.headers.get("Origin"),
-                                   self.server_port):
-                    self._drain_body()
-                    return self._error(403, "cross_origin_rejected")
-                ctype = self.headers.get("Content-Type", "")
-                if self.path.startswith("/api/") and not \
-                        ctype.startswith("application/json"):
-                    self._drain_body()
-                    return self._error(400, "content_type_required")
-                # Buffer the declared body up front: a later auth or
-                # validation rejection then never leaves unread bytes
-                # on the socket, which Windows would close with RST.
-                self._posted_body = self._read_body()
-                self._body_buffered = True
+            prepared = self._prepare_request(method)
+            if prepared is not None:
+                return prepared
             status, payload, extra = self._route(method)
         except FileNotFoundError:
             status, payload, extra = 404, {"error": "not_found"}, {}
@@ -142,7 +130,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             status, payload, extra = 403, {"error": "forbidden"}, {}
         except ResearchConflict as exc:
             status, payload, extra = 409, {"error": "comparison_conflict"}, {}
-            if self.path.startswith("/api/teacher/replays"):
+            if self.path.startswith(REPLAY_ROOT):
                 payload = {"error": "replay_conflict", "reason": str(exc)}
         except ConflictError as exc:
             status, payload, extra = 409, {
@@ -153,6 +141,28 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             status, payload, extra = 500, {"error": "server_error"}, {}
         self._send_json(status, payload, extra)
+
+    def _prepare_request(self, method):
+        if not _host_ok(self.headers.get("Host"), self.server_port):
+            self._drain_body()
+            return self._error(400, "invalid_host")
+        if method == "POST":
+            if self.headers.get("Origin") is not None and not \
+                    _origin_ok(self.headers.get("Origin"),
+                               self.server_port):
+                self._drain_body()
+                return self._error(403, "cross_origin_rejected")
+            ctype = self.headers.get("Content-Type", "")
+            if self.path.startswith("/api/") and not \
+                    ctype.startswith("application/json"):
+                self._drain_body()
+                return self._error(400, "content_type_required")
+            # Buffer the declared body up front: a later auth or
+            # validation rejection then never leaves unread bytes
+            # on the socket, which Windows would close with RST.
+            self._posted_body = self._read_body()
+            self._body_buffered = True
+        return None
 
     def _route(self, method):
         path = urlparse(self.path).path
@@ -166,126 +176,156 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
         if path in STATIC_FILES and method == "GET":
             return self._static(STATIC_FILES[path])
 
-        if method == "POST" and path == "/api/sessions":
-            body = self._json_body()
-            if (set(body) - {"synthetic", "bank_mode"}
-                    or body.get("synthetic") is not True):
-                raise ValueError("session creation requires attestation")
-            return 201, self.service.create_session(bank_mode=body.get("bank_mode", "demo")), {}
-
-        if method == "GET" and path == "/api/banks":
-            return 200, {"banks": self.service.available_banks()}, {}
-
-        if method == "POST" and path == "/api/teacher/unlock":
-            return self._unlock()
-
-        if method == "POST" and path == "/api/teacher/logout":
-            self._drain_body()
-            self._drop_teacher_cookie()
-            return 200, {"unlocked": False}, {
-                "Set-Cookie": self._cookie("", expires="Thu, 01 Jan 1970 00:00:00 GMT")}
+        endpoint = {
+            ("POST", "/api/sessions"): self._create_session,
+            ("GET", "/api/banks"): self._available_banks,
+            ("POST", "/api/teacher/unlock"): self._unlock,
+            ("POST", "/api/teacher/logout"): self._logout,
+            ("POST", "/api/teacher/simulations"): self._simulate,
+            ("GET", "/api/teacher/config"): self._teacher_config,
+            ("GET", "/api/teacher/sessions"): self._list_sessions,
+        }.get((method, path))
+        if endpoint is not None:
+            return endpoint()
 
         match = SESSION_RE.fullmatch(path)
         if match:
-            sid = match.group("sid")
-            token = self.headers.get("X-Demo-Session-Token", "")
-            if method == "GET" and match.group("action") is None:
-                return 200, self.service.snapshot(sid, token), {}
-            if method == "POST" and match.group("action") == "responses":
-                body = self._json_body()
-                return 200, self.service.submit_student_response(
-                    sid, token, body), {}
-            raise FileNotFoundError("route not found")
+            return self._student_session_route(method, match)
 
-        if path == "/api/teacher/simulations" and method == "POST":
-            self._require_teacher()
-            body = self._json_body()
-            if (set(body) - {"profile", "seed", "bank_mode"}
-                    or not {"profile", "seed"} <= set(body)):
-                raise ValueError("simulation requires profile and seed")
-            return 201, self.service.simulate(
-                body["profile"], body["seed"], bank_mode=body.get("bank_mode", "demo")), {}
+        if path.startswith(REPLAY_ROOT):
+            return self._replay_route(method, path)
 
-        if path == "/api/teacher/config" and method == "GET":
-            self._require_teacher()
-            return 200, self.service.teacher_config(), {}
-
-        if path == "/api/teacher/sessions" and method == "GET":
-            self._require_teacher()
-            return 200, {"sessions": self.service.list_sessions()}, {}
-
-        if path.startswith("/api/teacher/replays"):
-            self._require_teacher()
-            if path == "/api/teacher/replays":
-                if method == "GET":
-                    return 200, self.service.replays.list(), {}
-                return 202, self.service.replays.start(self._json_body()), {}
-            result = re.fullmatch(r"/api/teacher/replays/([a-f0-9]{32})/cases/([a-f0-9]{32})(/export)?", path)
-            if result and method == "GET":
-                extra = {"Content-Disposition": f'attachment; filename="replay_case_{result[2]}.json"'} if result[3] else {}
-                return 200, self.service.replays.result(result[1], result[2]), extra
-            replay = re.fullmatch(r"/api/teacher/replays/([a-f0-9]{32})(?:/(cancel|export))?", path)
-            if replay:
-                rid, action = replay.groups()
-                if method == "POST" and action == "cancel":
-                    if self._json_body() != {}:
-                        raise ValueError("cancel expects an empty object")
-                    return 200, self.service.replays.cancel(rid), {}
-                if method == "GET" and action in (None, "export"):
-                    extra = {"Content-Disposition": f'attachment; filename="replay_{rid}.json"'} if action else {}
-                    return 200, self.service.replays.get(rid), extra
-            raise FileNotFoundError("route not found")
-
-        if path.startswith(("/api/teacher/scenarios", "/api/teacher/comparisons")):
-            self._require_teacher()
-            research = self.service.research
-            if path == "/api/teacher/scenarios" and method == "GET":
-                return 200, research.library(), {}
-            case = re.fullmatch(r"/api/teacher/scenarios/([a-f0-9]{32})(/export)?", path)
-            if case and method == "GET":
-                extra = {"Content-Disposition": f'attachment; filename="scenario_{case[1]}.json"'} if case[2] else {}
-                return 200, self.service.scenario_detail(case[1]), extra
-            if path == "/api/teacher/comparisons":
-                if method == "GET":
-                    return 200, research.comparisons(), {}
-                return 201, research.create_comparison(self._json_body()), {}
-            comparison = re.fullmatch(
-                r"/api/teacher/comparisons/([a-f0-9]{32})(?:/(reviews|export))?", path)
-            if comparison:
-                cid, action = comparison.groups()
-                if method == "GET" and action is None:
-                    return 200, research.comparison(cid), {}
-                if method == "POST" and action == "reviews":
-                    return 201, research.add_judgment(cid, self._json_body()), {}
-                if method == "GET" and action == "export":
-                    return 200, research.export_comparison(cid), {
-                        "Content-Disposition": f'attachment; filename="comparison_{cid}.json"'}
-            raise FileNotFoundError("route not found")
+        if path.startswith((SCENARIO_ROOT, COMPARISON_ROOT)):
+            return self._research_route(method, path)
 
         match = TEACHER_SESSION_RE.fullmatch(path)
         if match:
-            self._require_teacher()
-            sid = match.group("sid")
-            action = match.group("action")
-            if method == "GET" and action is None:
-                return 200, self.service.teacher_session(sid), {}
-            if method == "GET" and action == "export":
-                payload = self.service.teacher_session(sid)
-                return 200, payload, {
-                    "Content-Disposition":
-                        f'attachment; filename="demo_{sid}.json"'}
-            if method == "POST" and action == "reviews":
-                return 201, self.service.add_review(
-                    sid, self._json_body()), {}
-            if method == "POST" and action == "release":
-                return 200, self.service.release_feedback(
-                    sid, self._json_body()), {}
-            if method == "POST" and action == "feedback-edits":
-                return 200, self.service.save_feedback_edit(
-                    sid, self._json_body()), {}
-            raise FileNotFoundError("route not found")
+            return self._teacher_session_route(method, match)
 
-        raise FileNotFoundError("route not found")
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _create_session(self):
+        body = self._json_body()
+        if (set(body) - {"synthetic", "bank_mode"}
+                or body.get("synthetic") is not True):
+            raise ValueError("session creation requires attestation")
+        return 201, self.service.create_session(bank_mode=body.get("bank_mode", "demo")), {}
+
+    def _available_banks(self):
+        return 200, {"banks": self.service.available_banks()}, {}
+
+    def _logout(self):
+        self._drain_body()
+        self._drop_teacher_cookie()
+        return 200, {"unlocked": False}, {
+            "Set-Cookie": self._cookie("", expires="Thu, 01 Jan 1970 00:00:00 GMT")}
+
+    def _simulate(self):
+        self._require_teacher()
+        body = self._json_body()
+        if (set(body) - {"profile", "seed", "bank_mode"}
+                or not {"profile", "seed"} <= set(body)):
+            raise ValueError("simulation requires profile and seed")
+        return 201, self.service.simulate(
+            body["profile"], body["seed"], bank_mode=body.get("bank_mode", "demo")), {}
+
+    def _teacher_config(self):
+        self._require_teacher()
+        return 200, self.service.teacher_config(), {}
+
+    def _list_sessions(self):
+        self._require_teacher()
+        return 200, {"sessions": self.service.list_sessions()}, {}
+
+    def _student_session_route(self, method, match):
+        sid = match.group("sid")
+        token = self.headers.get("X-Demo-Session-Token", "")
+        if method == "GET" and match.group("action") is None:
+            return 200, self.service.snapshot(sid, token), {}
+        if method == "POST" and match.group("action") == "responses":
+            body = self._json_body()
+            return 200, self.service.submit_student_response(
+                sid, token, body), {}
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _replay_route(self, method, path):
+        self._require_teacher()
+        if path == REPLAY_ROOT:
+            if method == "GET":
+                return 200, self.service.replays.list(), {}
+            return 202, self.service.replays.start(self._json_body()), {}
+        result = re.fullmatch(REPLAY_ROOT + r"/([a-f0-9]{32})/cases/([a-f0-9]{32})(/export)?", path)
+        if result and method == "GET":
+            extra = {"Content-Disposition": f'attachment; filename="replay_case_{result[2]}.json"'} if result[3] else {}
+            return 200, self.service.replays.result(result[1], result[2]), extra
+        replay = re.fullmatch(REPLAY_ROOT + r"/([a-f0-9]{32})(?:/(cancel|export))?", path)
+        if replay:
+            return self._replay_instance_route(method, replay)
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _replay_instance_route(self, method, replay):
+        rid, action = replay.groups()
+        if method == "POST" and action == "cancel":
+            if self._json_body() != {}:
+                raise ValueError("cancel expects an empty object")
+            return 200, self.service.replays.cancel(rid), {}
+        if method == "GET" and action in (None, "export"):
+            extra = {"Content-Disposition": f'attachment; filename="replay_{rid}.json"'} if action else {}
+            return 200, self.service.replays.get(rid), extra
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _research_route(self, method, path):
+        self._require_teacher()
+        research = self.service.research
+        if path == SCENARIO_ROOT and method == "GET":
+            return 200, research.library(), {}
+        case = re.fullmatch(SCENARIO_ROOT + r"/([a-f0-9]{32})(/export)?", path)
+        if case and method == "GET":
+            extra = {"Content-Disposition": f'attachment; filename="scenario_{case[1]}.json"'} if case[2] else {}
+            return 200, self.service.scenario_detail(case[1]), extra
+        if path == COMPARISON_ROOT:
+            if method == "GET":
+                return 200, research.comparisons(), {}
+            return 201, research.create_comparison(self._json_body()), {}
+        comparison = re.fullmatch(
+            COMPARISON_ROOT + r"/([a-f0-9]{32})(?:/(reviews|export))?", path)
+        if comparison:
+            return self._comparison_instance_route(
+                method, comparison, research)
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _comparison_instance_route(self, method, comparison, research):
+        cid, action = comparison.groups()
+        if method == "GET" and action is None:
+            return 200, research.comparison(cid), {}
+        if method == "POST" and action == "reviews":
+            return 201, research.add_judgment(cid, self._json_body()), {}
+        if method == "GET" and action == "export":
+            return 200, research.export_comparison(cid), {
+                "Content-Disposition": f'attachment; filename="comparison_{cid}.json"'}
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
+
+    def _teacher_session_route(self, method, match):
+        self._require_teacher()
+        sid = match.group("sid")
+        action = match.group("action")
+        if method == "GET" and action is None:
+            return 200, self.service.teacher_session(sid), {}
+        if method == "GET" and action == "export":
+            payload = self.service.teacher_session(sid)
+            return 200, payload, {
+                "Content-Disposition":
+                    f'attachment; filename="demo_{sid}.json"'}
+        if method == "POST":
+            handler = {
+                "reviews": self.service.add_review,
+                "release": self.service.release_feedback,
+                "feedback-edits": self.service.save_feedback_edit,
+            }.get(action)
+            if handler is not None:
+                status = 201 if action == "reviews" else 200
+                return status, handler(sid, self._json_body()), {}
+        raise FileNotFoundError(ROUTE_NOT_FOUND)
 
     # ---------------- auth helpers ----------------
 
@@ -403,7 +443,6 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             raise FileNotFoundError(name)
         data = path.read_bytes()
         ctype = CONTENT_TYPES[path.suffix]
-        body = None
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -501,6 +540,9 @@ def main(argv=None):
     parser.add_argument("--shadow-practice-pool", type=Path)
     parser.add_argument("--shadow-target-band", type=float, nargs=2,
                         metavar=("LOW", "HIGH"))
+    parser.add_argument("--review-mode",
+                        choices=("aligned_two_topic", "legacy_single"),
+                        default="aligned_two_topic")
     args = parser.parse_args(argv)
     if args.replay_bank_mode == "warm":
         args.replay_report = args.replay_report or (
@@ -526,7 +568,8 @@ def main(argv=None):
         replay_source=args.replay_source,
         practice_pool=practice_pool,
         practice_target_band=args.shadow_target_band,
-        replay_bank_mode=args.replay_bank_mode)
+        replay_bank_mode=args.replay_bank_mode,
+        review_mode=args.review_mode)
     server = make_server(service, pin, host=args.host, port=args.port)
     host, port = server.server_address[:2]
     print(f"Synthetic demo listening at http://{host}:{port}", flush=True)

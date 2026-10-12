@@ -282,6 +282,14 @@ function aittaProvenance(review, genExec) {
 
 function renderSelectionDecision(audience, review, baseline,
                                  executions, job) {
+  const multi = (review && review.selected_candidates)
+    || (baseline && baseline.selected_candidates)
+    || ((((review || baseline) || {}).candidates || [])[0] || {})
+      .review_candidates;
+  if (multi) {
+    return renderMultiSelectionDecision(
+      audience, review, baseline, executions, job);
+  }
   const card = el("div", null, "card-inner decision");
   card.appendChild(el("h4", "Review-focus selection"));
   const trace = (review && review.trace) || {};
@@ -415,6 +423,145 @@ function renderSelectionDecision(audience, review, baseline,
   return card;
 }
 
+function renderMultiSelectionDecision(audience, review, baseline,
+                                      executions, job) {
+  const card = el("div", null, "card-inner decision");
+  card.appendChild(el("h4", "Review-focus selection"));
+  const trace = (review && review.trace) || {};
+  const execs = (executions && executions[audience]) || {};
+  const selExec = execs.selector || {};
+  const genExec = execs.generator || {};
+  const candidates =
+    (review && review.candidates) ||
+    (baseline && baseline.candidates) || [];
+  const appliedId = review && review.selected_candidate_id;
+  const baselineId = baseline && baseline.selected_candidate_id;
+  const applied =
+    candidates.find((c) => c.candidate_id === appliedId) || null;
+  const base =
+    candidates.find((c) => c.candidate_id === baselineId) || null;
+  const originals = (applied && applied.review_candidates)
+    || (review && review.selected_candidates) || [];
+  const bundleLabel = (bundle) => {
+    const parts = ((bundle && bundle.review_candidates) || [])
+      .map((c) => focusLabel(c, c.candidate_id));
+    return parts.length ? parts.join(" + ") : "—";
+  };
+  const rows = el("dl", null, "decision-kv");
+  const put = (key, value) => {
+    rows.appendChild(el("dt", key));
+    rows.appendChild(el("dd", value));};
+  if (review) {
+    put("Applied focus", originals.length
+        ? originals.map((c, i) =>
+            `${i + 1}. ${focusLabel(c, c.candidate_id)}`).join("; ")
+        : "Recorded candidate not found");
+    put("Candidate ID", appliedId || "—");
+    put("Observed evidence",
+        originals.filter((c) => c.focus).map((c) =>
+          `${c.focus.subtopic_name}: ${c.focus.incorrect} incorrect of ` +
+          `${c.focus.out_of} assessed`).join("; ") || "—");
+    put("Baseline focus", base
+        ? bundleLabel(base) : "Recorded candidate not found");
+    put("Comparison",
+        appliedId === baselineId
+          ? "matches the rules baseline"
+          : "differs from the rules baseline");
+  } else {
+    put("Baseline focus", base ? bundleLabel(base) : "—");
+  }
+  put("Selection provenance",
+      selectionProvenance(review, job, selExec));
+  const aitta = aittaProvenance(review, genExec);
+  if (aitta) put("Aitta provenance", aitta);
+  if (trace.selection_source === "injected_selector" &&
+      hostedConfirmed(selExec, "jev_")) {
+    const version = selExec.model_version ||
+      (selExec.metadata || {}).model_version;
+    if (version) put("Selector model", String(version));
+  }
+  if (review && trace.fallback_reason &&
+      trace.selection_source !== "rules") {
+    put("Fallback reason", String(trace.fallback_reason));
+  }
+  card.appendChild(rows);
+
+  const plans = (review && review.feedback_plans) ||
+    ((review && review.feedback_plan) ? [review.feedback_plan] : []);
+  plans.forEach((plan, index) => {
+    const label = plan.focus && plan.focus.subtopic_name
+      ? ` — ${focusLabel(plan, plan.candidate_id)}` : "";
+    card.appendChild(el("h5",
+      `Applied feedback plan ${index + 1}${label} — recorded before ` +
+      "generation", "plan-heading"));
+    const planRows = el("dl", null, "decision-kv feedback-plan");
+    const pput = (key, value) => {
+      planRows.appendChild(el("dt", key));
+      planRows.appendChild(el("dd", value));};
+    const planning = plan.planning || null;
+    pput("Error pattern", planning
+        ? (ERROR_PATTERN_LABELS[planning.error_pattern] ||
+           String(planning.error_pattern))
+        : "—");
+    pput("Assessment coverage", planning
+        ? (COVERAGE_LABELS[planning.assessment_coverage] ||
+           String(planning.assessment_coverage))
+        : "—");
+    const parent = planning && planning.parent_counts;
+    pput("Parent topic", parent
+        ? `${englishSkillName(plan.focus && plan.focus.skill_name) || "—"} — ` +
+          `${parent.correct} correct, ${parent.incorrect} ` +
+          `incorrect of ${parent.out_of}`
+        : "—");
+    pput("Priority group", planning
+        ? String(planning.priority_group)
+        : "—");
+    const ties = (planning && planning.tied_candidate_ids) || [];
+    pput("Tied candidates",
+        planning ? (ties.join(", ") || "None") : "—");
+    pput("Strategy", plan.strategy || "—");
+    pput("KT used for review-focus selection", plan.kt_used ? "Yes" : "No");
+    card.appendChild(planRows);
+  });
+  if (plans.length) {
+    card.appendChild(el("p",
+      "The application records each plan before any generated opening. " +
+      "It is not a diagnosis and does not explain why answers were " +
+      "incorrect.", "meta small"));
+  }
+  card.appendChild(el("p",
+    "These are review options for this session, not simulation " +
+    "profiles. Counts support offering an option; no validated " +
+    "explanation of Jev's preference is recorded. KT estimates do " +
+    "not determine this selection. Practice follows selected " +
+    "review topics.", "meta"));
+
+  const table = el("table", null, "grid decision-table");
+  table.appendChild(el("caption",
+    "Review bundles — applied selection vs rules baseline"));
+  const head = el("tr");
+  ["Review option", "Incorrect / assessed", "Applied selection",
+   "Rules baseline"]
+    .forEach((h) => head.appendChild(el("th", h)));
+  table.appendChild(head);
+  candidates.forEach((c) => {
+    const tr = el("tr");
+    const focuses = (c.review_candidates || [])
+      .map((o) => o.focus).filter(Boolean);
+    tr.appendChild(el("td", bundleLabel(c)));
+    tr.appendChild(el("td", focuses.length
+        ? focuses.map((f) => `${f.incorrect} / ${f.out_of}`).join(" + ")
+        : "—"));
+    tr.appendChild(el("td",
+        c.candidate_id === appliedId ? "Selected" : ""));
+    tr.appendChild(el("td",
+        c.candidate_id === baselineId ? "Baseline" : ""));
+    table.appendChild(tr);
+  });
+  card.appendChild(table);
+  return card;
+}
+
 function renderStructuredFeedback(container, payload) {
   if (!payload) return;
   if (payload.total) {
@@ -440,68 +587,84 @@ function renderStructuredFeedback(container, payload) {
     });
     container.appendChild(box);
   });
-  const example = payload.review_example;
-  if (example) {
+  const examples = payload.review_examples ||
+    (payload.review_example ? [payload.review_example] : []);
+  examples.forEach((example) => {
     const box = el("div", null, "feedback-section review-example");
-    box.appendChild(el("h3", example.title || "Worked review example"));
+    const heading = example.for_subtopic_name
+      ? `${example.title || "Worked review example"} — ` +
+        `${englishSkillName(example.for_subtopic_name)}`
+      : (example.title || "Worked review example");
+    box.appendChild(el("h3", heading));
     if (example.prompt) box.appendChild(el("p", example.prompt, "sec"));
     if (example.explanation) {
       box.appendChild(el("p", example.explanation, "sec"));
     }
     if (example.notice) box.appendChild(el("p", example.notice, "meta"));
     container.appendChild(box);
+  });
+  const activities = payload.practice_activities ||
+    (payload.practice ? [payload.practice] : []);
+  activities.forEach((practice, index) => {
+    renderPracticeCard(container, practice, index);
+  });
+}
+
+function renderPracticeCard(container, practice, index) {
+  const relationship = practice.relationship || null;
+  const box = el("div", null, "feedback-section practice-activity");
+  box.appendChild(el("h3",
+    practice.topic_label
+      ? `Practice for ${englishSkillName(practice.topic_label)}`
+      : (relationship && relationship.kind === "different_content"
+         ? "Separate practice activity" : "Practice activity")));
+  if (relationship && relationship.message) {
+    box.appendChild(el("p", relationship.message, "sec"));
   }
-  const practice = payload.practice;
-  if (practice) {
-    const relationship = practice.relationship || null;
-    const box = el("div", null, "feedback-section practice-activity");
-    box.appendChild(el("h3",
-      relationship && relationship.kind === "different_content"
-        ? "Separate practice activity" : "Practice activity"));
-    if (relationship && relationship.message) {
-      box.appendChild(el("p", relationship.message, "sec"));
+  if (practice.message) {
+    box.appendChild(el("p", practice.message, "sec"));
+  }
+  const question = practice.question;
+  if (question) {
+    const displayPrompt = englishQuestionText(question);
+    const displayOptions =
+      (question.options || []).map(englishOptionText);
+    const rawPrompt = normalizeDisplayText(question.text);
+    const rawOptions = (question.options || []).map(normalizeDisplayText);
+    box.appendChild(el("p",
+      `${englishSkillName(question.skill_name)} · ` +
+      `${englishSkillName(question.concept_name)}`, "meta"));
+    box.appendChild(el("p", displayPrompt, "sec"));
+    const list = el("ul", null, "practice-options");
+    displayOptions.forEach((option) => {
+      list.appendChild(el("li", option));
+    });
+    box.appendChild(list);
+    if (practice.instruction) {
+      box.appendChild(el("p", practice.instruction, "sec"));
     }
-    if (practice.message) {
-      box.appendChild(el("p", practice.message, "sec"));
-    }
-    const question = practice.question;
-    if (question) {
-      const displayPrompt = englishQuestionText(question);
-      const displayOptions =
-        (question.options || []).map(englishOptionText);
-      const rawPrompt = normalizeDisplayText(question.text);
-      const rawOptions = (question.options || []).map(normalizeDisplayText);
+    if (displayPrompt !== rawPrompt
+        || displayOptions.join("\n") !== rawOptions.join("\n")) {
       box.appendChild(el("p",
-        `${englishSkillName(question.skill_name)} · ` +
-        `${englishSkillName(question.concept_name)}`, "meta"));
-      box.appendChild(el("p", displayPrompt, "sec"));
-      const list = el("ul", null, "practice-options");
-      displayOptions.forEach((option) => {
-        list.appendChild(el("li", option));
+        "English display wording is a draft translation; original " +
+        "text is preserved.", "meta small"));
+      const original = el("details", null, "raw");
+      original.dataset.disclosureKey = index === 0
+        ? "practice-original" : `practice-original:${index}`;
+      original.appendChild(el("summary", "Original question wording"));
+      original.appendChild(el("p", rawPrompt, "sec"));
+      const rawList = el("ul", null, "practice-options");
+      rawOptions.forEach((option) => {
+        rawList.appendChild(el("li", option));
       });
-      box.appendChild(list);
-      if (displayPrompt !== rawPrompt
-          || displayOptions.join("\n") !== rawOptions.join("\n")) {
-        box.appendChild(el("p",
-          "English display wording is a draft translation; original " +
-          "text is preserved.", "meta small"));
-        const original = el("details", null, "raw");
-        original.dataset.disclosureKey = "practice-original";
-        original.appendChild(el("summary", "Original question wording"));
-        original.appendChild(el("p", rawPrompt, "sec"));
-        const rawList = el("ul", null, "practice-options");
-        rawOptions.forEach((option) => {
-          rawList.appendChild(el("li", option));
-        });
-        original.appendChild(rawList);
-        box.appendChild(original);
-      }
+      original.appendChild(rawList);
+      box.appendChild(original);
     }
-    if (practice.notice) {
-      box.appendChild(el("p", practice.notice, "meta"));
-    }
-    container.appendChild(box);
   }
+  if (practice.notice) {
+    box.appendChild(el("p", practice.notice, "meta"));
+  }
+  container.appendChild(box);
 }
 
 /* ============================ STUDENT ============================ */
@@ -830,11 +993,15 @@ function teacherPage() {
       `New provider calls this server run: ` +
       `${budget.used ?? 0} / ${budget.limit ?? "unlimited"}`,
       `diagnostics: ${diag.status || "unknown"}`,
+      `review: ${config.review_mode || "legacy_single"} · up to ` +
+        `${config.review_topic_limit ?? 1} topics / ` +
+        `${config.practice_question_limit ?? 1} practice` +
+        (config.practice_alignment ? " · aligned" : ""),
       `policy ${config.policy_version}`,
       "synthetic only — drafts require educator review",
-    ].forEach((text, i) => {
+    ].forEach((text, i, arr) => {
       strip.appendChild(el("span", text,
-        i === 4 ? "chip strong" : "chip"));
+        i === arr.length - 2 ? "chip strong" : "chip"));
     });
   }
 
@@ -1461,22 +1628,42 @@ function createDetailView(root, options = {}) {
     const selReview = end.student_review || end.baseline_student;
     const strip = el("div", null, "release-status");
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
-    const practiceStatus = preview && preview.practice
-      ? statusLabel(preview.practice.status)
-      : (delivery.practice_status
-         ? statusLabel(delivery.practice_status)
-         : ((end.recommendation_job || {}).status
-            ? statusLabel(end.recommendation_job.status) : "—"));
-    strip.appendChild(kv("Practice selection", practiceStatus));
+    const activities = preview && preview.practice_activities;
+    if (activities && activities.length) {
+      activities.forEach((activity, i) => {
+        const label = activity.topic_label
+          ? `Practice ${i + 1} (${englishSkillName(activity.topic_label)})`
+          : `Practice ${i + 1}`;
+        strip.appendChild(kv(label, statusLabel(activity.status)));
+      });
+    } else {
+      const practiceStatus = preview && preview.practice
+        ? statusLabel(preview.practice.status)
+        : (delivery.practice_status
+           ? statusLabel(delivery.practice_status)
+           : ((end.recommendation_job || {}).status
+              ? statusLabel(end.recommendation_job.status) : "—"));
+      strip.appendChild(kv("Practice selection", practiceStatus));
+    }
     if (delivery.preview_source === "teacher_edited") {
       strip.appendChild(kv("Preview source", "Teacher-edited draft"));
     }
     if (selReview) {
-      const applied = (selReview.candidates || []).find(
-        (c) => c.candidate_id === selReview.selected_candidate_id);
-      strip.appendChild(kv("Review focus", applied
-        ? focusLabel(applied, selReview.selected_candidate_id)
-        : "Recorded candidate not found"));
+      const selectedOriginals = selReview.selected_candidates || [];
+      if (selectedOriginals.length) {
+        selectedOriginals.forEach((original, i) => {
+          const label = selectedOriginals.length > 1
+            ? `Review focus ${i + 1}` : "Review focus";
+          strip.appendChild(kv(label,
+            focusLabel(original, original.candidate_id)));
+        });
+      } else {
+        const applied = (selReview.candidates || []).find(
+          (c) => c.candidate_id === selReview.selected_candidate_id);
+        strip.appendChild(kv("Review focus", applied
+          ? focusLabel(applied, selReview.selected_candidate_id)
+          : "Recorded candidate not found"));
+      }
       const studentExecs = (job.executions || {}).student || {};
       strip.appendChild(kv("Selection provenance",
         selectionProvenance(selReview, job,
@@ -1657,15 +1844,21 @@ function createDetailView(root, options = {}) {
     const status = el("p", draft.note || null, "meta");
     const currentReleased = delivery.released_preview_sha256 &&
       delivery.released_preview_sha256 === delivery.preview_sha256;
+    const multi = delivery.review_mode === "aligned_two_topic";
     if (delivery.integrated && !currentReleased) {
       card.appendChild(el("p",
-        "One approval releases this feedback and the practice activity " +
-        "shown above.", "meta"));
+        multi
+          ? "One approval releases this feedback and all activities " +
+            "shown above."
+          : "One approval releases this feedback and the practice " +
+            "activity shown above.", "meta"));
     }
     const button = el("button",
       currentReleased ? "Already released"
                       : (delivery.integrated
-                         ? "Approve feedback and practice"
+                         ? (multi
+                            ? "Approve feedback and activities"
+                            : "Approve feedback and practice")
                          : "Approve and release to student"),
       "primary");
     button.type = "button";
@@ -1804,9 +1997,10 @@ function createDetailView(root, options = {}) {
           "difficulty)",
           recommendation.target_band.join("–")));
       }
+      const predictions = recommendation.candidate_predictions || [];
       const selectedId = end.practice_context
         && end.practice_context.selected_question_id;
-      const prediction = (recommendation.candidate_predictions || [])
+      const prediction = predictions
         .find((p) => p.question_id === selectedId);
       const p = prediction && prediction.p_correct;
       const practiceStatus = (((detail.feedback_delivery || {})
@@ -1816,6 +2010,18 @@ function createDetailView(root, options = {}) {
           "Estimated correctness on this question (not mastery)",
           p.toFixed(3)));
       }
+      (recommendation.topic_selections || []).forEach((slot, i) => {
+        const pred = predictions.find(
+          (row) => row.question_id === slot.selected_question_id);
+        inner.appendChild(kv(
+          `Practice slot ${i + 1}`,
+          `${statusLabel(slot.status)}` +
+          (slot.status === "selected" && pred &&
+           Number.isFinite(pred.p_correct)
+             ? ` — estimated correctness ${pred.p_correct.toFixed(3)} ` +
+               `(band ${recommendation.target_band.join("–")})`
+             : "")));
+      });
       evidenceBox.appendChild(inner);
       card.appendChild(evidenceBox);
     }

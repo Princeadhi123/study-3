@@ -236,5 +236,137 @@ class ShadowPolicyTests(unittest.TestCase):
             validate_practice_pool(pool([invalid]))
 
 
+class AlignedPracticeTests(unittest.TestCase):
+    def setUp(self):
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        self.calls = []
+        self.probabilities = {}
+
+    def predictor(self, bank, rows, candidates):
+        self.calls.append(copy.deepcopy(candidates))
+        return {"predictions": [
+            {"question_id": q["question_id"], "skill_id": q["skill_id"],
+             "item_id": q["item_id"], "regime": "warm",
+             "p_correct": self.probabilities.get(q["question_id"], 0.6)}
+            for q in candidates]}
+
+    def rows_wrong(self, skills):
+        rows = responses(self.bank)
+        for row in rows:
+            q = next(q for q in self.bank["questions"]
+                     if q["question_id"] == row["question_id"])
+            if q["skill_id"] in skills:
+                row["selected_index"] = (
+                    q["answer_index"] + 1) % len(q["options"])
+        return rows
+
+    def recommender(self, skills=("sA", "sB"), band=(0.4, 0.8)):
+        questions = [question("pool_a", "sA"), question("pool_a2", "sA"),
+                     question("pool_b", "sB"), question("pool_c", "sC")]
+        questions = [q for q in questions if q["skill_id"] in skills
+                     or q["skill_id"] == "sC"]
+        return ShadowPracticeRecommender(
+            pool(questions), band, self.predictor)
+
+    def test_one_aligned_question_per_selected_skill(self):
+        rows = self.rows_wrong({"sA", "sB"})
+        result = self.recommender().recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA", "sB"])
+        self.assertEqual(result["status"], "selected")
+        self.assertEqual(result["selected_question_ids"],
+                         ["pool_a", "pool_b"])
+        self.assertEqual(result["selected_question_id"], "pool_a")
+        slots = result["topic_selections"]
+        self.assertEqual([s["skill_id"] for s in slots], ["sA", "sB"])
+        self.assertTrue(all(s["status"] == "selected" for s in slots))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            {q["skill_id"] for q in self.calls[0]}, {"sA", "sB"})
+        self.assertEqual(
+            {p["question_id"]
+             for p in result["candidate_predictions"]},
+            {"pool_a", "pool_a2", "pool_b"})
+
+    def test_band_inclusive_boundaries(self):
+        self.probabilities = {"pool_a": 0.4, "pool_a2": 0.8,
+                              "pool_b": 0.95}
+        rows = self.rows_wrong({"sA", "sB"})
+        result = self.recommender().recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA", "sB"])
+        self.assertEqual(
+            sorted(result["in_band_question_ids"]),
+            ["pool_a", "pool_a2"])
+        self.assertEqual(len(result["selected_question_ids"]), 1)
+        self.assertIn(result["selected_question_ids"][0],
+                      ("pool_a", "pool_a2"))
+        sB_slot = next(s for s in result["topic_selections"]
+                       if s["skill_id"] == "sB")
+        self.assertEqual(sB_slot["status"], "abstained")
+        self.assertIsNone(sB_slot["selected_question_id"])
+
+    def test_no_eligible_in_one_skill_abstains_only_that_slot(self):
+        rows = self.rows_wrong({"sA", "sB"})
+        result = self.recommender(skills=("sA",)).recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA", "sB"])
+        slots = {s["skill_id"]: s
+                 for s in result["topic_selections"]}
+        self.assertEqual(slots["sA"]["status"], "selected")
+        self.assertEqual(slots["sB"]["status"], "abstained")
+        self.assertEqual(result["selected_question_ids"], ["pool_a"])
+
+    def test_never_selects_unrelated_skills(self):
+        rows = self.rows_wrong({"sA", "sB"})
+        result = self.recommender().recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA"])
+        self.assertEqual(result["selected_question_ids"], ["pool_a"])
+        self.assertTrue(all(
+            q["skill_id"] == "sA" for q in self.calls[0]))
+        excluded = {e["reason"]
+                    for e in result["excluded_candidates"]}
+        self.assertIn("review_topic_not_selected", excluded)
+        with self.assertRaises(ValueError):
+            self.recommender().recommend_for_reviews(
+                self.bank, self.taxonomy, rows, ["sA", "sA"])
+        with self.assertRaises(ValueError):
+            self.recommender().recommend_for_reviews(
+                self.bank, self.taxonomy, rows, ["sA", "sB", "sC"])
+        with self.assertRaises(ValueError):
+            self.recommender().recommend_for_reviews(
+                self.bank, self.taxonomy, rows, ["sD"])
+
+    def test_all_correct_zero_slots_and_no_predictor(self):
+        rows = responses(self.bank)
+        result = self.recommender().recommend_for_reviews(
+            self.bank, self.taxonomy, rows, [])
+        self.assertEqual(result["status"], "abstained")
+        self.assertEqual(result["topic_selections"], [])
+        self.assertEqual(result["selected_question_ids"], [])
+        self.assertEqual(self.calls, [])
+
+    def test_predictor_failure_marks_all_slots_unavailable(self):
+        def bad(bank, rows, candidates):
+            raise RuntimeError("model down")
+        rec = ShadowPracticeRecommender(
+            pool([question("pool_a", "sA"), question("pool_b", "sB")]),
+            (0.4, 0.8), bad)
+        rows = self.rows_wrong({"sA", "sB"})
+        result = rec.recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA", "sB"])
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["selected_question_ids"], [])
+        self.assertTrue(all(s["status"] == "unavailable"
+                            for s in result["topic_selections"]))
+
+    def test_outside_band_abstains(self):
+        self.probabilities = {"pool_a": 0.95, "pool_a2": 0.1,
+                              "pool_b": 0.95}
+        rows = self.rows_wrong({"sA", "sB"})
+        result = self.recommender().recommend_for_reviews(
+            self.bank, self.taxonomy, rows, ["sA", "sB"])
+        self.assertEqual(result["status"], "abstained")
+        self.assertEqual(result["selected_question_ids"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

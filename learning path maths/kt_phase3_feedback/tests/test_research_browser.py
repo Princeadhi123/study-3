@@ -99,7 +99,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.source, self.report, _ = replay_fixture(self.root, bank, make_taxonomy(bank), count=4)
         self.service = DemoService(root=self.root / "data", bank=bank,
                                    taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
-                                   replay_report=self.report, replay_source=self.source)
+                                   replay_report=self.report, replay_source=self.source,
+                                   review_mode="legacy_single")
         self.addCleanup(self.service.close, wait=True)
         self.pin = f"{secrets.randbelow(1000000):06d}"
         self.server = make_server(self.service, self.pin)
@@ -155,7 +156,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.service = DemoService(
             root=self.root / "warm_data", bank=make_bank(),
             taxonomy=make_taxonomy(make_bank()), diagnostics=fake_diagnostics(bank),
-            replay_report=report, replay_source=source, replay_bank_mode="warm")
+            replay_report=report, replay_source=source, replay_bank_mode="warm",
+            review_mode="legacy_single")
         self.addCleanup(self.service.close, wait=True)
         self.server.RequestHandlerClass.service = self.service
         b = self.browser
@@ -673,6 +675,199 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertFalse(b.js(
                 f"Boolean(document.querySelector('#tab-feedback "
                 ".practice-activity .practice-options'))"))
+            self.assertEqual(b.errors, [])
+
+    def test_multi_two_topic_aligned_flow(self):
+        import copy
+        from unittest import mock
+        import feedback_practice
+        import research_runtime
+        from tests.test_demo_service import (
+            FakeAlignedRecommender, MultiGenerator, MultiSelector,
+            RecordingPredictor)
+        from tests.test_feedback_practice import make_graph, make_pool
+        bank = self.service.bank
+        pool = make_pool(("sA", "sB"))
+        examples = dict(feedback_practice.REVIEW_EXAMPLES)
+        for sub in ("sub_sA", "sub_sB", "sub_sC", "sub_sD"):
+            examples[sub] = {
+                "prompt": "Browser worked prompt?",
+                "explanation": "Browser worked explanation."}
+        pin = f"{secrets.randbelow(1000000):06d}"
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        predictor = RecordingPredictor({"pool_q1": 0.6, "pool_q2": 0.55})
+        service = DemoService(
+            root=self.root / "multi-data", bank=bank,
+            taxonomy=self.service.taxonomy,
+            diagnostics=fake_diagnostics(bank),
+            provider_mode="hosted",
+            selector=selector,
+            generator=generator,
+            recommender=FakeAlignedRecommender(pool, predictor))
+        self.addCleanup(service.close, wait=True)
+        server = make_server(service, pin)
+        thread = threading.Thread(
+            target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        b = self.browser
+
+        def go(path):
+            b.command("Page.navigate", {"url": url + path})
+            b.wait("document.readyState === 'complete' && "
+                   "typeof api === 'function'")
+
+        with mock.patch.object(
+                feedback_practice, "load_current_practice_pool",
+                return_value=copy.deepcopy(pool)), \
+             mock.patch.object(
+                research_runtime, "load_current_practice_pool",
+                return_value=copy.deepcopy(pool)), \
+             mock.patch.object(
+                feedback_practice, "teacher_content_context",
+                return_value=make_graph(pool)), \
+             mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             examples, clear=True):
+            result = service.simulate("all_incorrect", 11)
+            sid = result["session_id"]
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid)
+                ["provider_job"]["status"] == "ready"))
+            go("/teacher")
+            b.wait("document.querySelector('#unlock-panel')")
+            b.js(f"document.querySelector('#pin-input').value={json.dumps(pin)}; document.querySelector('#unlock-form').requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('#session-list button')")
+            b.js("document.querySelector('#session-list button').click()")
+            release = "document.querySelector('#tab-feedback .release-card')"
+            b.wait(f"Boolean({release})")
+            b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+            preview = "document.querySelector('#tab-feedback .feedback-preview')"
+            strip = ("document.querySelector('#tab-feedback "
+                     ".release-card .release-status')")
+            b.wait(f"{preview}.textContent.includes('Pool practice prompt 1?')")
+            cards = "[...document.querySelectorAll('#tab-feedback .feedback-preview .practice-activity')]"
+            self.assertEqual(b.js(f"{cards}.length"), 2)
+            skills = b.js(f"{cards}.map((n) => n.textContent)")
+            self.assertIn("Pool practice prompt 1?", skills[0])
+            self.assertIn("Pool practice prompt 2?", skills[1])
+            heads = "[...document.querySelectorAll('#tab-feedback .feedback-preview .practice-activity h3')]"
+            self.assertEqual(
+                b.js(f"{heads}.map((n) => n.textContent)"),
+                ["Practice for Subtopic sA", "Practice for Subtopic sB"])
+            for index in range(2):
+                self.assertTrue(b.js(
+                    f"{cards}[{index}].textContent.includes('Choose an option and explain your reasoning.')"))
+            self.assertTrue(b.js(
+                f"{cards}[0].textContent.includes('same broad topic')"))
+            examples_sel = "[...document.querySelectorAll('#tab-feedback .feedback-preview .review-example')]"
+            self.assertEqual(b.js(f"{examples_sel}.length"), 2)
+            self.assertTrue(b.js(
+                f"{strip}.textContent.includes('Review focus 1')"))
+            self.assertTrue(b.js(
+                f"{strip}.textContent.includes('Review focus 2')"))
+            self.assertTrue(b.js(
+                f"{strip}.textContent.includes('Practice 1')"))
+            self.assertTrue(b.js(
+                f"{strip}.textContent.includes('Practice 2')"))
+            research_dd = ("document.querySelector('#tab-feedback "
+                           "details[data-disclosure-key=feedback-research]')")
+            self.assertFalse(b.js(f"{research_dd}.open"))
+            self.assertTrue(b.js(
+                f"{research_dd}.textContent.includes('Practice slot 1')"))
+            self.assertTrue(b.js(
+                f"{research_dd}.textContent.includes('Practice slot 2')"))
+            approve = ("document.querySelector('#tab-feedback "
+                       ".release-card button.primary')")
+            self.assertEqual(b.js(f"{approve}.textContent"),
+                             "Approve feedback and activities")
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('One approval releases "
+                "this feedback and all activities')"))
+            strip_cfg = "document.querySelector('#config-strip').textContent"
+            self.assertTrue(b.js(
+                f"{strip_cfg}.includes('review: aligned_two_topic · up to "
+                "2 topics / 2 practice · aligned')"))
+            b.viewport(390, 900)
+            b.wait(f"Boolean({preview})")
+            b.js(f"{cards}[1].scrollIntoView({{block:'center'}})")
+            self.assert_no_overflow()
+            b.screenshot("teacher-multi-topics-390.png")
+            b.viewport(1440, 1100)
+            teacher_fragments = b.js(
+                "[...document.querySelectorAll('#tab-feedback "
+                ".feedback-preview .practice-activity, "
+                "#tab-feedback .feedback-preview .review-example, "
+                "#tab-feedback .feedback-preview .feedback-section')]"
+                ".map((n) => n.textContent)")
+            b.screenshot("teacher-multi-topics.png")
+            b.js(f"{approve}.click()")
+            b.wait(f"{release}.textContent.includes('Released to the student')")
+            go(result["student_url"])
+            summary = "document.querySelector('#end-summary').textContent"
+            b.wait(f"{summary}.includes('Pool practice prompt 2?')")
+            student_fragments = b.js(
+                "[...document.querySelectorAll('#end-summary "
+                ".practice-activity, #end-summary .review-example, "
+                "#end-summary .feedback-section')]"
+                ".map((n) => n.textContent)")
+            self.assertEqual(student_fragments, teacher_fragments)
+            blob = b.js(summary)
+            for needle in ("pool_q", "p_correct", "answer_index",
+                           "review_bundle_"):
+                self.assertNotIn(needle, blob)
+            b.screenshot("student-multi-topics-released.png")
+
+            predictor.probabilities = {"pool_q1": 0.6, "pool_q2": 0.95}
+            partial = service.simulate("all_incorrect", 13)
+            sid3 = partial["session_id"]
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid3)
+                ["provider_job"]["status"] in ("ready", "fallback")))
+            go("/teacher")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            rows = "[...document.querySelectorAll('#session-list button')]"
+            b.wait(f"{rows}.length >= 2")
+            b.js(f"{rows}[0].click()")
+            b.wait(f"Boolean({release})")
+            b.wait(f"{preview}.textContent.includes('Pool practice prompt 1?')")
+            self.assertEqual(b.js(f"{cards}.length"), 2)
+            abstained_idx = b.js(
+                f"{cards}.findIndex((n) => "
+                "n.textContent.includes('No eligible practice activity "
+                "was selected'))")
+            self.assertGreaterEqual(abstained_idx, 0)
+            abstained = f"{cards}[{abstained_idx}]"
+            self.assertFalse(b.js(
+                f"{abstained}.textContent.includes('Pool practice prompt 2?')"))
+            self.assertFalse(b.js(
+                f"Boolean({abstained}.querySelector('.practice-options'))"))
+            self.assertTrue(b.js(
+                f"{abstained}.textContent.includes('Practice for Subtopic')"))
+
+            correct = service.simulate("all_correct", 3)
+            sid2 = correct["session_id"]
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid2)
+                ["provider_job"]["status"] == "ready"))
+            self.assertEqual(generator.calls, 3)
+            self.assertEqual(selector.calls, 2)
+            self.assertEqual(len(predictor.calls), 2)
+            go("/teacher")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait(f"{rows}.length >= 3")
+            b.js(f"{rows}[0].click()")
+            b.wait(f"Boolean({release}) && Boolean({preview})")
+            self.assertFalse(b.js(
+                f"{preview}.textContent.includes('assessed answers were "
+                "incorrect')"))
+            self.assertFalse(b.js(
+                f"{preview}.textContent.includes('Pool practice prompt')"))
+            self.assertFalse(b.js(
+                f"Boolean({preview}.querySelector('.practice-options'))"))
             self.assertEqual(b.errors, [])
 
     def test_provider_status_strip_pending_fallback_and_edit(self):

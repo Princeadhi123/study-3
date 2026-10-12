@@ -120,6 +120,7 @@ class ServiceCase(unittest.TestCase):
 
     def _service(self, root=None, **kwargs):
         kwargs.setdefault("diagnostics", fake_diagnostics(self.bank))
+        kwargs.setdefault("review_mode", "legacy_single")
         service = DemoService(root=Path(root or self.tmp.name),
                               bank=self.bank, taxonomy=self.taxonomy,
                               **kwargs)
@@ -239,7 +240,7 @@ class RecommendationWiringTests(ServiceCase):
         self.assertEqual(end["recommendation"]["reason"],
                          "future_recommendation_failed")
         self.assertEqual(end["recommendation"]["used_for_feedback"], False)
-        self.assertIsNotNone(end["baseline_teacher"])
+        self.assertIsNone(end["baseline_teacher"])
         self.assertEqual(
             len({t.rsplit("\n\n", 1)[0] for t in texts}), 1)
         public = failing.snapshot(sid, token)

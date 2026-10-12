@@ -118,6 +118,49 @@ def select_predictions(candidates, prediction_result, skills, band):
     }
 
 
+ALIGNED_PRACTICE_POLICY_VERSION = "one_in_band_question_per_selected_skill_v1"
+
+
+def select_aligned_predictions(candidates, prediction_result, skills, band,
+                               review_skill_ids):
+    if (not isinstance(review_skill_ids, (list, tuple))
+            or len(review_skill_ids) > 2
+            or len(set(review_skill_ids)) != len(review_skill_ids)
+            or any(sid not in skills or not skills[sid]["incorrect"]
+                   for sid in review_skill_ids)):
+        raise ValueError("practice requires up to two distinct observed-error skills")
+    if any(q["skill_id"] not in review_skill_ids for q in candidates):
+        raise ValueError("practice candidates must follow selected review skills")
+    checked = select_predictions(candidates, prediction_result, skills, band)
+    predictions = {p["question_id"]: p
+                   for p in checked["candidate_predictions"]}
+    selected_ids, slots = [], []
+    for sid in review_skill_ids:
+        group = [q for q in candidates if q["skill_id"] == sid]
+        result = select_predictions(
+            group, {"predictions": [predictions[q["question_id"]]
+                                    for q in group]}, skills, band)
+        qid = result["selected_question_id"]
+        if qid is not None:
+            selected_ids.append(qid)
+        slots.append({
+            "skill_id": sid,
+            "status": "selected" if qid is not None else "abstained",
+            "reason": (None if qid is not None else
+                       "no_candidate_in_explicit_target_band" if group else
+                       "no_eligible_unattempted_error_topic_candidates"),
+            "selected_question_id": qid,
+            "baseline_question_id": result["baseline_question_id"]})
+    return {
+        "selected_question_ids": selected_ids,
+        "selected_question_id": selected_ids[0] if selected_ids else None,
+        "baseline_question_id": checked["baseline_question_id"],
+        "topic_selections": slots,
+        "candidate_predictions": checked["candidate_predictions"],
+        "in_band_question_ids": checked["in_band_question_ids"],
+        "outside_band_question_ids": checked["outside_band_question_ids"]}
+
+
 class ShadowPracticeRecommender:
     def __init__(self, pool, target_band, predictor):
         self.pool = validate_practice_pool(pool)
@@ -143,6 +186,96 @@ class ShadowPracticeRecommender:
         """Offline synthetic research only; leaves bank approval metadata untouched."""
         evidence = build_research_evidence(bank, taxonomy, responses)
         return self._recommend(bank, responses, evidence)
+
+    def recommend_for_reviews(self, bank, taxonomy, responses,
+                              review_skill_ids, research=False):
+        if len(responses) != 40:
+            raise ValueError("recommendations require completed assessment")
+        evidence = (build_research_evidence if research
+                    else build_evidence)(bank, taxonomy, responses)
+        return self._aligned_recommend(bank, responses, evidence,
+                                       review_skill_ids)
+
+    def _aligned_recommend(self, bank, responses, evidence,
+                           review_skill_ids):
+        candidates, exclusions, skills = eligibility(
+            bank, evidence, self.pool)
+        if (not isinstance(review_skill_ids, (list, tuple))
+                or len(review_skill_ids) > 2
+                or len(set(review_skill_ids)) != len(review_skill_ids)
+                or any(sid not in skills or not skills[sid]["incorrect"]
+                       for sid in review_skill_ids)):
+            raise ValueError(
+                "practice requires up to two distinct observed-error skills")
+        review_skill_ids = list(review_skill_ids)
+        aligned = [q for q in candidates
+                   if q["skill_id"] in review_skill_ids]
+        exclusions = exclusions + [
+            {"question_id": q["question_id"],
+             "reason": "review_topic_not_selected"}
+            for q in candidates if q["skill_id"] not in review_skill_ids]
+        base = {
+            "schema": "phase3_shadow_practice_recommendation_v1",
+            "policy_version": ALIGNED_PRACTICE_POLICY_VERSION,
+            "mode": "shadow_only", "review_skill_ids": review_skill_ids,
+            "used_for_student_advice": False, "used_for_feedback": False,
+            "answer_count": 40, "pool_sha256": self.pool_sha256,
+            "bank_sha256": evidence["bank_sha256"],
+            "response_sha256": canonical_digest(responses),
+            "target_band": list(self.band),
+            "excluded_candidates": exclusions,
+            "selected_question_id": None,
+            "selected_question_ids": [],
+            "baseline_question_id": None,
+            "topic_selections": [],
+            "conformal": "not_applied",
+            "claim_boundary": "experimental_probability_band_not_validated_ZPD_mastery_or_learning_gain",
+        }
+        if not review_skill_ids:
+            return {**base, "status": "abstained",
+                    "reason": "no_selected_review_skills",
+                    "candidate_predictions": [],
+                    "in_band_question_ids": [],
+                    "outside_band_question_ids": []}
+        if not aligned:
+            return {**base, "status": "abstained",
+                    "reason": "no_eligible_unattempted_error_topic_candidates",
+                    "topic_selections": [
+                        {"skill_id": sid, "status": "abstained",
+                         "reason": "no_eligible_unattempted_error_topic_candidates",
+                         "selected_question_id": None,
+                         "baseline_question_id": None}
+                        for sid in review_skill_ids],
+                    "candidate_predictions": [],
+                    "in_band_question_ids": [],
+                    "outside_band_question_ids": []}
+        try:
+            predicted = self.predictor(
+                copy.deepcopy(bank), copy.deepcopy(responses),
+                copy.deepcopy(aligned))
+            selection = select_aligned_predictions(
+                aligned, predicted, skills, self.band, review_skill_ids)
+        except Exception:
+            return {**base, "status": "unavailable",
+                    "reason": "future_prediction_failed",
+                    "topic_selections": [
+                        {"skill_id": sid, "status": "unavailable",
+                         "reason": "future_prediction_failed",
+                         "selected_question_id": None,
+                         "baseline_question_id": None}
+                        for sid in review_skill_ids],
+                    "candidate_predictions": [],
+                    "in_band_question_ids": [],
+                    "outside_band_question_ids": []}
+        status = ("selected" if selection["selected_question_ids"]
+                  else "abstained")
+        return {
+            **base, **selection,
+            "status": status,
+            "reason": (None if status == "selected"
+                       else "no_candidate_in_explicit_target_band"),
+            "kt_provenance": copy.deepcopy(predicted.get("provenance", {})),
+        }
 
     def _recommend(self, bank, responses, evidence):
         candidates, exclusions, skills = eligibility(bank, evidence, self.pool)

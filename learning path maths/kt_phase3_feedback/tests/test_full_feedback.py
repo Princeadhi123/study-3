@@ -6,15 +6,18 @@ from pathlib import Path
 
 import phase3_paths  # noqa: F401
 from aitta_generator import AittaGenerationError, AittaGenerator
-from evidence_feedback import build_evidence, canonical_digest, run_feedback
-from evidence_feedback_policy import SCOPE, build_candidates
+from evidence_feedback import (
+    build_evidence, canonical_digest, run_feedback, run_multi_feedback)
+from evidence_feedback_policy import (
+    SCOPE, build_candidates, build_review_bundles)
 from full_feedback import (
     CachedFullFeedbackGenerator, FULL_FEEDBACK_INSTRUCTIONS,
     FULL_FEEDBACK_MAX_TOKENS, FULL_FEEDBACK_PROMPT_VERSION,
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_MAX_CHARS,
     FULL_FEEDBACK_SECTION_TITLES, FullFeedbackAittaGenerator,
-    build_full_input, full_message_sections, validate_full_input,
-    validate_full_reply)
+    MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
+    build_full_input, build_multi_full_input, full_message_sections,
+    validate_full_input, validate_full_reply)
 from replay_provider_scenarios import CaptureCache
 import feedback_practice
 from tests.helpers import make_bank, make_taxonomy, responses
@@ -532,6 +535,247 @@ class FullFeedbackTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_feedback(self.evidence, "student", "midpoint",
                          practice_context=self._practice_ctx(pool))
+
+
+class MultiFullFeedbackTests(unittest.TestCase):
+    def setUp(self):
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        self.evidence = build_evidence(
+            self.bank, self.taxonomy,
+            responses(self.bank, correct=False, count=40))
+        self.bundle = build_review_bundles(self.evidence)[0]
+        self.slots = [feedback_practice.empty_context("abstained")
+                      for _ in self.bundle["review_candidates"]]
+        self.full_input = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots)
+
+    def _generator(self, opener):
+        inner = AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                               opener=opener)
+        return FullFeedbackAittaGenerator(inner)
+
+    def test_build_multi_input_schema_and_fields(self):
+        payload = self.full_input
+        self.assertEqual(payload["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
+        self.assertEqual(payload["audience"], "student")
+        self.assertEqual(payload["checkpoint"], "end")
+        self.assertEqual(payload["prompt_version"],
+                         MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        self.assertEqual(payload["selected_candidate"], self.bundle)
+        self.assertEqual(
+            len(payload["feedback_plans"]),
+            len(self.bundle["review_candidates"]))
+        self.assertEqual(
+            len(payload["practice_contexts"]),
+            len(self.bundle["review_candidates"]))
+        self.assertLessEqual(
+            len(payload["review_examples"]),
+            len(self.bundle["review_candidates"]))
+        self.assertEqual(
+            {s["kind"] for s in payload["baseline_sections"]},
+            set(FULL_FEEDBACK_SECTION_KEYS))
+        self.assertIn(
+            SCOPE, next(s["text"] for s in payload["baseline_sections"]
+                        if s["kind"] == "review_focus"))
+
+    def test_validate_multi_accepts_and_rebuild_deterministic(self):
+        normalized = validate_full_input(copy.deepcopy(self.full_input))
+        self.assertEqual(normalized, self.full_input)
+
+    def test_validate_multi_rejects_tampered_fields(self):
+        for mutate in (
+                lambda p: p["feedback_plans"].pop(),
+                lambda p: p["practice_contexts"].pop(),
+                lambda p: p["practice_contexts"][0].update(
+                    status="selected"),
+                lambda p: p.update(extra="x"),
+                lambda p: p["evidence"].update(answers=[]),
+                lambda p: p["selected_candidate"].update(
+                    candidate_id="review_bundle_forged"),
+                lambda p: p["review_examples"].append({})):
+            payload = copy.deepcopy(self.full_input)
+            with self.assertRaises(ValueError):
+                mutate(payload)
+                validate_full_input(payload)
+
+    def test_wire_safe_no_private_ids_or_probabilities(self):
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        self._generator(opener).generate(copy.deepcopy(self.full_input))
+        body = opener.calls[0]["body"]
+        context = json.loads(body["messages"][1]["content"])
+        self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
+        self.assertEqual(context["prompt_version"],
+                         MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        for ctx in context["practice_contexts"]:
+            self.assertLessEqual(
+                set(ctx), {"status", "topic", "selection"})
+        raw = json.dumps(context)
+        for forbidden in ("pool_q", "Pool practice prompt",
+                          "p_correct", "answer_index", '"options"',
+                          "item_id", "sha256"):
+            self.assertNotIn(forbidden, raw)
+
+    def test_run_multi_feedback_records_generated_sections(self):
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        review = run_multi_feedback(
+            self.evidence,
+            generator=self._generator(opener),
+            practice_contexts=self.slots)
+        self.assertEqual(len(opener.calls), 1)
+        for section in review["message"]["sections"]:
+            self.assertTrue(
+                section["text"].startswith(
+                    VALID_SECTIONS[section["kind"]]))
+        self.assertIsNone(review["trace"]["fallback_reason"])
+        self.assertEqual(
+            review["trace"]["generation_prompt_version"],
+            MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+
+    def test_all_correct_empty_contexts_and_generation(self):
+        evidence = build_evidence(
+            self.bank, self.taxonomy, responses(self.bank))
+        bundle = build_review_bundles(evidence)[0]
+        self.assertTrue(all(c["focus"] is None
+                            for c in bundle["review_candidates"]))
+        payload = build_multi_full_input(
+            evidence, "student", bundle, [])
+        normalized = validate_full_input(copy.deepcopy(payload))
+        self.assertEqual(normalized["practice_contexts"], [])
+        opener = RecordingOpener(
+            wire_reply(candidate_id=bundle["candidate_id"]))
+        review = run_multi_feedback(
+            evidence,
+            generator=self._generator(opener),
+            practice_contexts=[])
+        self.assertEqual(len(opener.calls), 1)
+        self.assertIsNone(review["trace"]["fallback_reason"])
+        for section in review["message"]["sections"]:
+            self.assertTrue(
+                section["text"].startswith(
+                    VALID_SECTIONS[section["kind"]]))
+
+    def test_generator_failure_falls_back_to_baseline(self):
+        opener = RecordingOpener(error=RuntimeError("down"))
+        review = run_multi_feedback(
+            self.evidence,
+            generator=self._generator(opener),
+            practice_contexts=self.slots)
+        self.assertEqual(review["message"],
+                         review["template_baseline"])
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "generator_error")
+
+
+class MultiBaselineSectionsRegressionTests(unittest.TestCase):
+    def _cand(self, sub_id, sub_name, incorrect, out_of,
+              pattern="recurring_errors", tied=None,
+              strategy="supported_review", action=None, focus=True):
+        candidate = {"focus": None,
+                     "planning": {"error_pattern": pattern,
+                                  "tied_candidate_ids": tied or []},
+                     "strategy": strategy,
+                     "action": action or f"Action for {sub_name}."}
+        if focus:
+            candidate["focus"] = {
+                "subtopic_id": sub_id, "subtopic_name": sub_name,
+                "incorrect": incorrect, "out_of": out_of}
+        return candidate
+
+    def _texts(self, sections):
+        return {s["kind"]: s["text"] for s in sections}
+
+    def test_all_correct_optional_candidate(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut", "correct": 40},
+                               {"skill_name": "Prosenttilaskenta",
+                                "correct": 10}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence, [self._cand("x", "x", 0, 0, focus=False,
+                                  action="Celebrate.")]))
+        self.assertEqual(
+            texts["observed_strengths"],
+            "On this assessment, you answered questions correctly in "
+            "Fractions, Percentages.")
+        self.assertEqual(
+            texts["review_focus"],
+            "There is no error-based review priority on this assessment."
+            "\n\n" + SCOPE)
+        self.assertEqual(texts["next_steps"], "Celebrate.")
+
+    def test_two_error_focus_supported_and_other(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut", "correct": 5},
+                               {"skill_name": "Prosenttilaskenta",
+                                "correct": 3}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("percentage_amount", "Percentage of an amount",
+                        3, 10),
+             self._cand("divisibility", "Divisibility", 2, 8,
+                        strategy="worked_example")]))
+        self.assertEqual(
+            texts["review_focus"],
+            "A possible review starting point is Percentage of an "
+            "amount: 3 of 10 assessed answers were incorrect.\n\n"
+            "A possible review starting point is Divisibility: 2 of 8 "
+            "assessed answers were incorrect.\n\n" + SCOPE)
+        self.assertEqual(
+            texts["next_steps"],
+            "With your teacher, work through the example for Percentage "
+            "of an amount below and explain the method.\n\n"
+            "Review the example for Divisibility below, explain each "
+            "step, and ask your teacher to check your reasoning.")
+
+    def test_isolated_limited_tied_and_unknown_action(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut", "correct": 5},
+                               {"skill_name": "Prosenttilaskenta",
+                                "correct": 3}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("percentage_amount", "Percentage of an amount",
+                        1, 5, pattern="isolated_incorrect_answer",
+                        tied=["a", "b"]),
+             self._cand("unknown_sub", "Unknown topic", 1, 1,
+                        tied=["c", "d"], action="Custom action.")]))
+        self.assertEqual(
+            texts["review_focus"],
+            "A possible review starting point is Percentage of an "
+            "amount: 1 of 5 assessed answers were incorrect. This is an "
+            "isolated incorrect answer, not evidence of a consistent "
+            "difficulty. Other options share this display rank; this is "
+            "not a uniquely weakest area.\n\n"
+            "A possible review starting point is Unknown topic: 1 of 1 "
+            "assessed answers were incorrect. Only one question assessed "
+            "this content. Other options share this display rank; this "
+            "is not a uniquely weakest area.\n\n" + SCOPE)
+        self.assertEqual(
+            texts["next_steps"],
+            "With your teacher, work through the example for Percentage "
+            "of an amount below and explain the method.\n\n"
+            "Custom action.")
+
+    def test_no_correct_answers(self):
+        from full_feedback import multi_baseline_sections
+        evidence = {"skills": [{"skill_name": "Murtoluvut", "correct": 0},
+                               {"skill_name": "Prosenttilaskenta",
+                                "correct": 0}]}
+        texts = self._texts(multi_baseline_sections(
+            evidence,
+            [self._cand("prime_recognition", "Prime recognition", 4, 10,
+                        strategy="unsupported_review")]))
+        self.assertEqual(
+            texts["observed_strengths"],
+            "No correct answers were recorded on this assessment. "
+            "Work through the review examples with support.")
+        self.assertEqual(
+            texts["next_steps"],
+            "Review the example for Prime recognition below, explain "
+            "each step, and ask your teacher to check your reasoning.")
+        self.assertEqual(texts["review_focus"].count(SCOPE), 1)
 
 
 if __name__ == "__main__":
