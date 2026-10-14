@@ -49,6 +49,7 @@ Boundaries:
   prompt versions and never claims provider confidence or rationale.
 """
 import copy
+import threading
 
 import evidence_feedback
 from aitta_generator import AittaGenerationError, AittaGenerator
@@ -226,10 +227,26 @@ class EvidenceAittaGenerator:
             raise TypeError(
                 "EvidenceAittaGenerator wraps an AittaGenerator instance")
         self._generator = generator
-        self._last_metadata = _generator_metadata("not_called")
+        self._meta_local = threading.local()
+        self._fallback_metadata = _generator_metadata("not_called")
 
     def __repr__(self):
         return f"EvidenceAittaGenerator({self._generator!r})"
+
+    @property
+    def _last_metadata(self) -> dict:
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        return self._meta_local.__dict__.get(
+            "value", getattr(self, "_fallback_metadata",
+                             _generator_metadata("not_called")))
+
+    @_last_metadata.setter
+    def _last_metadata(self, value: dict):
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        self._meta_local.value = value
+        self._fallback_metadata = value
 
     @property
     def last_metadata(self) -> dict:

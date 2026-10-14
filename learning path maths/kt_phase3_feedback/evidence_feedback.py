@@ -234,6 +234,82 @@ def validate_evidence(evidence):
     return copy.deepcopy(evidence)
 
 
+MIDPOINT_MESSAGE_VERSION = "phase3_student_midpoint_v5"
+
+
+def compose_midpoint_message(evidence):
+    """Fixed-wording student midpoint message from validated evidence."""
+    normalized = validate_evidence(evidence)
+    if normalized["checkpoint"] != "midpoint":
+        raise ValueError("midpoint message requires midpoint evidence")
+    correct = normalized["total"]["correct"]
+    skills = normalized["skills"]
+    sections = [{"kind": "encouragement", "title": "Halfway there",
+                 "text": "You have completed 20 of 40 questions. Here is "
+                         "a quick look at your answers so far."}]
+    focus_title = "Your answers so far"
+    if correct == normalized["total"]["out_of"]:
+        strengths = ("You answered every question correctly in this first "
+                     "set. Keep taking each question one step at a time.")
+        focus = ("You answered every question correctly in this first "
+                 "set.")
+    elif correct == 0:
+        strengths = ("You have completed the first set. This is a "
+                     "starting point, not a limit on what you can learn.")
+        focus = ("In this first set, your answers were incorrect in "
+                 "each topic.")
+    else:
+        best = max(skill["correct"] for skill in skills)
+        strongest = [s for s in skills if s["correct"] == best]
+        if len(strongest) == len(skills):
+            strengths = ("You answered some questions correctly in each "
+                         "topic in this first set.")
+        elif best == strongest[0]["out_of"]:
+            strengths = (
+                "You answered all five questions correctly in "
+                + ", ".join(s["skill_name"] for s in strongest)
+                + " in this first set. These are encouraging results "
+                  "to build on.")
+        else:
+            strengths = (
+                "You answered questions correctly in "
+                + ", ".join(s["skill_name"] for s in strongest)
+                + ". These were your highest-scoring topics in this "
+                  "first set.")
+        errored = [s for s in skills if s["incorrect"] > 0]
+        lowest = min(skill["correct"] for skill in errored)
+        weakest = [s for s in errored if s["correct"] == lowest]
+        if len(weakest) == len(skills):
+            focus = ("In this first set, some of your answers were "
+                     "incorrect in each topic.")
+        else:
+            focus_title = "Where you had more difficulty"
+            names = [s["skill_name"] for s in weakest]
+            if len(names) > 2:
+                names = ", ".join(names[:-1]) + " and " + names[-1]
+            else:
+                names = " and ".join(names)
+            focus = ("In this first set, you had more incorrect "
+                     "answers in " + names
+                     + " than in the other topics.")
+    sections.append({"kind": "strengths", "title": "What is going well",
+                     "text": strengths})
+    sections.append({"kind": "focus", "title": focus_title,
+                     "text": focus})
+    sections.append({"kind": "next_step", "title": "Before you continue",
+                     "text": "There are 20 questions left. Take a short "
+                             "break if you want, then continue one "
+                             "question at a time."})
+    return {"sections": sections,
+            "text": "\n\n".join(section["text"] for section in sections),
+            "total": {"correct": normalized["total"]["correct"],
+                      "out_of": normalized["total"]["out_of"]},
+            "skills": [{"skill_name": skill["skill_name"],
+                        "correct": skill["correct"],
+                        "out_of": skill["out_of"]}
+                       for skill in normalized["skills"]]}
+
+
 def _validate_role(audience, checkpoint):
     if audience not in AUDIENCES or checkpoint not in CHECKPOINTS:
         raise ValueError("unsupported feedback audience or checkpoint")

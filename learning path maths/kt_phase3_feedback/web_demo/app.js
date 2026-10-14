@@ -122,6 +122,90 @@ function englishSkillName(name) {
     ? ENGLISH_SKILL_NAMES[name] : name;
 }
 
+const ENGLISH_MIDPOINT_PATTERN = new RegExp(
+  Object.keys(ENGLISH_SKILL_NAMES)
+    .sort((a, b) => b.length - a.length)
+    .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|"), "g");
+
+function englishMidpointText(value) {
+  return String(value ?? "").replace(
+    ENGLISH_MIDPOINT_PATTERN, (match) => ENGLISH_SKILL_NAMES[match]);
+}
+
+const ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS = Object.freeze({
+  "Divisibility, factors and primes":
+    "Number factors, divisibility and prime numbers",
+  "Fraction multiplication and division":
+    "Multiplying and dividing fractions",
+  "Percentages": "Working with percentages and amounts",
+  "Combining like terms":
+    "Simplifying algebraic expressions by combining matching terms",
+  "Arithmetic": "Adding, subtracting, multiplying and dividing numbers",
+  "Prices": "Working with prices and amounts of money",
+  "Fractions": "Working with fractions",
+});
+
+function englishMidpointTopicDescription(name) {
+  const english = englishSkillName(name);
+  return Object.prototype.hasOwnProperty.call(
+    ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS, english)
+    ? ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS[english]
+    : "Questions about this topic.";
+}
+
+function renderAssessmentResults(container, message, options) {
+  if (!message.total || !Array.isArray(message.skills)) return;
+  const opts = options || {};
+  const box = el("div", null, opts.summaryClass || "midpoint-summary");
+  box.appendChild(el(opts.headingTag || "h4", opts.title));
+  box.appendChild(el("p",
+    `Overall: ${message.total.correct} of ${message.total.out_of} ` +
+    opts.totalSuffix, opts.totalClass || "midpoint-total"));
+  const table = el("table", null, opts.tableClass);
+  table.appendChild(el("caption", opts.caption));
+  const head = el("thead");
+  const headRow = el("tr");
+  (opts.headers || ["Topic", "First-half result",
+                    "What this topic covers"])
+    .forEach((label) => {
+      const th = el("th", label);
+      th.scope = "col";
+      headRow.appendChild(th);
+    });
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = el("tbody");
+  message.skills.forEach((skill) => {
+    const row = el("tr");
+    const name = el("th", skill.teacher_edited
+      ? normalizeDisplayText(skill.skill_name)
+      : englishSkillName(skill.skill_name));
+    name.scope = "row";
+    row.appendChild(name);
+    row.appendChild(el("td",
+      `${skill.correct} of ${skill.out_of} correct`));
+    row.appendChild(el("td", skill.teacher_edited
+      ? "Questions about this topic."
+      : englishMidpointTopicDescription(skill.skill_name)));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  box.appendChild(table);
+  container.appendChild(box);
+}
+
+function renderMidpointSummary(container, message) {
+  renderAssessmentResults(container, message, {
+    title: "Your first 20 answers",
+    totalSuffix: "correct in this first set.",
+    totalClass: "midpoint-total",
+    caption: "Topic results from the first 20 answers",
+    headers: ["Topic", "First-half result", "What this topic covers"],
+    summaryClass: "midpoint-summary",
+    tableClass: "grid midpoint-topics"});
+}
+
 function englishQuestionText(question) {
   const text = normalizeDisplayText(question && question.text);
   if (Object.prototype.hasOwnProperty.call(ENGLISH_QUESTION_TEXT, text)) {
@@ -595,22 +679,216 @@ function renderMultiSelectionDecision(audience, review, baseline,
   return card;
 }
 
+function teacherOriginalDetails(card, key) {
+  const original = card && card.original_content;
+  if (!original) return null;
+  const details = el("details", null, "raw");
+  details.dataset.disclosureKey = key;
+  details.appendChild(el("summary",
+    "Original content before teacher edits"));
+  const put = (text, className) => {
+    if (text !== undefined && text !== null && text !== "") {
+      details.appendChild(el("p", String(text), className || "sec"));
+    }
+  };
+  if (original.title) details.appendChild(el("h4", original.title));
+  put(normalizeDisplayText(original.for_subtopic_name), "meta");
+  put(normalizeDisplayText(original.topic_label), "meta");
+  if (original.relationship) put(original.relationship.message);
+  put(original.message);
+  put(normalizeDisplayText(original.prompt));
+  const question = original.question;
+  if (question) {
+    if (question.skill_name || question.concept_name) {
+      put(`${normalizeDisplayText(question.skill_name)} · ` +
+        `${normalizeDisplayText(question.concept_name)}`, "meta");
+    }
+    put(normalizeDisplayText(question.text));
+    (question.options || []).forEach((option, i) => {
+      if (i === 0) details.appendChild(el("ul", null,
+        "practice-options"));
+      details.lastChild.appendChild(
+        el("li", normalizeDisplayText(option)));
+    });
+  }
+  if (Array.isArray(original.options) && original.options.length) {
+    const list = el("ul", null, "practice-options");
+    original.options.forEach((option) => {
+      list.appendChild(el("li", normalizeDisplayText(option)));
+    });
+    details.appendChild(list);
+  }
+  if (original.selected_answer !== undefined
+      && original.selected_answer !== null) {
+    put(`Your selected answer: ` +
+      `${normalizeDisplayText(original.selected_answer)}`);
+  }
+  if (original.correct_answer !== undefined
+      && original.correct_answer !== null) {
+    put(`Correct answer: ` +
+      `${normalizeDisplayText(original.correct_answer)}`);
+  }
+  if (Array.isArray(original.steps) && original.steps.length) {
+    const steps = el("ol", null, "worked-steps");
+    original.steps.forEach((step) => {
+      steps.appendChild(el("li", step));
+    });
+    details.appendChild(steps);
+  }
+  if (original.reasoning_question) {
+    put(`Explain your reasoning: ${original.reasoning_question}`);
+  }
+  put(original.instruction);
+  put(original.explanation);
+  put(original.notice, "meta");
+  return details;
+}
+
+const EDIT_REVIEW_FIELDS = ["title", "for_subtopic_name", "prompt",
+  "options", "selected_answer", "correct_answer", "steps",
+  "explanation", "reasoning_question", "notice"];
+const EDIT_PRACTICE_FIELDS = ["topic_label", "message", "notice",
+  "instruction"];
+const EDIT_QUESTION_FIELDS = ["skill_name", "concept_name", "text",
+  "options"];
+const EDIT_FIELD_LABELS = {title: "Card title",
+  for_subtopic_name: "Subtopic label", prompt: "Question wording",
+  options: "Options", selected_answer: "Selected answer display wording",
+  correct_answer: "Correct answer",
+  steps: "Worked steps (one step per line)",
+  explanation: "Additional explanation",
+  reasoning_question: "Reasoning question",
+  notice: "Notice", topic_label: "Topic label", message: "Message",
+  instruction: "Instruction", skill_name: "Skill label",
+  concept_name: "Concept label", text: "Practice question"};
+
+function contentProjection() {
+  return {};
+}
+
+function ensureContentPath(content, path) {
+  const parts = path.split(".");
+  let node = content;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const key = parts[i];
+    if (node[key] === undefined) {
+      node[key] = /^\d+$/.test(parts[i + 1]) ? [] : {};
+    }
+    node = node[key];
+  }
+  return [node, parts[parts.length - 1]];
+}
+
+function contentPathGet(content, path) {
+  const parts = path.split(".");
+  let node = content;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (node === null || node === undefined) return undefined;
+    node = node[parts[i]];
+  }
+  return node;
+}
+
+function contentPathSet(content, path, value) {
+  const [node, last] = ensureContentPath(content, path);
+  node[last] = value;
+}
+
+function buildContentPayload(preview, content) {
+  if (!content || !Object.keys(content).length) return undefined;
+  const payload = {};
+  if (content.section_titles
+      && Object.keys(content.section_titles).length) {
+    payload.section_titles = {...content.section_titles};
+  }
+  if (content.skill_labels && Array.isArray(preview.skills)) {
+    payload.skill_labels = preview.skills.map((skill, i) =>
+      Object.hasOwn(content.skill_labels, i)
+        ? content.skill_labels[i]
+        : (skill.teacher_edited
+           ? normalizeDisplayText(skill.skill_name)
+           : englishSkillName(skill.skill_name)));
+  }
+  if (Object.hasOwn(content, "worked_review_notice")) {
+    payload.worked_review_notice = content.worked_review_notice;
+  }
+  const examples = preview.review_examples ||
+    (preview.review_example ? [preview.review_example] : null);
+  if (content.review_examples && examples) {
+    payload.review_examples = examples.map((card, i) => {
+      const src = content.review_examples[i] || {};
+      const patch = {};
+      EDIT_REVIEW_FIELDS.forEach((field) => {
+        if (!Object.hasOwn(src, field)) return;
+        if (field === "options" && Array.isArray(card.options)) {
+          patch.options = card.options.map((opt, j) =>
+            Object.hasOwn(src.options, j)
+              ? src.options[j] : englishOptionText(opt));
+        } else if (field === "steps") {
+          patch.steps = Array.isArray(src.steps)
+            ? src.steps.map((step, j) =>
+                src.steps[j] !== undefined
+                  ? src.steps[j] : (card.steps || [])[j] || "")
+            : String(src.steps || "").split(/\r?\n/)
+                .map((s) => s.trim()).filter(Boolean);
+        } else {
+          patch[field] = src[field];
+        }
+      });
+      return patch;
+    });
+  }
+  const activities = preview.practice_activities ||
+    (preview.practice ? [preview.practice] : null);
+  if (content.practice_activities && activities) {
+    payload.practice_activities = activities.map((card, i) => {
+      const src = content.practice_activities[i] || {};
+      const patch = {};
+      EDIT_PRACTICE_FIELDS.forEach((field) => {
+        if (Object.hasOwn(src, field)) patch[field] = src[field];
+      });
+      if (src.question && card.question) {
+        const qpatch = {};
+        EDIT_QUESTION_FIELDS.forEach((field) => {
+          if (!Object.hasOwn(src.question, field)) return;
+          if (field === "options"
+              && Array.isArray(card.question.options)) {
+            qpatch.options = card.question.options.map((opt, j) =>
+              Object.hasOwn(src.question.options, j)
+                ? src.question.options[j] : englishOptionText(opt));
+          } else {
+            qpatch[field] = src.question[field];
+          }
+        });
+        if (Object.keys(qpatch).length) patch.question = qpatch;
+      }
+      if (src.relationship
+          && Object.hasOwn(src.relationship, "message")) {
+        patch.relationship = {message: src.relationship.message};
+      }
+      return patch;
+    });
+  }
+  return Object.keys(payload).length ? payload : undefined;
+}
+
 function renderStructuredFeedback(container, payload) {
   if (!payload) return;
-  if (payload.total) {
+  if (payload.total && Array.isArray(payload.skills)
+      && payload.skills.length) {
+    renderAssessmentResults(container, payload, {
+      title: "Your assessment results",
+      totalSuffix: "correct on this assessment.",
+      totalClass: "score",
+      caption: "Topic results for this assessment",
+      headers: ["Topic", "Result", "What this topic covers"],
+      summaryClass: "assessment-results",
+      tableClass: "grid assessment-topics"});
+  } else if (payload.total) {
     container.appendChild(el("p",
-      `Observed result: ${payload.total.correct} of ` +
-      `${payload.total.out_of} answers correct on this assessment.`,
+      `Overall: ${payload.total.correct} of ` +
+      `${payload.total.out_of} correct on this assessment.`,
       "score"));
-  }
-  if (payload.skills && payload.skills.length) {
-    const list = el("ul", null, "skill-list");
-    payload.skills.forEach((skill) => {
-      list.appendChild(el("li",
-        `${englishSkillName(skill.skill_name)}: ${skill.correct} / ` +
-        `${skill.out_of} observed`));
-    });
-    container.appendChild(list);
   }
   (payload.sections || []).forEach((section) => {
     const box = el("div", null, "feedback-section");
@@ -629,21 +907,39 @@ function renderStructuredFeedback(container, payload) {
         (exampleNoticeCounts.get(example.notice) || 0) + 1);
     }
   });
-  examples.forEach((example) => {
+  examples.forEach((example, exampleIndex) => {
     const box = el("div", null, "feedback-section review-example");
+    const original = example.original_content || null;
+    const changed = (field) => example.teacher_edited && (!original
+      || JSON.stringify(example[field])
+         !== JSON.stringify(original[field]));
     const heading = example.for_subtopic_name
       ? `${example.title || "Worked review example"} — ` +
-        `${englishSkillName(example.for_subtopic_name)}`
+        `${changed("for_subtopic_name")
+          ? normalizeDisplayText(example.for_subtopic_name)
+          : englishSkillName(example.for_subtopic_name)}`
       : (example.title || "Worked review example");
     box.appendChild(el("h3", heading));
+    if (example.teacher_edited) {
+      box.appendChild(el("p",
+        payload.requires_educator_review
+          ? "Teacher-edited worked review — verify before release"
+          : "Teacher-edited worked review",
+        "warn"));
+    }
     if (example.source === "incorrect_assessment_response") {
-      const displayPrompt =
-        englishQuestionText({text: example.prompt});
+      const displayPrompt = changed("prompt")
+        ? normalizeDisplayText(example.prompt)
+        : englishQuestionText({text: example.prompt});
       const rawPrompt = normalizeDisplayText(example.prompt);
       const rawOptions =
         (example.options || []).map(normalizeDisplayText);
-      const displayOptions =
-        (example.options || []).map(englishOptionText);
+      const displayOptions = (example.options || []).map(
+        changed("options") ? normalizeDisplayText : englishOptionText);
+      const selectedText = changed("selected_answer")
+        ? normalizeDisplayText : englishOptionText;
+      const correctText = changed("correct_answer")
+        ? normalizeDisplayText : englishOptionText;
       box.appendChild(el("p", displayPrompt, "sec"));
       const list = el("ul", null, "practice-options");
       displayOptions.forEach((option) => {
@@ -651,10 +947,10 @@ function renderStructuredFeedback(container, payload) {
       });
       box.appendChild(list);
       box.appendChild(el("p",
-        `Your selected answer: ${englishOptionText(
+        `Your selected answer: ${selectedText(
           example.selected_answer)}`, "sec"));
       box.appendChild(el("p",
-        `Correct answer: ${englishOptionText(
+        `Correct answer: ${correctText(
           example.correct_answer)}`, "sec"));
       if (Array.isArray(example.steps) && example.steps.length) {
         const steps = el("ol", null, "worked-steps");
@@ -667,6 +963,11 @@ function renderStructuredFeedback(container, payload) {
         box.appendChild(el("p",
           `Explain your reasoning: ${example.reasoning_question}`,
           "sec"));
+      }
+      if (example.explanation
+          && example.explanation
+             !== (example.steps || []).join("\n")) {
+        box.appendChild(el("p", example.explanation, "sec"));
       }
       if (displayPrompt !== rawPrompt
           || displayOptions.join("\n") !== rawOptions.join("\n")) {
@@ -688,6 +989,9 @@ function renderStructuredFeedback(container, payload) {
         box.appendChild(el("p", example.explanation, "sec"));
       }
     }
+    const originalCard = teacherOriginalDetails(
+      example, `worked-review-original-content:${exampleIndex}`);
+    if (originalCard) box.appendChild(originalCard);
     if (example.notice
         && exampleNoticeCounts.get(example.notice) === 1) {
       box.appendChild(el("p", example.notice, "meta"));
@@ -714,7 +1018,8 @@ function renderStructuredFeedback(container, payload) {
   activities.forEach((practice, index) => {
     renderPracticeCard(container, practice, index,
       !practice.notice
-      || practiceNoticeCounts.get(practice.notice) === 1);
+      || practiceNoticeCounts.get(practice.notice) === 1,
+      payload.requires_educator_review);
   });
   practiceNoticeCounts.forEach((count, notice) => {
     if (count > 1) {
@@ -728,41 +1033,70 @@ function renderStructuredFeedback(container, payload) {
   }
 }
 
-function renderPracticeCard(container, practice, index, showNotice) {
+function renderPracticeCard(container, practice, index, showNotice,
+                            needsReview) {
   const relationship = practice.relationship || null;
   const box = el("div", null, "feedback-section practice-activity");
+  const original = practice.original_content || null;
+  const originalQuestion = (original || {}).question || null;
+  const changed = (field) => practice.teacher_edited && (!original
+    || JSON.stringify(practice[field])
+       !== JSON.stringify(original[field]));
+  const questionChanged = (field) => practice.teacher_edited
+    && (!originalQuestion
+        || JSON.stringify((practice.question || {})[field])
+           !== JSON.stringify(originalQuestion[field]));
+  const nameFor = (value, isChanged) =>
+    (practice.teacher_edited && isChanged)
+      ? normalizeDisplayText(value) : englishSkillName(value);
   let heading;
   if (relationship && relationship.kind === "same_topic_different_content") {
-    heading = `Related practice — ${englishSkillName(
+    heading = `Related practice — ${nameFor(
       practice.question?.concept_name || practice.topic_label
-      || "related content")}`;
+      || "related content",
+      questionChanged("concept_name") || changed("topic_label"))}`;
   } else if (relationship && relationship.kind === "different_content") {
-    heading = `Separate practice — ${englishSkillName(
-      practice.question?.concept_name || "other content")}`;
+    heading = `Separate practice — ${nameFor(
+      practice.question?.concept_name || "other content",
+      questionChanged("concept_name"))}`;
   } else {
     heading = practice.topic_label
-      ? `Practice for ${englishSkillName(practice.topic_label)}`
+      ? `Practice for ${nameFor(practice.topic_label,
+          changed("topic_label"))}`
       : "Practice activity";
   }
   box.appendChild(el("h3", heading));
+  if (practice.teacher_edited) {
+    box.appendChild(el("p",
+      needsReview
+        ? "Teacher-edited practice — verify before release"
+        : "Teacher-edited practice", "warn"));
+  }
   if (relationship && relationship.message) {
     box.appendChild(el("p", relationship.message, "sec"));
   }
   if (practice.message
-      && !(practice.status === "selected"
-           && relationship && relationship.message)) {
+      && (!(practice.status === "selected"
+            && relationship && relationship.message)
+          || changed("message"))) {
     box.appendChild(el("p", practice.message, "sec"));
   }
   const question = practice.question;
   if (question) {
-    const displayPrompt = englishQuestionText(question);
-    const displayOptions =
-      (question.options || []).map(englishOptionText);
+    const displayPrompt = questionChanged("text")
+      ? normalizeDisplayText(question.text)
+      : englishQuestionText(question);
+    const displayOptions = (question.options || []).map(
+      questionChanged("options") ? normalizeDisplayText
+                                 : englishOptionText);
     const rawPrompt = normalizeDisplayText(question.text);
     const rawOptions = (question.options || []).map(normalizeDisplayText);
     box.appendChild(el("p",
-      `${englishSkillName(question.skill_name)} · ` +
-      `${englishSkillName(question.concept_name)}`, "meta"));
+      practice.teacher_edited
+        ? `${nameFor(question.skill_name, questionChanged("skill_name"))} · ` +
+          `${nameFor(question.concept_name, questionChanged("concept_name"))}`
+        : englishSkillName(question.skill_name),
+      "meta"));
     box.appendChild(el("p", displayPrompt, "sec"));
     const list = el("ul", null, "practice-options");
     displayOptions.forEach((option) => {
@@ -787,6 +1121,9 @@ function renderPracticeCard(container, practice, index, showNotice) {
       box.appendChild(original);
     }
   }
+  const originalCard = teacherOriginalDetails(
+    practice, `practice-original-content:${index}`);
+  if (originalCard) box.appendChild(originalCard);
   if (practice.notice && showNotice !== false) {
     box.appendChild(el("p", practice.notice, "meta"));
   }
@@ -794,6 +1131,49 @@ function renderPracticeCard(container, practice, index, showNotice) {
 }
 
 /* ============================ STUDENT ============================ */
+
+const RELEASED_SNAPSHOT_KEY = "demoReleasedSnapshot";
+
+function buildStudentSnapshotFromDetail(detail, releasedFeedback) {
+  if (!detail) return null;
+  const delivery = detail.feedback_delivery || {};
+  const endFeedback = releasedFeedback || delivery.released_feedback;
+  if (!endFeedback) return null;
+  return {
+    session_id: detail.session_id,
+    synthetic: true,
+    bank_mode: detail.bank_mode || "demo",
+    bank_label: detail.bank_label || "Demo bank",
+    status: "complete",
+    answered_count: detail.answered_count || 40,
+    assessment_total: detail.observed_total || null,
+    current_question: null,
+    feedback: {
+      midpoint: null,
+      end: endFeedback,
+    },
+    feedback_delivery: {
+      status: "released",
+      released_at: delivery.released_at || new Date().toISOString(),
+    },
+    provider_job: detail.provider_job || {status: "ready", provider_mode: "rules"},
+  };
+}
+
+function saveReleasedStudentSnapshot(detail, releasedFeedback, clearActiveCreds = false) {
+  const snap = buildStudentSnapshotFromDetail(detail, releasedFeedback);
+  if (!snap) return;
+  try {
+    localStorage.setItem(RELEASED_SNAPSHOT_KEY, JSON.stringify(snap));
+    if (clearActiveCreds) {
+      const raw = localStorage.getItem("demoSession");
+      const current = raw ? JSON.parse(raw) : null;
+      if (!current || current.sid !== detail.session_id) {
+        localStorage.removeItem("demoSession");
+      }
+    }
+  } catch (err) {}
+}
 
 function studentPage() {
   const PANELS = ["#start-panel", "#question-panel", "#pause-panel",
@@ -811,6 +1191,15 @@ function studentPage() {
     creds = value;
     if (value) localStorage.setItem(credKey, JSON.stringify(value));
     else localStorage.removeItem(credKey);
+  }
+
+  function loadReleasedSnapshot() {
+    try {
+      const raw = localStorage.getItem(RELEASED_SNAPSHOT_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (err) {
+      return null;
+    }
   }
 
   function credsFromUrl() {
@@ -839,7 +1228,11 @@ function studentPage() {
   }
 
   async function refresh() {
-    if (!creds) { render(null); return; }
+    if (!creds) {
+      const releasedSnap = loadReleasedSnapshot();
+      render(releasedSnap);
+      return;
+    }
     try {
       const snap = await api(`/api/sessions/${creds.sid}`,
                              {token: creds.token});
@@ -864,13 +1257,27 @@ function studentPage() {
     container.replaceChildren();
     if (!message) return;
     (message.sections || []).forEach((section) => {
-      const p = el("p", section.text, "sec");
+      if (section.title) {
+        const box = el("section", null, "sec");
+        box.appendChild(el("h3", section.title));
+        box.appendChild(el("p", englishMidpointText(section.text)));
+        container.appendChild(box);
+        if (section.kind === "encouragement") {
+          renderMidpointSummary(container, message);
+        }
+        return;
+      }
+      const p = el("p", englishMidpointText(section.text), "sec");
       const kind = el("span", section.kind || "", "kind");
       p.prepend(kind, " ");
       container.appendChild(p);
+      if (section.kind === "encouragement") {
+        renderMidpointSummary(container, message);
+      }
     });
     if (!message.sections || !message.sections.length) {
-      container.appendChild(el("p", message.text || ""));
+      renderMidpointSummary(container, message);
+      container.appendChild(el("p", englishMidpointText(message.text || "")));
     }
   }
 
@@ -893,6 +1300,7 @@ function studentPage() {
     if (answered === 20 && mid && !acked) {
       renderMessage($("#pause-message"), mid);
       showPanel(PANELS, "#pause-panel");
+      $("#pause-heading").focus({preventScroll: true});
       return;
     }
     const question = snapshot.current_question;
@@ -965,6 +1373,7 @@ function studentPage() {
       const payload = await api("/api/sessions", {
         body: {synthetic: true, bank_mode: $("#bank-mode").value}});
       saveCreds({sid: payload.session_id, token: payload.student_token});
+      localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
       localStorage.removeItem(ackKey(payload.session_id));
       netError(null);
       render(payload.snapshot);
@@ -985,6 +1394,7 @@ function studentPage() {
   $("#display-language").addEventListener("change", refresh);
   function returnToSetup() {
     saveCreds(null);
+    localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
     $("#synthetic-consent").checked = false;
     $("#start-button").disabled = true;
     render(null);
@@ -1024,6 +1434,7 @@ function studentPage() {
   // Resume: URL token (from teacher simulation link) wins, then storage.
   const fromUrl = credsFromUrl();
   if (fromUrl) {
+    localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
     saveCreds(fromUrl);
     stripHash();
   } else {
@@ -1362,6 +1773,14 @@ function createDetailView(root, options = {}) {
       a.target = "_blank";
       a.rel = "noopener";
       linkBox.appendChild(a);
+    } else if (detail.feedback_delivery && detail.feedback_delivery.released_feedback) {
+      saveReleasedStudentSnapshot(detail, detail.feedback_delivery.released_feedback, false);
+      const a = el("a", "Open student view", "ghost small");
+      a.href = "/";
+      a.addEventListener("click", () => {
+        saveReleasedStudentSnapshot(detail, detail.feedback_delivery.released_feedback, true);
+      });
+      linkBox.appendChild(a);
     }
     renderPane("overview", renderOverviewContent);
     renderPane("evidence", renderEvidenceContent);
@@ -1681,7 +2100,8 @@ function createDetailView(root, options = {}) {
 
   function editDraftFor(sid, delivery) {
     if (!editDrafts.has(sid)) {
-      editDrafts.set(sid, {hash: null, texts: {}, dirty: false,
+      editDrafts.set(sid, {hash: null, texts: {}, content: null,
+                           dirty: false,
                            saving: false, note: null, stale: false,
                            awaitingPreview: false, savedAt: null});
     }
@@ -1694,6 +2114,7 @@ function createDetailView(root, options = {}) {
         if (delivery.preview_sha256 === draft.hash) {
           draft.awaitingPreview = false;
           draft.texts = current;
+          draft.content = contentProjection(preview);
           draft.note = `Edited draft saved (${draft.savedAt}).`;
         } else if (delivery.edited_at && draft.savedAt
                    && delivery.edited_at > draft.savedAt) {
@@ -1704,6 +2125,7 @@ function createDetailView(root, options = {}) {
       } else if (!draft.dirty || !draft.hash) {
         draft.hash = delivery.preview_sha256;
         draft.texts = current;
+        draft.content = contentProjection(preview);
       } else if (delivery.preview_sha256
                  && draft.hash !== delivery.preview_sha256) {
         draft.stale = true;
@@ -1730,6 +2152,7 @@ function createDetailView(root, options = {}) {
     card.appendChild(kv("Release status", statusText));
     const released = delivery.released_feedback;
     if (released) {
+      saveReleasedStudentSnapshot(detail, released, Boolean(detail.replay));
       card.appendChild(kv("Released at", delivery.released_at));
       card.appendChild(kv("Reviewer", delivery.reviewer_label));
       const box = el("details", null, "raw");
@@ -1848,9 +2271,11 @@ function createDetailView(root, options = {}) {
     }
     const editStatus = el("p", edit.note || null, "meta");
     const sectionInputs = {};
+    const contentInputs = [];
     card.appendChild(el("p",
-      "Narrative editing only—scores, worked example and practice " +
-      "activity are fixed.",
+      "All learner-facing wording — section titles, narratives, " +
+      "skill labels, worked review cards and practice cards — is " +
+      "editable. Scores and source assessment records are preserved.",
       "boundary-note"));
     if (edit.dirty && edit.stale) {
       card.appendChild(el("p",
@@ -1860,7 +2285,7 @@ function createDetailView(root, options = {}) {
     }
     const editBox = el("details", null, "raw");
     editBox.dataset.disclosureKey = "feedback-editing";
-    editBox.appendChild(el("summary", "Edit feedback wording"));
+    editBox.appendChild(el("summary", "Edit full feedback package"));
     (preview.sections || []).forEach((section) => {
       const field = document.createElement("textarea");
       field.id = `${prefix}edit-${section.kind}`;
@@ -1889,6 +2314,225 @@ function createDetailView(root, options = {}) {
       editBox.appendChild(field);
       sectionInputs[section.kind] = field;
     });
+    const contentField = (target, path, labelText, fallbackValue, rows) => {
+      const current = contentPathGet(edit.content, path);
+      const value = current !== undefined
+        ? (Array.isArray(current) ? current.join("\n") : current)
+        : fallbackValue;
+      const field = document.createElement("textarea");
+      field.id = `${prefix}edit-content-${path}`;
+      field.className = "edit-content";
+      field.dataset.contentPath = path;
+      field.maxLength = 2000;
+      field.disabled = edit.saving || edit.awaitingPreview;
+      field.rows = rows || Math.max(2, Math.min(8,
+        Math.ceil(String(value || "").length / 80)));
+      field.value = value === null || value === undefined
+        ? "" : String(value);
+      const wrap = el("label", labelText);
+      wrap.htmlFor = field.id;
+      field.addEventListener("input", () => {
+        contentPathSet(edit.content, path, field.value);
+        edit.dirty = true;
+        button.disabled = true;
+        if (!edit.stale && !edit.note) {
+          editStatus.textContent =
+            "Unsaved edits — save the edited draft before releasing.";
+        }
+      });
+      target.appendChild(wrap);
+      target.appendChild(field);
+      contentInputs.push(field);
+    };
+    const subSection = (parent, key, titleText) => {
+      const box = el("details", null, "raw");
+      box.dataset.disclosureKey = key;
+      box.appendChild(el("summary", titleText));
+      parent.appendChild(box);
+      return box;
+    };
+    const reviewCards = preview.review_examples ||
+      (preview.review_example ? [preview.review_example] : []);
+    reviewCards.forEach((reviewCard, i) => {
+      const orig = reviewCard.original_content || null;
+      const changed = (f) => reviewCard.teacher_edited && (!orig
+        || JSON.stringify(reviewCard[f]) !== JSON.stringify(orig[f]));
+      const subtopic = reviewCard.for_subtopic_name
+        ? (changed("for_subtopic_name")
+           ? normalizeDisplayText(reviewCard.for_subtopic_name)
+           : englishSkillName(reviewCard.for_subtopic_name))
+        : "";
+      const cardBox = subSection(editBox, `edit-review-card:${i}`,
+        `Worked review card ${i + 1}${subtopic ? ` — ${subtopic}` : ""}`);
+      if (Array.isArray(reviewCard.steps) && reviewCard.steps.length) {
+        contentField(cardBox, `review_examples.${i}.steps`,
+          EDIT_FIELD_LABELS.steps, reviewCard.steps.join("\n"),
+          Math.max(3, reviewCard.steps.length + 1));
+      } else if (Object.hasOwn(reviewCard, "explanation")) {
+        contentField(cardBox, `review_examples.${i}.explanation`,
+          "Explanation", reviewCard.explanation || "");
+      }
+      if (Object.hasOwn(reviewCard, "reasoning_question")) {
+        contentField(cardBox, `review_examples.${i}.reasoning_question`,
+          EDIT_FIELD_LABELS.reasoning_question,
+          reviewCard.reasoning_question);
+      }
+      if (Object.hasOwn(reviewCard, "prompt")) {
+        const displayPrompt = reviewCard.source
+          === "incorrect_assessment_response"
+          ? (changed("prompt")
+             ? normalizeDisplayText(reviewCard.prompt)
+             : englishQuestionText({text: reviewCard.prompt}))
+          : reviewCard.prompt;
+        contentField(cardBox, `review_examples.${i}.prompt`,
+          EDIT_FIELD_LABELS.prompt, displayPrompt);
+      }
+      if (reviewCard.explanation
+          && Array.isArray(reviewCard.steps)
+          && reviewCard.steps.length
+          && reviewCard.explanation !== reviewCard.steps.join("\n")) {
+        contentField(cardBox, `review_examples.${i}.explanation`,
+          EDIT_FIELD_LABELS.explanation, reviewCard.explanation);
+      }
+      const adv = subSection(cardBox, `edit-review-adv:${i}`,
+        "Card options, labels & notice");
+      if (Object.hasOwn(reviewCard, "title")) {
+        contentField(adv, `review_examples.${i}.title`,
+          EDIT_FIELD_LABELS.title, reviewCard.title, 1);
+      }
+      if (Object.hasOwn(reviewCard, "for_subtopic_name")) {
+        contentField(adv, `review_examples.${i}.for_subtopic_name`,
+          EDIT_FIELD_LABELS.for_subtopic_name, subtopic, 1);
+      }
+      if (Array.isArray(reviewCard.options)) {
+        reviewCard.options.forEach((item, j) => {
+          const optText = changed("options")
+            ? normalizeDisplayText(item) : englishOptionText(item);
+          contentField(adv, `review_examples.${i}.options.${j}`,
+            `Option ${j + 1}`, optText, 1);
+        });
+      }
+      if (Object.hasOwn(reviewCard, "selected_answer")) {
+        const selText = changed("selected_answer")
+          ? normalizeDisplayText(reviewCard.selected_answer)
+          : englishOptionText(reviewCard.selected_answer);
+        contentField(adv, `review_examples.${i}.selected_answer`,
+          EDIT_FIELD_LABELS.selected_answer, selText, 1);
+      }
+      if (Object.hasOwn(reviewCard, "correct_answer")) {
+        const corText = changed("correct_answer")
+          ? normalizeDisplayText(reviewCard.correct_answer)
+          : englishOptionText(reviewCard.correct_answer);
+        contentField(adv, `review_examples.${i}.correct_answer`,
+          EDIT_FIELD_LABELS.correct_answer, corText, 1);
+      }
+      if (Object.hasOwn(reviewCard, "notice")) {
+        contentField(adv, `review_examples.${i}.notice`,
+          EDIT_FIELD_LABELS.notice, reviewCard.notice);
+      }
+    });
+    const practiceCards = preview.practice_activities ||
+      (preview.practice ? [preview.practice] : []);
+    practiceCards.forEach((practiceCard, i) => {
+      const orig = practiceCard.original_content || null;
+      const origQ = (orig || {}).question || null;
+      const changed = (f) => practiceCard.teacher_edited && (!orig
+        || JSON.stringify(practiceCard[f]) !== JSON.stringify(orig[f]));
+      const qChanged = (f) => practiceCard.teacher_edited && (!origQ
+        || JSON.stringify((practiceCard.question || {})[f])
+           !== JSON.stringify(origQ[f]));
+      const topic = practiceCard.topic_label
+        ? (changed("topic_label")
+           ? normalizeDisplayText(practiceCard.topic_label)
+           : englishSkillName(practiceCard.topic_label))
+        : "";
+      const cardBox = subSection(editBox, `edit-practice-card:${i}`,
+        `Practice card ${i + 1}${topic ? ` — ${topic}` : ""}`);
+      if (practiceCard.relationship
+          && Object.hasOwn(practiceCard.relationship, "message")) {
+        contentField(cardBox,
+          `practice_activities.${i}.relationship.message`,
+          "Relationship note", practiceCard.relationship.message);
+      }
+      if (Object.hasOwn(practiceCard, "instruction")) {
+        contentField(cardBox, `practice_activities.${i}.instruction`,
+          EDIT_FIELD_LABELS.instruction, practiceCard.instruction);
+      }
+      const q = practiceCard.question;
+      if (q && Object.hasOwn(q, "text")) {
+        const qText = qChanged("text")
+          ? normalizeDisplayText(q.text) : englishQuestionText(q);
+        contentField(cardBox, `practice_activities.${i}.question.text`,
+          EDIT_FIELD_LABELS.text, qText);
+      }
+      if (Object.hasOwn(practiceCard, "message")
+          && (!practiceCard.relationship || changed("message")
+              || practiceCard.status !== "selected")) {
+        contentField(cardBox, `practice_activities.${i}.message`,
+          EDIT_FIELD_LABELS.message, practiceCard.message);
+      }
+      const adv = subSection(cardBox, `edit-practice-adv:${i}`,
+        "Practice options, labels & notice");
+      if (Object.hasOwn(practiceCard, "topic_label")) {
+        contentField(adv, `practice_activities.${i}.topic_label`,
+          EDIT_FIELD_LABELS.topic_label, topic, 1);
+      }
+      if (Object.hasOwn(practiceCard, "message")
+          && practiceCard.relationship && !changed("message")
+          && practiceCard.status === "selected") {
+        contentField(adv, `practice_activities.${i}.message`,
+          EDIT_FIELD_LABELS.message, practiceCard.message);
+      }
+      if (q) {
+        if (Object.hasOwn(q, "skill_name")) {
+          const sName = qChanged("skill_name")
+            ? normalizeDisplayText(q.skill_name)
+            : englishSkillName(q.skill_name);
+          contentField(adv,
+            `practice_activities.${i}.question.skill_name`,
+            EDIT_FIELD_LABELS.skill_name, sName, 1);
+        }
+        if (Object.hasOwn(q, "concept_name")) {
+          const cName = qChanged("concept_name")
+            ? normalizeDisplayText(q.concept_name)
+            : englishSkillName(q.concept_name);
+          contentField(adv,
+            `practice_activities.${i}.question.concept_name`,
+            EDIT_FIELD_LABELS.concept_name, cName, 1);
+        }
+        if (Array.isArray(q.options)) {
+          q.options.forEach((item, j) => {
+            const optText = qChanged("options")
+              ? normalizeDisplayText(item) : englishOptionText(item);
+            contentField(adv,
+              `practice_activities.${i}.question.options.${j}`,
+              `Practice option ${j + 1}`, optText, 1);
+          });
+        }
+      }
+      if (Object.hasOwn(practiceCard, "notice")) {
+        contentField(adv, `practice_activities.${i}.notice`,
+          EDIT_FIELD_LABELS.notice, practiceCard.notice);
+      }
+    });
+    const advGlobal = subSection(editBox, "edit-advanced-labels",
+      "Advanced headings, skill labels & notices");
+    (preview.sections || []).forEach((section) => {
+      contentField(advGlobal, `section_titles.${section.kind}`,
+        `Heading for ${section.kind.replaceAll("_", " ")}`,
+        section.title || "", 1);
+    });
+    (preview.skills || []).forEach((skill, i) => {
+      const label = skill.teacher_edited
+        ? normalizeDisplayText(skill.skill_name)
+        : englishSkillName(skill.skill_name);
+      contentField(advGlobal, `skill_labels.${i}`,
+        `Skill ${i + 1} label`, label, 1);
+    });
+    if (Object.hasOwn(preview, "worked_review_notice")) {
+      contentField(advGlobal, "worked_review_notice",
+        "Worked review notice", preview.worked_review_notice || "");
+    }
     card.appendChild(editBox);
     const rebindBtn = el("button",
       "Use latest revision with my edits", "secondary");
@@ -1917,18 +2561,21 @@ function createDetailView(root, options = {}) {
       (preview.sections || []).forEach((s) => {
         sections[s.kind] = sectionInputs[s.kind].value;
       });
+      const contentPayload = buildContentPayload(preview, edit.content);
       edit.texts = sections;
       edit.dirty = true;
       edit.saving = true;
       saveBtn.disabled = true;
       button.disabled = true;
       Object.values(sectionInputs).forEach((f) => { f.disabled = true; });
+      contentInputs.forEach((f) => { f.disabled = true; });
       let failed = false;
       try {
+        const body = {message_sha256: baseHash, sections: sections,
+                      reviewer_label: draft.label || "anonymous"};
+        if (contentPayload) body.content = contentPayload;
         const res = await api(
-          `/api/teacher/sessions/${sid}/feedback-edits`, {
-            body: {message_sha256: baseHash, sections: sections,
-                   reviewer_label: draft.label || "anonymous"}});
+          `/api/teacher/sessions/${sid}/feedback-edits`, {body});
         edit.hash = res.preview_sha256;
         edit.savedAt = res.saved_at;
         edit.awaitingPreview = true;
@@ -2009,6 +2656,7 @@ function createDetailView(root, options = {}) {
         await api(`/api/teacher/sessions/${sid}/release`, {
           body: {message_sha256: delivery.preview_sha256,
                  reviewer_label: draft.label || "anonymous"}});
+        saveReleasedStudentSnapshot(detail, delivery.preview, true);
         draft.note = "Released to the student.";
         pollOnce();
       } catch (err) {
@@ -2027,7 +2675,52 @@ function createDetailView(root, options = {}) {
       status.textContent = draft.note;
     });
     card.appendChild(button);
+    if (released) {
+      const openLink = el("a", "Open in Assessment view", "ghost small");
+      openLink.href = "/";
+      openLink.addEventListener("click", () => {
+        saveReleasedStudentSnapshot(detail, released, true);
+      });
+      card.appendChild(openLink);
+    }
     card.appendChild(status);
+    pane.appendChild(card);
+  }
+
+  function renderMidpointCard(pane) {
+    const card = el("div", null, "card-inner midpoint-feedback-card");
+    card.appendChild(el("h3", "Student midpoint check-in"));
+    const midpoint = detail.checkpoints.midpoint || {};
+    const message = midpoint.student_message
+      || (midpoint.baseline_student && midpoint.baseline_student.message);
+    if (!message) {
+      card.appendChild(el("p",
+        "No saved midpoint message is available in this result."));
+    } else {
+      card.appendChild(el("p",
+        "Saved student-facing wording from the 20-question checkpoint, " +
+        "displayed with English topic labels. This record does not " +
+        "confirm that the student opened or read it.", "meta"));
+      const box = el("div", null, "midpoint-feedback-message");
+      const sections = message.sections || [];
+      if (sections.length) {
+        sections.forEach((section) => {
+          if (section.title) box.appendChild(el("h4", section.title));
+          box.appendChild(el("p", englishMidpointText(section.text)));
+          if (section.kind === "encouragement") {
+            renderMidpointSummary(box, message);
+          }
+        });
+      } else {
+        renderMidpointSummary(box, message);
+        box.appendChild(el("p", englishMidpointText(message.text || "")));
+      }
+      card.appendChild(box);
+      if (midpoint.student_message_version) {
+        card.appendChild(kv("Message version",
+          midpoint.student_message_version));
+      }
+    }
     pane.appendChild(card);
   }
 
@@ -2036,17 +2729,19 @@ function createDetailView(root, options = {}) {
     const active = document.activeElement;
     const focusedId = (active && pane.contains(active) && active.id
       && (active.id === `${prefix}release-reviewer`
-          || active.classList.contains("edit-section")))
+          || active.classList.contains("edit-section")
+          || active.classList.contains("edit-content")))
       ? active.id : null;
     const caret = focusedId
       ? {start: active.selectionStart, end: active.selectionEnd}
       : null;
     pane.replaceChildren();
+    renderMidpointCard(pane);
     if (!detail.read_only && detail.feedback_delivery) {
       renderReleaseCard(pane);
     }
     if (focusedId) {
-      const input = pane.querySelector(`#${focusedId}`);
+      const input = document.getElementById(focusedId);
       if (input) {
         input.focus();
         input.setSelectionRange(caret.start, caret.end);
@@ -2103,13 +2798,6 @@ function createDetailView(root, options = {}) {
       });
       card.appendChild(wrap);
     });
-    const halfway = detail.checkpoints.midpoint?.baseline_student;
-    if (halfway) {
-      const saved = el("details", null, "raw");
-      saved.dataset.disclosureKey = "halfway-feedback";
-      saved.append(el("summary", "Halfway student feedback in this result"), el("p", halfway.message.text, "draft-text"));
-      card.append(saved);
-    }
     const recommendation = end.recommendation;
     if (recommendation) {
       const evidenceBox = el("details", null, "raw");

@@ -61,7 +61,7 @@ class SessionStore:
         if session.get("schema") != SESSION_SCHEMA:
             raise ValueError("session has the wrong schema")
         path = self._path(session.get("session_id"))
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
         with tmp.open("w", encoding="utf-8") as stream:
             json.dump(session, stream, ensure_ascii=False, indent=2)
         tmp.replace(path)

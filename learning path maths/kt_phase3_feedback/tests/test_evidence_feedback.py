@@ -11,8 +11,8 @@ import unittest
 import evidence_feedback
 import research_content_catalog as catalog
 from evidence_feedback import (
-    EVIDENCE_SCHEMA, build_evidence, run_feedback, selection_payload,
-    validate_evidence)
+    EVIDENCE_SCHEMA, build_evidence, compose_midpoint_message,
+    run_feedback, selection_payload, validate_evidence)
 from evidence_feedback_policy import (
     GENERATION_SCHEMA, MIDPOINT_TEXT, POLICY_VERSION, PRACTICE_ACTIONS,
     REVIEW_STATUS, SELECTION_PROMPT_VERSION, SELECTION_SCHEMA)
@@ -729,6 +729,216 @@ class MidpointTests(unittest.TestCase):
         self.assertEqual(
             review["trace"]["selection_source"],
             "rules_single_candidate")
+
+
+def mid_evidence(wrong=(), bank=None, taxonomy=None):
+    bank = bank or make_bank()
+    taxonomy = taxonomy or make_taxonomy(bank)
+    return build_evidence(bank, taxonomy,
+                          submissions(bank, wrong, count=20))
+
+
+class MidpointMessageTests(unittest.TestCase):
+    def test_exact_sections_titles_and_text_shape(self):
+        message = compose_midpoint_message(mid_evidence({0}))
+        self.assertEqual(set(message),
+                         {"sections", "text", "total", "skills"})
+        self.assertEqual(
+            [(s["kind"], s["title"]) for s in message["sections"]],
+            [("encouragement", "Halfway there"),
+             ("strengths", "What is going well"),
+             ("focus", "Where you had more difficulty"),
+             ("next_step", "Before you continue")])
+        for section in message["sections"]:
+            self.assertEqual(set(section), {"kind", "title", "text"})
+        self.assertEqual(
+            message["sections"][0]["text"],
+            "You have completed 20 of 40 questions. Here is a quick "
+            "look at your answers so far.")
+        self.assertEqual(
+            message["sections"][3]["text"],
+            "There are 20 questions left. Take a short break if you "
+            "want, then continue one question at a time.")
+        self.assertEqual(
+            message["text"],
+            "\n\n".join(s["text"] for s in message["sections"]))
+
+    def test_total_and_skills_are_frozen_whitelist_projection(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sA", half=0))
+                 | set(positions(bank, "sB", half=0))
+                 | set(positions(bank, "sC", half=0)[:2]))
+        message = compose_midpoint_message(mid_evidence(wrong))
+        self.assertEqual(message["total"],
+                         {"correct": 8, "out_of": 20})
+        self.assertEqual(
+            message["skills"],
+            [{"skill_name": "Skill sA", "correct": 0, "out_of": 5},
+             {"skill_name": "Skill sB", "correct": 0, "out_of": 5},
+             {"skill_name": "Skill sC", "correct": 3, "out_of": 5},
+             {"skill_name": "Skill sD", "correct": 5, "out_of": 5}])
+        blob = json.dumps(message)
+        for marker in ("skill_id", "sA__q", "subtopic", "p_correct",
+                       "answer_index", "bank_sha256"):
+            self.assertNotIn(marker, blob)
+        message["skills"][0]["correct"] = 99
+        again = compose_midpoint_message(mid_evidence(wrong))
+        self.assertEqual(again["skills"][0]["correct"], 0)
+
+    def test_mixed_unique_extrema_single_correct_best(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sA", half=0)[:4])
+                 | set(positions(bank, "sB", half=0))
+                 | set(positions(bank, "sC", half=0))
+                 | set(positions(bank, "sD", half=0)))
+        message = compose_midpoint_message(mid_evidence(wrong))
+        strengths = message["sections"][1]["text"]
+        self.assertEqual(
+            strengths,
+            "You answered questions correctly in Skill sA. These were "
+            "your highest-scoring topics in this first set.")
+        for claim in ("every question", "mastery", "mastered"):
+            self.assertNotIn(claim, strengths.casefold())
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "In this first set, you had more incorrect answers in "
+            "Skill sB, Skill sC and Skill sD than in the other "
+            "topics.")
+
+    def test_ties_name_every_tied_skill(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sC", half=0)[:2])
+                 | set(positions(bank, "sD", half=0)[:2]))
+        message = compose_midpoint_message(mid_evidence(wrong))
+        self.assertEqual(
+            message["sections"][1]["text"],
+            "You answered all five questions correctly in Skill sA, "
+            "Skill sB in this first set. These are encouraging results "
+            "to build on.")
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "In this first set, you had more incorrect answers in "
+            "Skill sC and Skill sD than in the other topics.")
+
+    def test_all_skills_equal_nonzero_uses_each_topic_wording(self):
+        bank, taxonomy = fixture()
+        wrong = {positions(bank, skill, half=0)[0]
+                 for skill in ("sA", "sB", "sC", "sD")}
+        message = compose_midpoint_message(mid_evidence(wrong))
+        self.assertEqual(
+            message["sections"][1]["text"],
+            "You answered some questions correctly in each topic in "
+            "this first set.")
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "In this first set, some of your answers were incorrect "
+            "in each topic.")
+
+    def test_all_correct_wording(self):
+        message = compose_midpoint_message(mid_evidence())
+        self.assertEqual(
+            message["sections"][1]["text"],
+            "You answered every question correctly in this first set. "
+            "Keep taking each question one step at a time.")
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "You answered every question correctly in this first set.")
+
+    def test_all_incorrect_claims_no_topic_strength(self):
+        bank, taxonomy = fixture()
+        message = compose_midpoint_message(
+            mid_evidence(set(range(20))))
+        self.assertEqual(
+            message["sections"][1]["text"],
+            "You have completed the first set. This is a starting "
+            "point, not a limit on what you can learn.")
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "In this first set, your answers were incorrect in each "
+            "topic.")
+        for skill in message["sections"][1:]:
+            self.assertNotIn("highest-scoring", skill["text"])
+        for name in ("Skill sA", "Skill sB", "Skill sC", "Skill sD"):
+            self.assertNotIn(name, message["text"])
+
+    def test_rejects_end_and_invalid_evidence(self):
+        with self.assertRaises(ValueError):
+            compose_midpoint_message(end_evidence())
+        with self.assertRaises(ValueError):
+            compose_midpoint_message({})
+        mutated = mid_evidence()
+        mutated["skills"][0]["correct"] = 0
+        with self.assertRaises(ValueError):
+            compose_midpoint_message(mutated)
+
+    def test_helper_does_not_mutate_evidence_or_share_state(self):
+        evidence = mid_evidence({0})
+        original = copy.deepcopy(evidence)
+        message = compose_midpoint_message(evidence)
+        self.assertEqual(evidence, original)
+        message["sections"][1]["text"] = "mutated"
+        again = compose_midpoint_message(evidence)
+        self.assertNotEqual(again["sections"][1]["text"], "mutated")
+
+    def test_no_teacher_mention_or_next_set_claim(self):
+        bank, taxonomy = fixture()
+        patterns = [(mid_evidence(), None),
+                    (mid_evidence(set(range(20))), None),
+                    (mid_evidence({0, 2}),
+                     "In this first set, you had more incorrect "
+                     "answers in Skill sA and Skill sC than in the "
+                     "other topics."),
+                    (mid_evidence(set(positions(bank, "sA", half=0)[:2])),
+                     "In this first set, you had more incorrect "
+                     "answers in Skill sA than in the other topics."),
+                    (mid_evidence({positions(bank, s, half=0)[0]
+                                   for s in ("sA", "sB", "sC", "sD")}),
+                     None)]
+        for evidence, expected_focus in patterns:
+            message = compose_midpoint_message(evidence)
+            with self.subTest(total=message["total"]["correct"]):
+                self.assertNotIn("teacher", message["text"].lower())
+                self.assertNotIn("give us more information",
+                                 message["text"].lower())
+                self.assertNotIn("challenging", message["text"].lower())
+                self.assertNotIn("not everything you can do",
+                                 message["text"].lower())
+                self.assertNotIn("practice", message["text"].lower())
+                if expected_focus is not None:
+                    self.assertEqual(message["sections"][2]["text"],
+                                     expected_focus)
+                    self.assertEqual(message["sections"][2]["title"],
+                                     "Where you had more difficulty")
+                else:
+                    self.assertEqual(message["sections"][2]["title"],
+                                     "Your answers so far")
+                self.assertEqual(message["total"]["out_of"], 20)
+                self.assertEqual(len(message["skills"]), 4)
+                self.assertTrue(all(
+                    set(row) == {"skill_name", "correct", "out_of"}
+                    for row in message["skills"]))
+
+    def test_named_weakest_reports_progress_not_practice(self):
+        bank, taxonomy = fixture()
+        wrong = (set(positions(bank, "sC", half=0))
+                 | set(positions(bank, "sD", half=0)))
+        message = compose_midpoint_message(mid_evidence(wrong))
+        self.assertEqual(message["total"],
+                         {"correct": 10, "out_of": 20})
+        self.assertEqual(message["sections"][2]["title"],
+                         "Where you had more difficulty")
+        self.assertEqual(
+            message["sections"][2]["text"],
+            "In this first set, you had more incorrect answers in "
+            "Skill sC and Skill sD than in the other topics.")
+
+    def test_baseline_midpoint_contracts_unchanged(self):
+        evidence = mid_evidence({0})
+        payload = selection_payload(evidence, "student", "midpoint")
+        self.assertEqual(payload["evidence"], {})
+        review = run_feedback(evidence, "student", "midpoint")
+        for section in review["message"]["sections"]:
+            self.assertEqual(set(section), {"kind", "text"})
 
 
 class SelectorFallbackTests(unittest.TestCase):

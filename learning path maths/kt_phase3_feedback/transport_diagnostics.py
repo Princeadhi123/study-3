@@ -73,14 +73,27 @@ class _TransportObserver:
     """Fixed-shape telemetry state; one instance per wrapped call."""
 
     def __init__(self):
-        self.reset()
+        self._local = threading.local()
+        self._fallback_state = {"stage": "not_called", "failure_kind": None,
+                                "http_status": None}
+
+    @property
+    def state(self):
+        return self._local.__dict__.get("state", self._fallback_state)
+
+    @state.setter
+    def state(self, value):
+        self._local.state = value
+        self._fallback_state = value
 
     def reset(self):
         self.state = {"stage": "not_called", "failure_kind": None,
                       "http_status": None}
 
     def reached(self, stage):
-        self.state["stage"] = stage
+        current = dict(self.state)
+        current["stage"] = stage
+        self.state = current
 
     def failed(self, stage, exc):
         kind, status = _classify(exc)

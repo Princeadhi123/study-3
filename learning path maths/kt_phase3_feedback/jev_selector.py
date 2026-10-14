@@ -31,6 +31,7 @@ import copy
 import json
 import math
 import os
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -229,11 +230,28 @@ class JevSelector:
         self._api_key = _validate_api_key(api_key)
         self._timeout = _validate_timeout(timeout)
         self._opener = opener if opener is not None else _default_opener()
-        self._last_metadata = {"status": "not_called",
-                               "model_version": None, "usage": None}
+        self._meta_local = threading.local()
+        self._fallback_metadata = {"status": "not_called",
+                                   "model_version": None, "usage": None}
 
     def __repr__(self):
         return f"JevSelector(timeout={self._timeout!r})"
+
+    @property
+    def _last_metadata(self) -> dict:
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        return self._meta_local.__dict__.get(
+            "value", getattr(self, "_fallback_metadata",
+                             {"status": "not_called",
+                              "model_version": None, "usage": None}))
+
+    @_last_metadata.setter
+    def _last_metadata(self, value: dict):
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        self._meta_local.value = value
+        self._fallback_metadata = value
 
     @property
     def last_metadata(self) -> dict:

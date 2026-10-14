@@ -8,8 +8,10 @@ from pathlib import Path
 import phase3_paths  # noqa: F401
 import worked_review_math
 from assessment_worked_review import (
-    ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION,
-    build_assessment_review_examples)
+    ASSESSMENT_WORKED_REVIEW_VERSION, CONCISE_PRACTICE_NOTICE,
+    CONCISE_READY_NOTICE, CONCISE_TEMPLATE_VERSION, READY_NOTICE,
+    UNAVAILABLE_NOTICE, build_assessment_review_examples,
+    concise_student_preview)
 from aitta_generator import AittaGenerator
 from demo_service import ConflictError, DemoService
 from evidence_feedback import (
@@ -17,7 +19,8 @@ from evidence_feedback import (
     run_multi_feedback)
 from evidence_feedback_policy import (
     build_candidates, build_review_bundles)
-from feedback_practice import MULTI_INTEGRATED_TEMPLATE_VERSION
+from feedback_practice import (
+    MULTI_INTEGRATED_TEMPLATE_VERSION, PRACTICE_SELECTION_NOTICE)
 from full_feedback import (
     CachedFullFeedbackGenerator, FULL_FEEDBACK_SECTION_KEYS,
     FullFeedbackAittaGenerator, MULTI_FULL_FEEDBACK_SCHEMA,
@@ -558,8 +561,8 @@ class GroundedPipelineTests(unittest.TestCase):
                 lambda p: p["assessment_context"]["taxonomy"]["topics"][0]
                     .update(skill_name="Forged")):
             payload = self._payload()
+            mutate(payload)
             with self.assertRaises(ValueError):
-                mutate(payload)
                 validate_full_input(payload)
 
     def test_none_context_payload_has_empty_examples(self):
@@ -922,7 +925,7 @@ class GroundedServiceTests(unittest.TestCase):
         detail = service.teacher_session(sid)
         preview = detail["feedback_delivery"]["preview"]
         self.assertEqual(preview["template_version"],
-                         GROUNDED_TEMPLATE_VERSION)
+                         CONCISE_TEMPLATE_VERSION)
         self.assertIn("review_examples", preview)
         cards = preview["review_examples"]
         self.assertTrue(all(c["source"] == "incorrect_assessment_response"
@@ -974,7 +977,7 @@ class GroundedServiceTests(unittest.TestCase):
         second = reopened.teacher_session(sid)[
             "feedback_delivery"]["preview"]
         self.assertEqual(second["template_version"],
-                         GROUNDED_TEMPLATE_VERSION)
+                         CONCISE_TEMPLATE_VERSION)
         self.assertEqual(second["review_examples"],
                          first["review_examples"])
 
@@ -1208,6 +1211,469 @@ class GroundedServiceTests(unittest.TestCase):
         self.assertEqual(review["worked_review_version"],
                          ASSESSMENT_WORKED_REVIEW_VERSION)
         self.assertTrue(review["review_examples"])
+
+    def _edit_sections(self):
+        return {key: f"Edited {key}."
+                for key in ("assessment_summary", "observed_strengths",
+                            "review_focus", "next_steps")}
+
+    def _two_card_session(self):
+        service = self._service()
+        wrong = sorted({positions(self.bank, "pct", 0)[0],
+                        positions(self.bank, "alg", 0)[0]})
+        sid, token, _ = self._complete(service, wrong)
+        self._wait(service, sid)
+        return service, sid, token
+
+    def test_content_edit_updates_grounded_cards_and_release(self):
+        service, sid, token = self._two_card_session()
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        preview = delivery["preview"]
+        cards = preview["review_examples"]
+        self.assertEqual(len(cards), 2)
+        self.assertTrue(all(c["status"] == "ready" for c in cards))
+        practices = preview["practice_activities"]
+        original_cards = copy.deepcopy(cards)
+        original_practices = copy.deepcopy(practices)
+        original_skills = copy.deepcopy(preview["skills"])
+        original_total = copy.deepcopy(preview["total"])
+        content = {
+            "section_titles": {"review_focus": "Teacher heading"},
+            "skill_labels": ["Pct label", "Alg label", "Div label",
+                             "Fri label"],
+            "review_examples": [
+                {"title": "Edited card title",
+                 "prompt": "Edited prompt?",
+                 "options": ["A", "B", "C"],
+                 "selected_answer": "A",
+                 "correct_answer": "B",
+                 "steps": ["First edited step.", "Second edited step."],
+                 "explanation": "Edited explanation.",
+                 "reasoning_question": "Why is B correct?",
+                 "notice": "Edited notice."},
+                {"prompt": "Second card edit."}],
+            "practice_activities": [
+                {"topic_label": "Edited topic",
+                 "message": "Edited practice message.",
+                 "notice": "Edited practice notice."},
+                {}]}
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": content,
+            "reviewer_label": "ms-edit"})
+        self.assertTrue(res["saved"])
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["feedback_edit"]["source_preview"],
+                         preview)
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        edited = delivery["preview"]
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        self.assertEqual(edited["total"], original_total)
+        focus = next(s for s in edited["sections"]
+                     if s["kind"] == "review_focus")
+        self.assertEqual(focus["title"], "Teacher heading")
+        for skill, label, original in zip(
+                edited["skills"],
+                content["skill_labels"], original_skills):
+            self.assertEqual(skill["skill_name"], label)
+            self.assertTrue(skill["teacher_edited"])
+            self.assertEqual(skill["correct"], original["correct"])
+            self.assertEqual(skill["out_of"], original["out_of"])
+            self.assertEqual(skill["skill_id"], original["skill_id"])
+        card0, card1 = edited["review_examples"]
+        self.assertEqual(card0["title"], "Edited card title")
+        self.assertEqual(card0["prompt"], "Edited prompt?")
+        self.assertEqual(card0["options"], ["A", "B", "C"])
+        self.assertEqual(card0["selected_answer"], "A")
+        self.assertEqual(card0["correct_answer"], "B")
+        self.assertEqual(card0["steps"],
+                         ["First edited step.", "Second edited step."])
+        self.assertEqual(card0["reasoning_question"],
+                         "Why is B correct?")
+        self.assertEqual(card0["notice"], "Edited notice.")
+        self.assertTrue(card0["teacher_edited"])
+        self.assertEqual(card0["original_content"],
+                         original_cards[0])
+        self.assertEqual(card1["prompt"], "Second card edit.")
+        self.assertTrue(card1["teacher_edited"])
+        self.assertEqual(card1["original_content"],
+                         original_cards[1])
+        for card, original in zip(edited["review_examples"],
+                                  original_cards):
+            for locked in ("question_id", "candidate_id", "skill_id",
+                           "subtopic_id", "status", "source",
+                           "version", "selection_policy",
+                           "solution_version"):
+                self.assertEqual(card[locked], original[locked])
+        self.assertNotIn("review_example", edited)
+        practice0, practice1 = edited["practice_activities"]
+        self.assertEqual(practice0["topic_label"], "Edited topic")
+        self.assertEqual(practice0["message"],
+                         "Edited practice message.")
+        self.assertEqual(practice0["notice"],
+                         "Edited practice notice.")
+        self.assertTrue(practice0["teacher_edited"])
+        self.assertEqual(practice0["original_content"],
+                         original_practices[0])
+        self.assertNotIn("teacher_edited", practice1)
+        self.assertEqual(edited["practice"], practice0)
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+        service.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["review_examples"], [card0, card1])
+        self.assertEqual(released["practice_activities"][0],
+                         practice0)
+        service.save_feedback_edit(sid, {
+            "message_sha256": res["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {"review_examples":
+                        [{"prompt": "Post-release edit."}, {}]}})
+        still = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(still["review_examples"][0]["prompt"],
+                         "Edited prompt?")
+        meta = service._load_meta(sid)
+        card0 = meta["feedback_edit"]["preview"]["review_examples"][0]
+        self.assertEqual(card0["prompt"], "Post-release edit.")
+        self.assertEqual(card0["original_content"],
+                         original_cards[0])
+
+    def test_content_edit_persists_across_restart(self):
+        service, sid, token = self._two_card_session()
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {"review_examples":
+                        [{"title": "Kept title"}, {}]}})
+        reopened = self._service()
+        preview = reopened.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        self.assertEqual(preview["review_examples"][0]["title"],
+                         "Kept title")
+        self.assertTrue(
+            preview["review_examples"][0]["teacher_edited"])
+        self.assertIsNotNone(
+            reopened._load_meta(sid)["feedback_edit"]
+            ["source_preview"])
+        reopened.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        end = reopened.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(end["review_examples"][0]["title"],
+                         "Kept title")
+
+    def test_content_edit_rejects_invalid_and_absent_fields(self):
+        service, sid, token = self._two_card_session()
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        sha = delivery["preview_sha256"]
+
+        def attempt(content):
+            service.save_feedback_edit(sid, {
+                "message_sha256": sha,
+                "sections": self._edit_sections(),
+                "content": content})
+
+        bad = [
+            "not-a-dict",
+            {"total": {"correct": 40, "out_of": 40}},
+            {"sections": {}},
+            {"section_titles": {"bogus": "x"}},
+            {"section_titles": {}},
+            {"skill_labels": ["only", "two"]},
+            {"skill_labels": "x"},
+            {"worked_review_notice": "no such field"},
+            {"review_examples": [{}]},
+            {"review_examples": [{}, {}, {}]},
+            {"review_examples": "x"},
+            {"review_examples": [{"question_id": "forged"}, {}]},
+            {"review_examples": [{"status": "ready"}, {}]},
+            {"review_examples": [{"teacher_edited": False}, {}]},
+            {"review_examples": [{"original_content": {}}, {}]},
+            {"review_examples": [{"options": ["a", "b"]}, {}]},
+            {"review_examples": [{"title": ""}, {}]},
+            {"review_examples": [{"steps": []}, {}]},
+            {"review_examples": [{"steps": ["ok", 7]}, {}]},
+            {"review_examples": [{"prompt": "x" * 2001}, {}]},
+            {"review_examples": [{"prompt": "bad\x01"}, {}]},
+            {"review_examples": [{"options":
+                                  ["a"] * 31}, {}]},
+            {"practice_activities": [{}]},
+            {"practice_activities": [{"notice": None}, {}]},
+            {"practice_activities": [{"status": "selected"}, {}]},
+            {"practice_activities":
+             [{"question": {"text": "x"}}, {}]},
+            {"practice_activities":
+             [{"relationship": {"kind": "same_content"}}, {}]},
+            {"practice_activities":
+             [{"question": {}}, {}]}]
+        for content in bad:
+            with self.assertRaises(ValueError, msg=repr(content)):
+                attempt(content)
+        body = {
+            "message_sha256": sha,
+            "sections": self._edit_sections(),
+            "content": None}
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, body)
+        for key in ("section_titles", "skill_labels",
+                    "review_examples", "practice_activities",
+                    "worked_review_notice"):
+            with self.assertRaises(ValueError, msg=key):
+                attempt({key: None})
+        body = {
+            "message_sha256": "f" * 64,
+            "sections": self._edit_sections(),
+            "content": {"review_examples": [{}, {}]}}
+        with self.assertRaises(ConflictError):
+            service.save_feedback_edit(sid, body)
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": sha,
+            "sections": self._edit_sections(),
+            "content": {"review_examples":
+                        [{"title": "<script>alert(1)</script>"}, {}]}})
+        card = service.teacher_session(sid)["feedback_delivery"][
+            "preview"]["review_examples"][0]
+        self.assertEqual(card["title"], "<script>alert(1)</script>")
+        self.assertTrue(card["teacher_edited"])
+        stale = service.save_feedback_edit
+        body = {"message_sha256": sha,
+                "sections": self._edit_sections(),
+                "content": {"review_examples":
+                            [{"title": "Again"}, {}]}}
+        with self.assertRaises(ConflictError):
+            stale(sid, body)
+        res2 = stale(sid, {
+            "message_sha256": res["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {"review_examples": [{"prompt": "Again."}, {}]}})
+        card = service.teacher_session(sid)["feedback_delivery"][
+            "preview"]["review_examples"][0]
+        self.assertEqual(card["prompt"], "Again.")
+        self.assertEqual(card["original_content"]["title"],
+                         "Worked review of your assessment answer")
+        self.assertNotIn("original_content",
+                         card["original_content"])
+
+    def test_content_edit_unavailable_grounding_and_singleton(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        review["review_examples"] = []
+        review["worked_review_status"] = "unavailable"
+        review["worked_review_notice"] = "Original notice."
+        service._save_meta(meta)
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {
+                "review_examples": [],
+                "worked_review_notice": "Edited notice."}})
+        preview = service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        self.assertEqual(preview["worked_review_notice"],
+                         "Edited notice.")
+        self.assertEqual(preview["review_examples"], [])
+        body = {
+            "message_sha256": res["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {"review_examples": [{"title": "x"}]}}
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, body)
+
+    def test_sections_only_save_preserves_custom_titles(self):
+        service, sid, token = self._two_card_session()
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": self._edit_sections(),
+            "content": {"section_titles":
+                        {"review_focus": "Custom kept heading"}}})
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": res["preview_sha256"],
+            "sections": {key: f"Again {key}."
+                         for key in ("assessment_summary",
+                                     "observed_strengths",
+                                     "review_focus",
+                                     "next_steps")}})
+        preview = service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        focus = next(s for s in preview["sections"]
+                     if s["kind"] == "review_focus")
+        self.assertEqual(focus["title"], "Custom kept heading")
+        self.assertEqual(focus["text"], "Again review_focus.")
+
+    def test_null_notice_card_unmarked_without_edit(self):
+        preview = {
+            "sections": [{"kind": "review_focus", "title": "Focus",
+                          "text": "text"}],
+            "practice": {"status": "unavailable",
+                         "message": "Unavailable.", "notice": None,
+                         "question": None}}
+        DemoService._apply_feedback_content(
+            preview, {"practice_activities": [{}]})
+        self.assertIsNone(preview["practice"]["notice"])
+        self.assertNotIn("teacher_edited", preview["practice"])
+        DemoService._apply_feedback_content(
+            preview, {"practice_activities": [{"notice": None}]})
+        self.assertIsNone(preview["practice"]["notice"])
+        self.assertNotIn("teacher_edited", preview["practice"])
+        DemoService._apply_feedback_content(
+            preview, {"practice_activities": [{"notice": "n"}]})
+        self.assertEqual(preview["practice"]["notice"], "n")
+        self.assertTrue(preview["practice"]["teacher_edited"])
+
+
+class ConciseStudentPreviewTests(unittest.TestCase):
+    def _fixture(self, wrong=(), unsupported_fri=False,
+                 practices=None):
+        bank = make_grounded_bank(unsupported_fri=unsupported_fri)
+        taxonomy = make_grounded_taxonomy(bank)
+        rows = grounded_rows(bank, wrong)
+        evidence = build_evidence(bank, taxonomy, rows)
+        candidates = build_candidates(evidence, "end")
+        focused = [c for c in candidates if c["focus"] is not None]
+        examples = build_assessment_review_examples(
+            evidence, focused, context_for(bank, taxonomy, rows))
+        sections = multi_baseline_sections(
+            evidence, candidates, review_examples=examples)
+        preview = {
+            "template_version":
+                "phase3_student_feedback_template_v7",
+            "sections": sections,
+            "text": "\n\n".join(
+                s["text"] for s in sections if s["text"]),
+            "total": {"correct": evidence["total"]["correct"],
+                      "out_of": evidence["total"]["out_of"]},
+            "skills": [{"skill_id": s["skill_id"],
+                        "skill_name": s["skill_name"],
+                        "correct": s["correct"],
+                        "out_of": s["out_of"]}
+                       for s in evidence["skills"]],
+            "requires_educator_review": True,
+            "review_examples": examples}
+        if practices:
+            preview["practice_activities"] = practices
+            preview["practice"] = practices[0]
+        return preview, candidates, evidence
+
+    @staticmethod
+    def _texts(preview):
+        return {s["kind"]: s["text"] for s in preview["sections"]}
+
+    def test_titles_focus_guards_and_preserved_payload(self):
+        bank = make_grounded_bank()
+        wrong = (positions(bank, "pct", 0)[0],
+                 positions(bank, "div", 0)[0])
+        preview, candidates, evidence = self._fixture(wrong)
+        original = copy.deepcopy(preview)
+        result = concise_student_preview(preview, candidates)
+        self.assertEqual(preview, original)
+        self.assertEqual(result["template_version"],
+                         CONCISE_TEMPLATE_VERSION)
+        self.assertEqual(
+            [s["title"] for s in result["sections"]],
+            ["Assessment complete", "What went well",
+             "Answers to review", "What to do next"])
+        texts = self._texts(result)
+        self.assertEqual(texts["assessment_summary"],
+                         self._texts(original)["assessment_summary"])
+        self.assertEqual(texts["observed_strengths"],
+                         self._texts(original)["observed_strengths"])
+        self.assertTrue(
+            texts["review_focus"].startswith("Review these topics:"))
+        for name in ("Percentage of an amount", "Divisibility"):
+            self.assertIn(name + ".", texts["review_focus"])
+        self.assertIn("One answer was incorrect here",
+                      texts["review_focus"])
+        self.assertIn("Other areas had the same review priority",
+                      texts["review_focus"])
+        self.assertIn("not overall mastery", texts["review_focus"])
+        self.assertNotIn("draft, not a diagnosis", result["text"])
+        self.assertNotIn("If your teacher approves", result["text"])
+        self.assertEqual(result["text"],
+                         "\n\n".join(s["text"] for s in
+                                     result["sections"]))
+        self.assertEqual(result["total"], original["total"])
+        self.assertEqual(result["skills"], original["skills"])
+        for before, after in zip(original["review_examples"],
+                                 result["review_examples"]):
+            self.assertEqual(after["notice"], CONCISE_READY_NOTICE)
+            for key in ("prompt", "options", "selected_answer",
+                        "correct_answer", "steps", "status"):
+                self.assertEqual(after[key], before[key])
+
+    def test_all_correct_claims_no_weakness(self):
+        preview, candidates, _ = self._fixture(())
+        result = concise_student_preview(preview, candidates)
+        texts = self._texts(result)
+        self.assertEqual(texts["review_focus"],
+                         "You answered all questions correctly on "
+                         "this assessment.")
+        self.assertEqual(texts["next_steps"],
+                         "Keep building on these results.")
+        self.assertNotIn("practice activit", texts["next_steps"])
+
+    def test_unavailable_example_and_abstained_practice(self):
+        bank = make_grounded_bank(unsupported_fri=True)
+        wrong = (positions(bank, "fri", 0)[0],)
+        preview, candidates, _ = self._fixture(
+            wrong, unsupported_fri=True,
+            practices=[{"status": "abstained",
+                        "message": "No eligible practice activity.",
+                        "notice": None, "question": None}])
+        result = concise_student_preview(preview, candidates)
+        example = result["review_examples"][0]
+        self.assertEqual(example["status"], "unavailable")
+        self.assertEqual(example["notice"], UNAVAILABLE_NOTICE)
+        texts = self._texts(result)
+        self.assertEqual(
+            texts["next_steps"],
+            "Review the topics listed above and explain how you "
+            "approached those questions. For any question without a "
+            "checked worked solution, ask your teacher for help.")
+
+    def test_practice_relationship_and_notice_projection(self):
+        bank = make_grounded_bank()
+        wrong = (positions(bank, "pct", 0)[0],
+                 positions(bank, "div", 0)[0])
+        same = {"status": "selected", "message": "m",
+                "notice": PRACTICE_SELECTION_NOTICE,
+                "question": {"skill_name": "Prosenttilaskenta",
+                             "concept_name": "Concept pct",
+                             "text": "t", "options": []},
+                "relationship": {"kind": "same_content",
+                                 "message": "old"}}
+        related = {"status": "selected", "message": "m",
+                   "notice": PRACTICE_SELECTION_NOTICE,
+                   "question": {"skill_name": "Jaollisuus",
+                                "concept_name": "Concept div",
+                                "text": "t", "options": []},
+                   "relationship": {
+                       "kind": "same_topic_different_content",
+                       "message": "old"}}
+        preview, candidates, _ = self._fixture(
+            wrong, practices=[same, related])
+        result = concise_student_preview(preview, candidates)
+        first, second = result["practice_activities"]
+        self.assertEqual(first["relationship"]["kind"], "same_content")
+        self.assertEqual(first["relationship"]["message"],
+                         "This practises the same concept as the "
+                         "review above.")
+        self.assertEqual(second["relationship"]["kind"],
+                         "same_topic_different_content")
+        self.assertEqual(second["relationship"]["message"],
+                         "This is related practice on Concept div, "
+                         "not Divisibility.")
+        for card in (first, second):
+            self.assertEqual(card["notice"], CONCISE_PRACTICE_NOTICE)
+        self.assertTrue(self._texts(result)["next_steps"].endswith(
+            "Then try the practice activities below."))
 
 
 if __name__ == "__main__":

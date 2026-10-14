@@ -15,12 +15,17 @@ from session_store import bank_fingerprint, utc_now
 
 DEFAULT_SOURCE = Path(__file__).parent / "artifacts" / "assessment_pipeline_20261001.json"
 ACTIVE = {"queued", "running", "cancelling"}
+DEFAULT_PARALLEL_CASES = 8
+MIN_PARALLEL_CASES = 1
+MAX_PARALLEL_CASES = 8
 
 
 class ScenarioReplays:
-    def __init__(self, service, source_path=DEFAULT_SOURCE):
+    def __init__(self, service, source_path=DEFAULT_SOURCE,
+                 max_parallel=DEFAULT_PARALLEL_CASES):
         self.service = service
         self.source_path = Path(source_path)
+        self.max_parallel = max_parallel
         self.directory = service.root / "replay_runs"
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -174,10 +179,15 @@ class ScenarioReplays:
     def start(self, body):
         keys = {"request_id", "report_sha256", "scenario_ids",
                 "provider_mode", "allow_provider_calls"}
-        if set(body) != keys and set(body) != keys | {"retry_failed_provider_calls"}:
+        optional = {"retry_failed_provider_calls", "max_parallel"}
+        if not (isinstance(body, dict) and keys <= set(body) <= keys | optional):
             raise ValueError("invalid replay request")
         retry_failed = body.get("retry_failed_provider_calls", False)
         if type(retry_failed) is not bool:
+            raise ValueError("invalid replay selection")
+        max_parallel = body.get("max_parallel", self.max_parallel)
+        if (type(max_parallel) is not int
+                or not MIN_PARALLEL_CASES <= max_parallel <= MAX_PARALLEL_CASES):
             raise ValueError("invalid replay selection")
         self._path(body["request_id"])
         ids = body["scenario_ids"]
@@ -218,6 +228,7 @@ class ScenarioReplays:
                       "report_sha256": body["report_sha256"], "source": library["source"],
                       "code_sha256": self.code, "provider_mode": body["provider_mode"],
                       "retry_failed_provider_calls": retry_failed,
+                      "max_parallel": min(max_parallel, len(ids)),
                       "diagnostics_mode": "fresh_frozen_model_inference", "cancel_requested": False,
                       "cases": [{"scenario_id": i, "name": index[i]["name"],
                                  "display_name": index[i]["display_name"], "status": "queued",
@@ -255,60 +266,80 @@ class ScenarioReplays:
                 if len(old_probs) == len(new_probs) == 40 else None,
                 "interpretation": "Changes relative to the retained original, not evidence of improvement."}
 
+    def _run_case(self, run_id, index, row, submissions):
+        try:
+            with self.lock:
+                record = self._read(run_id)
+                report_sha256 = record["report_sha256"]
+                retry_failed = record.get("retry_failed_provider_calls", False)
+                provider_mode = record["provider_mode"]
+                bank_mode = record.get("bank_mode", "demo")
+            replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
+                      "scenario_name": row["name"], "report_sha256": report_sha256,
+                      "retry_failed_provider_calls": retry_failed}
+            created = self.service.create_session(label=row["display_name"], replay=replay,
+                                                  provider_mode=provider_mode,
+                                                  bank_mode=bank_mode)
+            session_id, token = created["session_id"], created["student_token"]
+            with self.lock:
+                record = self._read(run_id)
+                record["cases"][index]["session_id"] = session_id
+                self._save(record)
+            for submission in submissions[row["scenario_id"]]:
+                if self.stop.is_set():
+                    break
+                self.service.submit_response(session_id, token, submission)
+            while not self.stop.is_set():
+                if self.service._jobs_complete(session_id):
+                    break
+                self.stop.wait(.05)
+            if self.stop.is_set():
+                return
+            with self.service.lock:
+                detail = self.service.teacher_session(session_id)
+                self._save_result(detail)
+            changes = self._changes(row["scenario_id"], detail)
+            outcome = {"status": "complete", "changes": changes,
+                       "diagnostics": {cp: block["diagnostics_job"]["status"] for cp, block in detail["checkpoints"].items()},
+                       "provider_status": detail["provider_job"]["status"], "finished_at": utc_now()}
+        except Exception:
+            outcome = {"status": "failed", "reason": "replay_case_failed", "finished_at": utc_now()}
+        with self.lock:
+            record = self._read(run_id)
+            record["cases"][index].update(outcome)
+            self._save(record)
+
     def _run(self, run_id, submissions):
         with self.lock:
             record = self._read(run_id)
             if record["status"] == "queued":
                 record["status"] = "running"
             self._save(record)
-        for index in range(len(record["cases"])):
-            with self.lock:
-                record = self._read(run_id)
-                if record["cancel_requested"] or self.stop.is_set():
-                    break
-                row = record["cases"][index]
-                row["status"] = "running"
-                self._save(record)
-            try:
-                replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
-                          "scenario_name": row["name"], "report_sha256": record["report_sha256"],
-                          "retry_failed_provider_calls":
-                              record.get("retry_failed_provider_calls", False)}
-                created = self.service.create_session(label=row["display_name"], replay=replay,
-                                                      provider_mode=record["provider_mode"],
-                                                      bank_mode=record.get("bank_mode", "demo"))
-                session_id, token = created["session_id"], created["student_token"]
+            total = len(record["cases"])
+            workers = max(1, min(record.get("max_parallel", self.max_parallel), total))
+        next_index = 0
+
+        def worker():
+            nonlocal next_index
+            while True:
                 with self.lock:
                     record = self._read(run_id)
-                    record["cases"][index]["session_id"] = session_id
+                    if record["cancel_requested"] or self.stop.is_set() or next_index >= total:
+                        return
+                    index = next_index
+                    next_index += 1
+                    row = copy.deepcopy(record["cases"][index])
+                    record["cases"][index]["status"] = "running"
                     self._save(record)
-                for submission in submissions[row["scenario_id"]]:
-                    if self.stop.is_set():
-                        break
-                    self.service.submit_response(session_id, token, submission)
-                while not self.stop.is_set():
-                    detail = self.service.teacher_session(session_id)
-                    if (detail["provider_job"]["status"]
-                            in ("ready", "fallback") and
-                            all(c["diagnostics_job"]["status"] != "pending"
-                                for c in detail["checkpoints"].values())):
-                        break
-                    self.stop.wait(.1)
-                if self.stop.is_set():
-                    break
-                with self.service.lock:
-                    detail = self.service.teacher_session(session_id)
-                    self._save_result(detail)
-                changes = self._changes(row["scenario_id"], detail)
-                outcome = {"status": "complete", "changes": changes,
-                           "diagnostics": {cp: block["diagnostics_job"]["status"] for cp, block in detail["checkpoints"].items()},
-                           "provider_status": detail["provider_job"]["status"], "finished_at": utc_now()}
-            except Exception:
-                outcome = {"status": "failed", "reason": "replay_case_failed", "finished_at": utc_now()}
-            with self.lock:
-                record = self._read(run_id)
-                record["cases"][index].update(outcome)
-                self._save(record)
+                self._run_case(run_id, index, row, submissions)
+
+        if workers == 1:
+            worker()
+        else:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scenario-case") as case_pool:
+                futures = [case_pool.submit(worker) for _ in range(workers)]
+                for future in futures:
+                    future.result()
         with self.lock:
             record = self._read(run_id)
             record["status"] = ("interrupted" if self.stop.is_set() else "cancelled" if record["cancel_requested"]

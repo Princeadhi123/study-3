@@ -196,7 +196,7 @@ class ScenarioReplayTests(unittest.TestCase):
 
         self.addCleanup(release.set)
         with patch.object(self.service.diagnostics, "evaluate", side_effect=slow):
-            run = self.service.replays.start(self.request(3))
+            run = self.service.replays.start(dict(self.request(3), max_parallel=1))
             self.assertTrue(entered.wait(5))
             with self.assertRaises(ResearchConflict):
                 self.service.replays.start(self.request())
@@ -205,6 +205,64 @@ class ScenarioReplayTests(unittest.TestCase):
             final = self.wait(run["id"])
         self.assertEqual(final["status"], "cancelled")
         self.assertEqual(sum(c["status"] == "cancelled" for c in final["cases"]), 2)
+
+    def test_parallel_execution_runs_6_to_8_cases_concurrently(self):
+        import threading
+        self.service.close(wait=True)
+        fix_dir = self.root / "parallel_fix"
+        fix_dir.mkdir(exist_ok=True)
+        source_path, report_path, _ = replay_fixture(
+            fix_dir, self.bank, self.taxonomy, count=10)
+        self.service = DemoService(
+            root=self.root / "parallel_runtime", bank=self.bank,
+            taxonomy=self.taxonomy, diagnostics=fake_diagnostics(self.bank),
+            replay_report=report_path, replay_source=source_path)
+        self.addCleanup(self.service.close, wait=True)
+        library = self.service.research.library()
+        for invalid in (0, 9, "6", True, False):
+            with self.assertRaises(ValueError):
+                self.service.replays.start({
+                    "request_id": secrets.token_hex(16),
+                    "report_sha256": library["report_sha256"],
+                    "scenario_ids": [s["id"] for s in library["scenarios"]],
+                    "provider_mode": "rules",
+                    "allow_provider_calls": False,
+                    "max_parallel": invalid})
+        barrier = threading.Barrier(6, timeout=10)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_jobs_complete = self.service._jobs_complete
+        arrived = set()
+        lock = threading.Lock()
+
+        def synchronized_jobs_complete(session_id):
+            with lock:
+                first_visit = session_id not in arrived and len(arrived) < 6
+                if first_visit:
+                    arrived.add(session_id)
+            if first_visit:
+                barrier.wait()
+                release.wait(10)
+            return real_jobs_complete(session_id)
+
+        with patch.object(self.service, "_jobs_complete", side_effect=synchronized_jobs_complete):
+            run = self.service.replays.start({
+                "request_id": secrets.token_hex(16),
+                "report_sha256": library["report_sha256"],
+                "scenario_ids": [s["id"] for s in library["scenarios"]],
+                "provider_mode": "rules",
+                "allow_provider_calls": False,
+                "max_parallel": 6})
+            self.assertTrue(wait_for(lambda: len(arrived) == 6))
+            mid = self.service.replays.get(run["id"])
+            self.assertEqual(mid["max_parallel"], 6)
+            self.assertEqual(sum(c["status"] == "running" for c in mid["cases"]), 6)
+            self.assertEqual(sum(c["status"] == "queued" for c in mid["cases"]), 4)
+            release.set()
+            final = self.wait(run["id"])
+        self.assertEqual(final["status"], "complete")
+        self.assertEqual(final["completed"], 10)
+        self.assertEqual(final["failed"], 0)
 
     def test_replay_waits_for_practice_selection_before_completion(self):
         import copy

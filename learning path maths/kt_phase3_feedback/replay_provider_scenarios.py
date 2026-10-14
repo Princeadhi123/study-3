@@ -124,8 +124,17 @@ class CaptureCache:
     def __init__(self, root, budget):
         self.root, self.budget, self.new_calls = root, budget, 0
         self._lock = threading.RLock()
+        self._key_locks = {}
         self._retry_failed = contextvars.ContextVar(
             f"retry_failed_{id(self)}", default=False)
+
+    def _key_lock(self, base):
+        with self._lock:
+            lock = self._key_locks.get(base)
+            if lock is None:
+                lock = threading.RLock()
+                self._key_locks[base] = lock
+            return lock
 
     @contextlib.contextmanager
     def retry_failed_scope(self, enabled):
@@ -168,38 +177,43 @@ class CaptureCache:
         return latest, record, number
 
     def obtain(self, provider, request, callback, adapter):
-        with self._lock:
-            base = self.path(provider, request)
-            path, record, number = self._latest_record(provider, request)
-            previous = path.name
-            reused = record is not None and (
-                record["ok"] or not self._retry_failed.get())
+        base = self.path(provider, request)
+        with self._key_lock(base):
+            with self._lock:
+                path, record, number = self._latest_record(provider, request)
+                previous = path.name
+                reused = record is not None and (
+                    record["ok"] or not self._retry_failed.get())
+                if not reused:
+                    retry = record is not None
+                    if retry:
+                        path = self._attempt_path(base, number + 1)
+                    if self.budget is not None and self.new_calls >= self.budget:
+                        raise SystemExit("new-call budget exhausted; captures retained for resume")
+                    self.new_calls += 1
+                    call_number = self.new_calls
             if not reused:
-                retry = record is not None
-                if retry:
-                    path = self._attempt_path(base, number + 1)
-                if self.budget is not None and self.new_calls >= self.budget:
-                    raise SystemExit("new-call budget exhausted; captures retained for resume")
-                self.new_calls += 1
                 start = time.perf_counter()
                 try:
                     reply = callback()
                     ok = True
                 except Exception:
                     reply, ok = None, False
+                latency_ms = round((time.perf_counter() - start) * 1000, 3)
+                metadata = adapter.last_metadata
                 record = {"provider": provider, "request": request, "ok": ok,
-                          "reply": reply, "metadata": adapter.last_metadata,
-                          "original_call_latency_ms":
-                              round((time.perf_counter() - start) * 1000, 3),
+                          "reply": reply, "metadata": metadata,
+                          "original_call_latency_ms": latency_ms,
                           "origin": "hosted_replay"}
                 if retry:
                     record.update({
                         "attempt_number": number + 1,
                         "retry_of_failed_capture": True,
                         "previous_capture_file": previous})
-                write_new(path, record)
-                print(f"Captured {provider} call {self.new_calls}: "
-                      f"{'completed' if ok else 'failed'}", flush=True)
+                with self._lock:
+                    write_new(path, record)
+                    print(f"Captured {provider} call {call_number}: "
+                          f"{'completed' if ok else 'failed'}", flush=True)
         execution = {"capture_file": path.name, "reused": reused,
                      "origin": record["origin"], "metadata": record["metadata"],
                      "original_call_latency_ms": record["original_call_latency_ms"]}
@@ -213,8 +227,26 @@ class CaptureCache:
 
 
 class CachedSelector:
+    thread_safe = True
+
     def __init__(self, adapter, cache):
-        self.adapter, self.cache, self.execution = adapter, cache, None
+        self.adapter, self.cache = adapter, cache
+        self._exec_local = threading.local()
+        self._last_execution = None
+
+    @property
+    def execution(self):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        return self._exec_local.__dict__.get(
+            "value", getattr(self, "_last_execution", None))
+
+    @execution.setter
+    def execution(self, value):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        self._exec_local.value = value
+        self._last_execution = value
 
     def select(self, payload):
         request = selection_request(payload)
@@ -230,8 +262,26 @@ class CachedSelector:
 
 
 class CachedGenerator:
+    thread_safe = True
+
     def __init__(self, adapter, cache):
-        self.adapter, self.cache, self.execution = adapter, cache, None
+        self.adapter, self.cache = adapter, cache
+        self._exec_local = threading.local()
+        self._last_execution = None
+
+    @property
+    def execution(self):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        return self._exec_local.__dict__.get(
+            "value", getattr(self, "_last_execution", None))
+
+    @execution.setter
+    def execution(self, value):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        self._exec_local.value = value
+        self._last_execution = value
 
     def generate(self, payload):
         request = generation_request(payload, self.adapter._model)

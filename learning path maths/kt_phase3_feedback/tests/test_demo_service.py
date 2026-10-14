@@ -247,22 +247,185 @@ class DemoServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["answered_count"], 40)
         self.assertEqual(snapshot["status"], "complete")
 
-    def test_midpoint_snapshot_has_no_counts_or_diagnostics(self):
+    def test_midpoint_snapshot_limited_counts_no_diagnostics(self):
         created = self.create()
         sid, token = created["session_id"], created["student_token"]
         snapshot = self.submit_n(sid, token, 20)
         self.assertEqual(snapshot["answered_count"], 20)
         midpoint = snapshot["feedback"]["midpoint"]
         self.assertIsNotNone(midpoint)
-        self.assertEqual(set(midpoint), {"sections", "text"})
+        self.assertEqual(set(midpoint),
+                         {"sections", "text", "total", "skills"})
+        self.assertEqual(midpoint["total"],
+                         {"correct": 20, "out_of": 20})
+        self.assertEqual(len(midpoint["skills"]), 4)
+        self.assertEqual(
+            sum(row["correct"] for row in midpoint["skills"]), 20)
+        for row in midpoint["skills"]:
+            self.assertEqual(set(row),
+                             {"skill_name", "correct", "out_of"})
+            self.assertEqual(row["out_of"], 5)
         blob = json.dumps(snapshot)
         for marker in ("p_correct", "conformal", "answer_index",
                        "selected_index", "bank_sha256", "candidates",
-                       "subtopic", "out_of", "kt"):
+                       "subtopic", "kt"):
             self.assertNotIn(marker, blob)
         self.assertIsNone(snapshot["feedback"]["end"])
         self.assertEqual(snapshot["provider_job"]["status"],
                          "not_requested")
+
+    def test_midpoint_absent_before_twenty_and_sections_at_twenty(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        snapshot = self.submit_n(sid, token, 19)
+        self.assertIsNone(snapshot["feedback"]["midpoint"])
+        snapshot = self.service.submit_response(
+            sid, token, responses(self.bank, count=20)[19])
+        midpoint = snapshot["feedback"]["midpoint"]
+        self.assertIsNotNone(midpoint)
+        self.assertEqual(set(midpoint),
+                         {"sections", "text", "total", "skills"})
+        self.assertEqual(
+            [(s["kind"], s["title"]) for s in midpoint["sections"]],
+            [("encouragement", "Halfway there"),
+             ("strengths", "What is going well"),
+             ("focus", "Your answers so far"),
+             ("next_step", "Before you continue")])
+        for section in midpoint["sections"]:
+            self.assertEqual(set(section), {"kind", "title", "text"})
+        meta = self.service._load_meta(sid)
+        block = meta["checkpoints"]["midpoint"]
+        self.assertEqual(block["student_message_version"],
+                         "phase3_student_midpoint_v5")
+        self.assertEqual(block["student_message"], midpoint)
+        self.assertIsNotNone(block["baseline_student"])
+        self.assertEqual(snapshot["provider_job"]["status"],
+                         "not_requested")
+
+    def test_saved_midpoint_survives_second_half_and_restart(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        midpoint = self.submit_n(sid, token, 20)["feedback"]["midpoint"]
+        for row in responses(self.bank, correct=False, count=40)[20:]:
+            self.service.submit_response(sid, token, row)
+        snapshot = self.service.snapshot(sid, token)
+        self.assertEqual(snapshot["feedback"]["midpoint"], midpoint)
+        self.service.close()
+        restarted = self._service()
+        snapshot = restarted.snapshot(sid, token)
+        self.assertEqual(snapshot["feedback"]["midpoint"], midpoint)
+        restarted.close()
+        self.service = restarted
+
+    def test_old_saved_midpoint_falls_back_to_baseline(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        self.submit_n(sid, token, 20)
+        path = Path(self.tmp.name) / "metadata" / f"{sid}.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        block = meta["checkpoints"]["midpoint"]
+        block.pop("student_message")
+        block.pop("student_message_version")
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        self.service.close()
+        restarted = self._service()
+        snapshot = restarted.snapshot(sid, token)
+        midpoint = snapshot["feedback"]["midpoint"]
+        self.assertIsNotNone(midpoint)
+        self.assertEqual(set(midpoint), {"sections", "text"})
+        for section in midpoint["sections"]:
+            self.assertEqual(set(section), {"kind", "text"})
+        self.assertEqual(midpoint["sections"],
+                         block["baseline_student"]["message"]["sections"])
+        restarted.close()
+        self.service = restarted
+
+    def test_teacher_session_shows_exact_saved_midpoint_message(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        snapshot = self.submit_n(sid, token, 20)
+        public_mid = snapshot["feedback"]["midpoint"]
+        view = self.service.teacher_session(sid)
+        block = view["checkpoints"]["midpoint"]
+        self.assertEqual(block["student_message"], public_mid)
+        self.assertEqual(block["student_message_version"],
+                         "phase3_student_midpoint_v5")
+        block["student_message"]["sections"][0]["text"] = "mutated"
+        snapshot = self.service.snapshot(sid, token)
+        self.assertEqual(snapshot["feedback"]["midpoint"], public_mid)
+        for row in responses(self.bank, correct=False, count=40)[20:]:
+            self.service.submit_response(sid, token, row)
+        view = self.service.teacher_session(sid)
+        self.assertEqual(
+            view["checkpoints"]["midpoint"]["student_message"],
+            public_mid)
+        snapshot = self.service.snapshot(sid, token)
+        self.assertEqual(snapshot["feedback"]["midpoint"], public_mid)
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+
+    def test_v1_saved_midpoint_returns_only_sections_and_text(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        self.submit_n(sid, token, 20)
+        path = Path(self.tmp.name) / "metadata" / f"{sid}.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        block = meta["checkpoints"]["midpoint"]
+        message = block["student_message"]
+        message.pop("total")
+        message.pop("skills")
+        block["student_message_version"] = "phase3_student_midpoint_v1"
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        snapshot = self.service.snapshot(sid, token)
+        midpoint = snapshot["feedback"]["midpoint"]
+        self.assertEqual(set(midpoint), {"sections", "text"})
+        self.assertNotIn("total", midpoint)
+        self.assertNotIn("skills", midpoint)
+
+    def test_midpoint_projection_is_first_half_and_deep_copied(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        rows = responses(self.bank, count=20)
+        for index in (2, 3, 6, 7, 10, 11, 14, 15, 18, 19):
+            question = self.bank["questions"][index]
+            rows[index] = {"question_id": question["question_id"],
+                           "selected_index":
+                               (question["answer_index"] + 1) % 3}
+        snapshot = None
+        for row in rows:
+            snapshot = self.service.submit_response(sid, token, row)
+        midpoint = snapshot["feedback"]["midpoint"]
+        self.assertEqual(midpoint["total"],
+                         {"correct": 10, "out_of": 20})
+        self.assertEqual([r["correct"] for r in midpoint["skills"]],
+                         [5, 5, 0, 0])
+        midpoint["total"]["correct"] = 99
+        midpoint["skills"][0]["correct"] = 99
+        for row in responses(self.bank, correct=False, count=40)[20:]:
+            snapshot = self.service.submit_response(sid, token, row)
+        midpoint = snapshot["feedback"]["midpoint"]
+        self.assertEqual(midpoint["total"],
+                         {"correct": 10, "out_of": 20})
+        self.assertEqual([r["correct"] for r in midpoint["skills"]],
+                         [5, 5, 0, 0])
+
+    def test_end_stays_hidden_after_midpoint_message_until_release(self):
+        created = self.create()
+        sid, token = created["session_id"], created["student_token"]
+        self.complete(sid, token)
+        self.wait_job(sid)
+        snapshot = self.service.snapshot(sid, token)
+        self.assertIsNotNone(snapshot["feedback"]["midpoint"])
+        self.assertIsNone(snapshot["feedback"]["end"])
+        self.assertEqual(snapshot["feedback_delivery"]["status"],
+                         "awaiting_teacher_review")
+        view = self.service.teacher_session(sid)
+        self.service.release_feedback(sid, {
+            "message_sha256": view["feedback_delivery"]
+                                  ["preview_sha256"]})
+        snapshot = self.service.snapshot(sid, token)
+        self.assertIsNotNone(snapshot["feedback"]["end"])
 
     def test_cross_session_token_rejected(self):
         first = self.create()
@@ -933,7 +1096,7 @@ class DemoServiceTests(unittest.TestCase):
             self.assertEqual(snap["assessment_total"],
                              {"correct": expected, "out_of": 40})
             blob = json.dumps(snap)
-            for marker in ("skills", "preview", "reviewer"):
+            for marker in ("skill_id", "preview", "reviewer"):
                 self.assertNotIn(marker, blob)
 
     def test_assessment_total_immediate_while_provider_pending(self):
@@ -1505,6 +1668,102 @@ class IntegratedPracticeTests(unittest.TestCase):
         stored = service.teacher_session(sid)["feedback_delivery"]
         self.assertEqual(stored["preview"]["review_example"], example)
 
+    def test_edit_content_patches_singleton_example_and_practice(self):
+        from unittest import mock
+        import feedback_practice
+        service = self._service(recommender=BoundRecommender(
+            self.bank, self.pool))
+        sid, token = self._complete(service)
+        self._wait_terminal(service, sid)
+        end = self._end(service, sid)
+        review = end["student_review"]
+        selected = next(
+            c for c in review["candidates"]
+            if c["candidate_id"] == review["selected_candidate_id"])
+        sub_id = selected["focus"]["subtopic_id"]
+        record = {"prompt": "Original prompt?",
+                  "explanation": "Original explanation."}
+        with mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             {sub_id: record}):
+            delivery = self._delivery(service, sid)
+            preview = delivery["preview"]
+            original_example = copy.deepcopy(preview["review_example"])
+            original_practice = copy.deepcopy(preview["practice"])
+            options = preview["practice"]["question"]["options"]
+            content = {
+                "review_examples": [{
+                    "title": "Teacher card title",
+                    "prompt": "Teacher <b>markup</b> prompt?"}],
+                "practice_activities": [{
+                    "message": "Teacher practice message.",
+                    "notice": "Teacher practice notice.",
+                    "relationship": {"message": "Teacher link note."},
+                    "question": {
+                        "text": "Teacher question text?",
+                        "options": [f"Option {i}"
+                                    for i in range(len(options))]}}]}
+            res = service.save_feedback_edit(sid, {
+                "message_sha256": delivery["preview_sha256"],
+                "sections": {key: f"Edited {key}."
+                             for key in ("assessment_summary",
+                                         "observed_strengths",
+                                         "review_focus",
+                                         "next_steps")},
+                "content": content})
+        preview = self._delivery(service, sid)["preview"]
+        example = preview["review_example"]
+        self.assertEqual(example["title"], "Teacher card title")
+        self.assertEqual(example["prompt"],
+                         "Teacher <b>markup</b> prompt?")
+        self.assertEqual(example["explanation"],
+                         "Original explanation.")
+        self.assertTrue(example["teacher_edited"])
+        self.assertEqual(example["original_content"],
+                         original_example)
+        self.assertNotIn("teacher_edited",
+                         example["original_content"])
+        card = preview["practice"]
+        self.assertEqual(card["message"], "Teacher practice message.")
+        self.assertEqual(card["notice"], "Teacher practice notice.")
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": res["preview_sha256"],
+                "sections": {key: f"Edited {key}."
+                             for key in ("assessment_summary",
+                                         "observed_strengths",
+                                         "review_focus",
+                                         "next_steps")},
+                "content": {"practice_activities":
+                            [{"instruction": "Not present."}]}})
+        self.assertEqual(card["relationship"]["message"],
+                         "Teacher link note.")
+        self.assertEqual(card["relationship"]["kind"],
+                         original_practice["relationship"]["kind"])
+        self.assertEqual(card["question"]["text"],
+                         "Teacher question text?")
+        self.assertEqual(card["question"]["options"],
+                         [f"Option {i}" for i in range(len(options))])
+        self.assertEqual(card["question"]["skill_name"],
+                         original_practice["question"]["skill_name"])
+        self.assertTrue(card["teacher_edited"])
+        self.assertEqual(card["original_content"], original_practice)
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": res["preview_sha256"],
+                "sections": {key: f"Edited {key}."
+                             for key in ("assessment_summary",
+                                         "observed_strengths",
+                                         "review_focus",
+                                         "next_steps")},
+                "content": {"review_examples": [{"steps": ["x"]}]}})
+        service.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["review_example"]["title"],
+                         "Teacher card title")
+        self.assertEqual(released["practice"]["question"]["text"],
+                         "Teacher question text?")
+
     def test_released_same_content_has_no_awaiting_claim(self):
         from unittest import mock
         import feedback_practice
@@ -2023,7 +2282,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v7")
+                         "phase3_student_feedback_template_v8")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2048,6 +2307,58 @@ class MultiModeTests(unittest.TestCase):
         self.assertEqual(released["practice_activities"], activities)
         self.assertEqual(released["sections"], preview["sections"])
         self.assertEqual(released["text"], preview["text"])
+
+    def test_concise_preview_raw_review_and_edit_survival(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self._wait_done(service, sid)
+        review = self._end(service, sid)["student_review"]
+        raw_texts = {s["kind"]: s["text"]
+                     for s in review["message"]["sections"]}
+        self.assertIn("draft, not a diagnosis",
+                      raw_texts["review_focus"])
+        delivery = self._delivery(service, sid)
+        preview = delivery["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v8")
+        self.assertEqual(
+            [s["title"] for s in preview["sections"]],
+            ["Assessment complete", "What went well",
+             "Answers to review", "What to do next"])
+        ptexts = {s["kind"]: s["text"] for s in preview["sections"]}
+        self.assertTrue(
+            ptexts["review_focus"].startswith("Review these topics:"))
+        for needle in ("draft, not a diagnosis",
+                       "If your teacher approves"):
+            self.assertNotIn(needle, preview["text"])
+        self.assertIsNone(
+            service.snapshot(sid, token)["feedback"]["end"])
+        result = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": {key: f"Teacher wording for {key}."
+                         for key in ("assessment_summary",
+                                     "observed_strengths",
+                                     "review_focus", "next_steps")}})
+        edited = self._delivery(service, sid)["preview"]
+        self.assertEqual(
+            {s["kind"]: s["text"] for s in edited["sections"]},
+            {"assessment_summary": "Teacher wording for "
+                                   "assessment_summary.",
+             "observed_strengths": "Teacher wording for "
+                                   "observed_strengths.",
+             "review_focus": "Teacher wording for review_focus.",
+             "next_steps": "Teacher wording for next_steps."})
+        service.release_feedback(sid, {
+            "message_sha256": result["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["sections"], edited["sections"])
+        self.assertEqual(released["text"], edited["text"])
 
     def test_malicious_provider_sections_replaced_in_preview(self):
         class MaliciousGenerator(MultiGenerator):
@@ -2092,9 +2403,21 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v7")
+                         "phase3_student_feedback_template_v8")
         ptexts = {s["kind"]: s["text"] for s in preview["sections"]}
-        self.assertEqual(ptexts, texts)
+        self.assertEqual(ptexts["assessment_summary"],
+                         texts["assessment_summary"])
+        self.assertEqual(ptexts["observed_strengths"],
+                         texts["observed_strengths"])
+        for kind in ("review_focus", "next_steps"):
+            self.assertNotIn("draft, not a diagnosis", ptexts[kind])
+            self.assertNotIn("If your teacher approves", ptexts[kind])
+        self.assertEqual(ptexts["next_steps"],
+                         "Review the topics listed above and explain "
+                         "how you approached those questions. For any "
+                         "question without a checked worked solution, "
+                         "ask your teacher for help. Then try the "
+                         "practice activities below.")
         activities = preview["practice_activities"]
         self.assertEqual(
             {a["relationship"]["kind"] for a in activities},
@@ -2234,6 +2557,77 @@ class MultiModeTests(unittest.TestCase):
         self.assertEqual(released["sections"], preview["sections"])
         self.assertEqual(released["practice_activities"],
                          preview["practice_activities"])
+
+    def test_teacher_content_edit_selected_practice(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(
+            service, self._rows_wrong(("sA", "sB", "sC")))
+        self._wait_done(service, sid)
+        delivery = self._delivery(service, sid)
+        activities = delivery["preview"]["practice_activities"]
+        self.assertEqual(len(activities), 2)
+        originals = copy.deepcopy(activities)
+        for activity in originals:
+            self.assertEqual(activity["status"], "selected")
+            self.assertTrue(activity["instruction"])
+            self.assertTrue(activity["question"]["options"])
+            self.assertTrue(activity["relationship"]["message"])
+        patches = []
+        for activity in originals:
+            count = len(activity["question"]["options"])
+            patches.append({
+                "topic_label": f"Edited topic {activity['topic_label']}",
+                "message": "Edited practice message.",
+                "instruction": "Edited instruction.",
+                "relationship": {"message": "Edited relationship."},
+                "question": {
+                    "skill_name": "Edited skill",
+                    "concept_name": "Edited concept",
+                    "text": "Edited practice question?",
+                    "options": [f"Opt {i}" for i in range(count)]}})
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": dict(MULTI_SECTIONS),
+            "content": {"practice_activities": patches}})
+        preview = self._delivery(service, sid)["preview"]
+        edited = preview["practice_activities"]
+        for activity, original, patch in zip(
+                edited, originals, patches):
+            self.assertTrue(activity["teacher_edited"])
+            self.assertEqual(activity["original_content"], original)
+            self.assertEqual(activity["status"], "selected")
+            self.assertEqual(activity["relationship"]["kind"],
+                             original["relationship"]["kind"])
+            for key, value in patch.items():
+                if key == "question":
+                    self.assertEqual(activity["question"], value)
+                elif key == "relationship":
+                    self.assertEqual(activity["relationship"]["message"],
+                                     value["message"])
+                else:
+                    self.assertEqual(activity[key], value)
+        self.assertEqual(preview["practice"], edited[0])
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": res["preview_sha256"],
+                "sections": dict(MULTI_SECTIONS),
+                "content": {"practice_activities": [
+                    {"question": {"options": ["only"]}}, {}]}})
+        with self.assertRaises(ValueError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": res["preview_sha256"],
+                "sections": dict(MULTI_SECTIONS),
+                "content": {"practice_activities": [
+                    {"relationship": {"kind": "same_content"}}, {}]}})
+        service.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["practice_activities"], edited)
 
     def test_aligned_stage_failure_terminal_fallback(self):
         selector = MultiSelector(prefer=("sA", "sB"))
@@ -2387,8 +2781,10 @@ class MultiModeTests(unittest.TestCase):
             {a["relationship"]["kind"] for a in activities},
             {"same_topic_different_content"})
         for activity in activities:
-            self.assertIn("rather than",
-                          activity["relationship"]["message"])
+            self.assertTrue(
+                activity["relationship"]["message"].startswith(
+                    "This is related practice on "))
+            self.assertIn(", not ", activity["relationship"]["message"])
 
     def test_invalid_graph_mapping_unavailable_no_replacement(self):
         import feedback_practice

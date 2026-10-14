@@ -352,7 +352,10 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       const section = el("details", null, "run-record");
       section.dataset.runId = run.id;
       section.open = open.get(run.id) ?? ["running", "queued", "cancelling"].includes(run.status);
-      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)} · ${statusLabel(run.status)} · ${run.completed}/${run.total}`));
+      const activeCount = run.cases.filter((c) => c.status === "running").length;
+      const parallelNote = (run.max_parallel && run.max_parallel > 1) ? ` · ${run.max_parallel}x parallel` : "";
+      const activeNote = activeCount > 0 ? ` (${activeCount} active)` : "";
+      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)}${parallelNote} · ${statusLabel(run.status)}${activeNote} · ${run.completed}/${run.total}`));
       const progress = el("progress"); progress.max = run.total;
       progress.value = run.cases.filter((c) => !["running", "queued"].includes(c.status)).length;
       progress.setAttribute("aria-label", "Replay cases processed");
@@ -410,6 +413,16 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const mode = select([["rules", "Rules only — no hosted calls"], ["hosted", "Use configured hosted providers"]]);
     mode.id = "replay-provider-mode";
     mode.options[1].disabled = getConfig().provider_mode !== "hosted";
+    const parallel = select([
+      ["8", "8 scenarios at a time (parallel)"],
+      ["6", "6 scenarios at a time (parallel)"],
+      ["4", "4 scenarios at a time (parallel)"],
+      ["1", "1 scenario at a time (sequential)"],
+    ]);
+    parallel.id = "replay-max-parallel";
+    parallel.value = selectedIds.length === 1 ? "1" : "8";
+    const parallelField = field("Parallel execution", parallel);
+    parallelField.hidden = selectedIds.length === 1;
     const consent = el("input"); consent.type = "checkbox"; consent.id = "replay-hosted-consent";
     const approval = el("label", null, "attestation");
     const budget = getConfig().call_budget;
@@ -433,8 +446,8 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const start = el("button", "Start replay", "primary"); start.type = "submit"; start.id = "confirm-replay";
     const cancel = button("Cancel", () => closeReplayDialog(dialog));
     const actions = el("div", null, "replay-toolbar"); actions.append(start, cancel);
-    form.append(title, explanation, field("Feedback execution", mode), approval, retryApproval, retryNote,
-      notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the current one finishes.", "meta small"), error, actions);
+    form.append(title, explanation, field("Feedback execution", mode), parallelField, approval, retryApproval, retryNote,
+      notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the active wave finishes.", "meta small"), error, actions);
     dialog.append(form); document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
     const requestId = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -442,10 +455,12 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       event.preventDefault(); if (start.disabled) return;
       start.disabled = true; cancel.disabled = true; error.hidden = true;
       try {
-        const run = await api("/api/teacher/replays", {body: {request_id: requestId,
+        const body = {request_id: requestId,
           report_sha256: library.report_sha256, scenario_ids: selectedIds, provider_mode: mode.value,
           allow_provider_calls: mode.value === "hosted" && consent.checked,
-          retry_failed_provider_calls: mode.value === "hosted" && retry.checked}});
+          retry_failed_provider_calls: mode.value === "hosted" && retry.checked,
+          max_parallel: Number(parallel.value)};
+        const run = await api("/api/teacher/replays", {body});
         if (chosen && selectedIds.includes(chosen)) selectedRun = run.id;
         closeReplayDialog(dialog);
         await refreshRuns();

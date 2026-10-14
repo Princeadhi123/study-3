@@ -16,7 +16,7 @@ from demo_api import make_server
 from demo_service import DemoService
 from research_runtime import load_research_bank
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace
-from tests.helpers import make_bank, make_taxonomy
+from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_demo_service import fake_diagnostics, wait_for
 from tests.test_scenario_replays import replay_fixture
 from warm_scenarios import write_capture
@@ -404,7 +404,12 @@ class ResearchBrowserTests(unittest.TestCase):
         for index in range(40):
             if index == 20:
                 b.wait("!document.querySelector('#pause-panel').hidden")
-                self.assertNotIn("correct", b.js("document.querySelector('#pause-message').textContent").lower())
+                self.assertEqual(
+                    b.js("document.querySelectorAll('#pause-message h3').length"), 4)
+                self.assertFalse(b.js("Boolean(document.querySelector('#pause-message .kind'))"))
+                pause_text = b.js("document.querySelector('#pause-message').textContent")
+                for marker in ("out_of", "p_correct", "answer_index"):
+                    self.assertNotIn(marker, pause_text)
                 b.js("document.querySelector('#continue-button').click()")
             b.wait(f"document.querySelector('#q-pos').textContent === '{index + 1}'")
             b.js("document.querySelector('#q-options input').click(); document.querySelector('#submit-answer').click()")
@@ -413,6 +418,430 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('your teacher is reviewing your feedback')"))
         self.assertFalse(b.js("document.querySelector('#end-summary').textContent.includes('Observed result')"))
+        self.assertEqual(b.errors, [])
+
+    def test_student_midpoint_checkin_pause_and_continue(self):
+        b = self.browser
+        created = self.service.create_session()
+        sid = created["session_id"]
+        token = created["student_token"]
+        url = f"/?session={sid}#token={token}"
+        for row in responses(make_bank(), count=20):
+            self.service.submit_response(sid, token, row)
+        self.navigate(url)
+        b.wait("!document.querySelector('#pause-panel').hidden")
+        self.assertEqual(
+            b.js("document.querySelector('#pause-heading').textContent"),
+            "Your halfway check-in")
+        self.assertEqual(
+            b.js("document.activeElement.id"), "pause-heading")
+        pause_text = "document.querySelector('#pause-message').textContent"
+        b.wait(f"{pause_text}.includes('You have completed 20 of 40 questions.')")
+        self.assertEqual(
+            b.js("[...document.querySelectorAll('#pause-message h3')]"
+                 ".map((n) => n.textContent)"),
+            ["Halfway there", "What is going well",
+             "Your answers so far", "Before you continue"])
+        for label in ("encouragement", "next_step", "kind"):
+            self.assertFalse(b.js(f"{pause_text}.includes('{label}')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#pause-message .kind')"))
+        self.assertFalse(b.js(f"{pause_text}.includes('correct answer')"))
+        self.assertFalse(b.js(f"{pause_text}.includes('answer is')"))
+        self.assertEqual(
+            b.js("document.querySelector('#continue-button').textContent"),
+            "Continue to the next 20 questions")
+        b.js("document.querySelector('#continue-button').click()")
+        b.wait("!document.querySelector('#question-panel').hidden")
+        b.wait("document.querySelector('#q-pos').textContent === '21'")
+        self.navigate(url)
+        b.wait("!document.querySelector('#question-panel').hidden")
+        self.assertTrue(b.js("document.querySelector('#pause-panel').hidden"))
+        for row in responses(make_bank(), count=40)[20:]:
+            self.service.submit_response(sid, token, row)
+        b.command("Page.reload", {"ignoreCache": True})
+        b.wait("document.readyState === 'complete'"
+               " && typeof api === 'function'")
+        b.wait("!document.querySelector('#end-panel').hidden")
+        summary = "document.querySelector('#end-summary').textContent"
+        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        self.assertFalse(b.js(
+            "document.querySelector('#end-summary .feedback-section')"))
+        self.assertEqual(b.errors, [])
+
+    def test_teacher_midpoint_matches_student_message(self):
+        b = self.browser
+        bank = make_bank()
+        empty = self.service.create_session(label="midpoint-empty")
+        created = self.service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        rows = responses(bank, count=20)
+        for index in (0, 5):
+            q = bank["questions"][index]
+            rows[index] = {"question_id": q["question_id"],
+                           "selected_index": (q["answer_index"] + 1) % 3}
+        for row in rows:
+            snapshot = self.service.submit_response(sid, token, row)
+        saved = snapshot["feedback"]["midpoint"]
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelectorAll('#session-list button').length === 2")
+        b.js("[...document.querySelectorAll('#session-list button')]"
+             ".find((n) => n.textContent.includes('20/40 answered'))"
+             ".click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        card = "#tab-feedback .midpoint-feedback-card"
+        b.wait(f"Boolean(document.querySelector('{card}'))")
+        expected = []
+        for section in saved["sections"]:
+            if section.get("title"):
+                expected.append("H4:" + section["title"])
+            expected.append("P:" + section["text"])
+        rendered = ("[...document.querySelectorAll('" + card
+                    + " .midpoint-feedback-message > *')]"
+                      ".filter((n) => n.matches('h4,p'))"
+                      ".map((n) => n.tagName + ':' + n.textContent)")
+        self.assertEqual(b.js(rendered), expected)
+        card_text = f"document.querySelector('{card}').textContent"
+        self.assertTrue(b.js(
+            f"{card_text}.includes('Student midpoint check-in')"))
+        self.assertTrue(b.js(
+            f"{card_text}.includes('does not confirm that the student "
+            "opened or read it')"))
+        self.assertTrue(b.js(
+            f"{card_text}.includes('phase3_student_midpoint_v5')"))
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} input, {card} button, "
+            f"{card} select, {card} textarea')"))
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} .kind')"))
+        view = self.service.teacher_session(sid)
+        self.assertIsNone(view["feedback_delivery"]["preview"])
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('Assessment summary')"))
+        for row in responses(bank, correct=False, count=40)[20:]:
+            self.service.submit_response(sid, token, row)
+        b.wait("document.querySelector('#tab-feedback .release-card')")
+        b.wait("document.querySelector('#tab-feedback').textContent"
+               ".includes('Awaiting educator review')")
+        self.assertEqual(b.js(rendered), expected)
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback .release-card')"
+            ".textContent.includes('Released to the student')"))
+        self.assertIsNone(
+            self.service.snapshot(sid, token)["feedback"]["end"])
+        path = self.root / "data" / "metadata" / f"{sid}.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["checkpoints"]["midpoint"].pop("student_message")
+        meta["checkpoints"]["midpoint"].pop("student_message_version")
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        baseline_text = meta["checkpoints"]["midpoint"][
+            "baseline_student"]["message"]["text"]
+        b.wait(f"document.querySelector('{card} .midpoint-feedback-message "
+               "p').textContent === " + json.dumps(baseline_text))
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} .midpoint-feedback-message "
+            "h4')"))
+        self.assertFalse(b.js(f"{card_text}.includes('Message version')"))
+        b.wait("document.querySelectorAll('#session-list button')"
+               ".length === 2")
+        b.js("[...document.querySelectorAll('#session-list button')]"
+             ".find((n) => !n.classList.contains('active')).click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        b.wait(f"{card_text}.includes('No saved midpoint message is "
+               "available in this result.')")
+        self.assertEqual(b.errors, [])
+
+    def test_replay_result_shows_saved_student_midpoint(self):
+        b = self.browser
+        library = self.service.research.library()
+        run = self.service.replays.start({
+            "request_id": secrets.token_hex(16),
+            "report_sha256": library["report_sha256"],
+            "scenario_ids": [library["scenarios"][0]["id"]],
+            "provider_mode": "rules", "allow_provider_calls": False})
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run["id"])["status"]
+            not in ("queued", "running", "cancelling"), timeout=30))
+        finished = self.service.replays.get(run["id"])
+        self.assertEqual(finished["status"], "complete")
+        case = finished["cases"][0]
+        detail = self.service.teacher_session(case["session_id"])
+        saved = detail["checkpoints"]["midpoint"]["student_message"]
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.wait("document.querySelector('#scenario-version').options.length === 2")
+        b.js(f"document.querySelector('#scenario-version').value={json.dumps(run['id'])}; document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
+        b.wait("document.querySelector('#scenario-tab-overview')"
+               ".textContent.includes('What changed')")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
+        card = "#scenario-tab-feedback .midpoint-feedback-card"
+        b.wait(f"Boolean(document.querySelector('{card}'))")
+        rendered = ("[...document.querySelectorAll('" + card
+                    + " .midpoint-feedback-message > *')]"
+                      ".filter((n) => n.matches('h4,p'))"
+                      ".map((n) => n.tagName + ':' + n.textContent)")
+        expected = []
+        for section in saved["sections"]:
+            if section.get("title"):
+                expected.append("H4:" + section["title"])
+            expected.append("P:" + section["text"])
+        self.assertEqual(b.js(rendered), expected)
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} input, {card} button')"))
+        self.assertEqual(b.errors, [])
+
+    def test_english_midpoint_display_student_and_teacher(self):
+        b = self.browser
+        bank = make_bank()
+        finnish = ["Jaollisuus, tekijät, alkuluvut",
+                   "Murtolukujen kerto- ja jakolasku",
+                   "Prosenttilaskuja",
+                   "Samanmuotoisten termien yhdistäminen"]
+        fi_strengths = ("You answered questions correctly in Jaollisuus, "
+                        "tekijät, alkuluvut, Murtolukujen kerto- ja "
+                        "jakolasku. These were your highest-scoring "
+                        "topics in this first set.")
+        fi_focus = ("Some questions in Prosenttilaskuja, Samanmuotoisten "
+                    "termien yhdistäminen were tricky in this first set. "
+                    "Take your time reading the next questions.")
+        en_strengths = ("You answered questions correctly in "
+                        "Divisibility, factors and primes, Fraction "
+                        "multiplication and division. These were your "
+                        "highest-scoring topics in this first set.")
+        en_focus = ("Some questions in Percentages, Combining like "
+                    "terms were tricky in this first set. Take your "
+                    "time reading the next questions.")
+        created = self.service.create_session(label="english-finnish")
+        sid, token = created["session_id"], created["student_token"]
+        for row in responses(bank, count=20):
+            self.service.submit_response(sid, token, row)
+        meta_path = self.root / "data" / "metadata" / f"{sid}.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        message = meta["checkpoints"]["midpoint"]["student_message"]
+        message["sections"][1]["text"] = fi_strengths
+        message["sections"][2]["text"] = fi_focus
+        message["text"] = "\n\n".join(
+            s["text"] for s in message["sections"])
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+        self.navigate(f"/?session={sid}#token={token}")
+        b.wait("!document.querySelector('#pause-panel').hidden")
+        pause = "document.querySelector('#pause-message').textContent"
+        self.assertTrue(b.js(f"{pause}.includes({json.dumps(en_strengths)})"))
+        self.assertTrue(b.js(f"{pause}.includes({json.dumps(en_focus)})"))
+        for label in finnish:
+            self.assertFalse(b.js(f"{pause}.includes({json.dumps(label)})"))
+        self.assertEqual(
+            b.js("englishMidpointText('Tuntematon asia.')"),
+            "Tuntematon asia.")
+        self.assertEqual(
+            b.js("englishMidpointText('Arithmetic already')"),
+            "Arithmetic already")
+        self.assertEqual(
+            b.js("englishMidpointText('Prosenttilaskuja')"), "Percentages")
+        self.assertFalse(b.js(
+            "document.querySelector('#pause-message img')"))
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-search').value='english-finnish';"
+             "document.querySelector('#session-search').dispatchEvent(new Event('input'))")
+        b.wait("document.querySelectorAll('#session-list button').length === 1")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        card = "#tab-feedback .midpoint-feedback-card"
+        b.wait(f"Boolean(document.querySelector('{card}'))")
+        card_text = f"document.querySelector('{card}').textContent"
+        self.assertTrue(b.js(f"{card_text}.includes({json.dumps(en_strengths)})"))
+        self.assertTrue(b.js(f"{card_text}.includes({json.dumps(en_focus)})"))
+        self.assertTrue(b.js(f"{card_text}.includes('displayed with English topic labels')"))
+        for label in finnish:
+            self.assertFalse(b.js(f"{card_text}.includes({json.dumps(label)})"))
+        stored = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["checkpoints"]["midpoint"]
+                         ["student_message"]["sections"][1]["text"],
+                         fi_strengths)
+        public = self.service.snapshot(sid, token)
+        self.assertEqual(public["feedback"]["midpoint"]["sections"][1]
+                         ["text"], fi_strengths)
+        fallback = self.service.create_session(label="english-fallback")
+        sid2, token2 = fallback["session_id"], fallback["student_token"]
+        for row in responses(bank, count=20):
+            self.service.submit_response(sid2, token2, row)
+        meta2_path = self.root / "data" / "metadata" / f"{sid2}.json"
+        meta2 = json.loads(meta2_path.read_text(encoding="utf-8"))
+        saved2 = meta2["checkpoints"]["midpoint"]["student_message"]
+        meta2["checkpoints"]["midpoint"]["student_message"] = {
+            "sections": [],
+            "text": ("Prosenttilaskenta <img src=x "
+                     "onerror=window.__injected=1> Prosenttilaskuja"),
+            "total": saved2["total"],
+            "skills": saved2["skills"]}
+        meta2_path.write_text(json.dumps(meta2), encoding="utf-8")
+        self.navigate(f"/?session={sid2}#token={token2}")
+        b.wait("!document.querySelector('#pause-panel').hidden")
+        b.wait(f"{pause}.includes('Percentages')")
+        self.assertFalse(b.js(f"{pause}.includes('Prosenttilaskenta')"))
+        self.assertFalse(b.js(f"{pause}.includes('Prosenttilaskuja')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#pause-message img')"))
+        self.assertFalse(b.js("Boolean(window.__injected)"))
+        b.wait("document.querySelector('#pause-message .midpoint-summary')")
+        self.assertEqual(
+            b.js("document.querySelector('#pause-message .midpoint-total')"
+                 ".textContent"),
+            "Overall: 20 of 20 correct in this first set.")
+        self.assertEqual(
+            b.js("document.querySelectorAll('#pause-message "
+                 ".midpoint-topics tbody tr').length"), 4)
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('#session-search').value='english-fallback';"
+             "document.querySelector('#session-search').dispatchEvent(new Event('input'))")
+        b.wait("document.querySelectorAll('#session-list button').length === 1")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        b.wait(f"{card_text}.includes('Percentages')")
+        self.assertFalse(b.js(f"{card_text}.includes('Prosenttilask')"))
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} img')"))
+        b.wait(f"document.querySelector('{card} .midpoint-summary')")
+        self.assertEqual(
+            b.js(f"document.querySelector('{card} .midpoint-total')"
+                 ".textContent"),
+            "Overall: 20 of 20 correct in this first set.")
+        self.assertEqual(
+            b.js(f"document.querySelectorAll('{card} .midpoint-topics "
+                 "tbody tr').length"), 4)
+        self.assertEqual(b.errors, [])
+
+    def test_midpoint_v2_summary_student_and_teacher(self):
+        b = self.browser
+        bank = make_bank()
+        bank["skill_names"] = {
+            "sA": "Jaollisuus, tekijät, alkuluvut",
+            "sB": "Murtolukujen kerto- ja jakolasku",
+            "sC": "Prosenttilaskuja",
+            "sD": "Samanmuotoisten termien yhdistäminen"}
+        taxonomy = make_taxonomy(bank)
+        service = DemoService(
+            root=self.root / "data_fi", bank=bank, taxonomy=taxonomy,
+            diagnostics=fake_diagnostics(bank),
+            review_mode="legacy_single")
+        self.addCleanup(service.close, wait=True)
+        self.server.RequestHandlerClass.service = service
+        self.addCleanup(
+            setattr, self.server.RequestHandlerClass, "service",
+            self.service)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        rows = responses(bank, count=20)
+        for index in (2, 3, 6, 7, 10, 11, 14, 15, 18, 19):
+            q = bank["questions"][index]
+            rows[index] = {"question_id": q["question_id"],
+                           "selected_index": (q["answer_index"] + 1) % 3}
+        for row in rows:
+            service.submit_response(sid, token, row)
+        expected_rows = [
+            ["Divisibility, factors and primes", "5 of 5 correct",
+             "Number factors, divisibility and prime numbers"],
+            ["Fraction multiplication and division", "5 of 5 correct",
+             "Multiplying and dividing fractions"],
+            ["Percentages", "0 of 5 correct",
+             "Working with percentages and amounts"],
+            ["Combining like terms", "0 of 5 correct",
+             "Simplifying algebraic expressions by combining "
+             "matching terms"]]
+        rows_js = ("[...document.querySelectorAll("
+                   "'.midpoint-topics tbody tr')]"
+                   ".map((r) => [...r.children]"
+                   ".map((c) => c.textContent))")
+        self.navigate(f"/?session={sid}#token={token}")
+        b.wait("!document.querySelector('#pause-panel').hidden")
+        b.wait("document.querySelector('.midpoint-summary')")
+        self.assertEqual(
+            b.js("document.querySelector('.midpoint-summary h4')"
+                 ".textContent"), "Your first 20 answers")
+        self.assertEqual(
+            b.js("document.querySelector('.midpoint-total')"
+                 ".textContent"),
+            "Overall: 10 of 20 correct in this first set.")
+        self.assertEqual(
+            b.js("document.querySelector('.midpoint-topics caption')"
+                 ".textContent"),
+            "Topic results from the first 20 answers")
+        self.assertEqual(
+            b.js("[...document.querySelectorAll("
+                 "'.midpoint-topics thead th')]"
+                 ".map((n) => n.scope + ':' + n.textContent)"),
+            ["col:Topic", "col:First-half result",
+             "col:What this topic covers"])
+        self.assertEqual(b.js(rows_js), expected_rows)
+        pause = "document.querySelector('#pause-message').textContent"
+        for label in bank["skill_names"].values():
+            self.assertFalse(
+                b.js(f"{pause}.includes({json.dumps(label)})"))
+        self.assertFalse(b.js(
+            f"{pause}.includes('correct answer is')"))
+        self.assertFalse(b.js(
+            f"{pause}.includes('practice')"))
+        order = ("[...document.querySelectorAll('#pause-message > *')]"
+                 ".map((n) => n.className || n.tagName)")
+        self.assertEqual(
+            b.js(f"{order}.indexOf('midpoint-summary')"), 1)
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('#continue-button').click()")
+        b.wait("!document.querySelector('#question-panel').hidden")
+        for row in responses(bank, correct=False, count=40)[20:]:
+            service.submit_response(sid, token, row)
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        card = "#tab-feedback .midpoint-feedback-card"
+        b.wait(f"Boolean(document.querySelector('{card}'))")
+        b.wait(f"document.querySelector('{card} .midpoint-summary')")
+        self.assertEqual(b.js(rows_js), expected_rows)
+        self.assertEqual(
+            b.js(f"document.querySelector('{card} .midpoint-total')"
+                 ".textContent"),
+            "Overall: 10 of 20 correct in this first set.")
+        self.assertFalse(b.js(
+            f"document.querySelector('{card} input, {card} button')"))
+        path = self.root / "data_fi" / "metadata" / f"{sid}.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        message = meta["checkpoints"]["midpoint"]["student_message"]
+        message.pop("total")
+        message.pop("skills")
+        meta["checkpoints"]["midpoint"]["student_message_version"] = (
+            "phase3_student_midpoint_v1")
+        path.write_text(json.dumps(meta), encoding="utf-8")
+        b.wait(f"!document.querySelector('{card} .midpoint-summary')")
+        b.wait("document.querySelector('#tab-feedback').textContent"
+               ".includes('Awaiting educator review')")
         self.assertEqual(b.errors, [])
 
     def test_teacher_release_gates_student_feedback(self):
@@ -757,12 +1186,13 @@ class ResearchBrowserTests(unittest.TestCase):
             heads = "[...document.querySelectorAll('#tab-feedback .feedback-preview .practice-activity h3')]"
             self.assertEqual(
                 b.js(f"{heads}.map((n) => n.textContent)"),
-                ["Practice for Subtopic sA", "Practice for Subtopic sB"])
+                ["Related practice — Concept sA",
+                 "Related practice — Concept sB"])
             for index in range(2):
                 self.assertTrue(b.js(
                     f"{cards}[{index}].textContent.includes('Choose an option and explain your reasoning.')"))
             self.assertTrue(b.js(
-                f"{cards}[0].textContent.includes('same broad topic')"))
+                f"{cards}[0].textContent.includes('related practice')"))
             examples_sel = "[...document.querySelectorAll('#tab-feedback .feedback-preview .review-example')]"
             self.assertEqual(b.js(f"{examples_sel}.length"), 2)
             self.assertTrue(b.js(
@@ -1180,7 +1610,9 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(
             "document.querySelector('#tab-feedback .release-card input.score')"))
         self.assertTrue(b.js(
-            f"{release}.textContent.includes('worked example and practice activity are fixed')"))
+            f"{release}.textContent.includes('Scores and source assessment records are preserved')"))
+        self.assertFalse(b.js(
+            f"{release}.textContent.includes('are fixed')"))
         self.assertFalse(b.js(f"{approve}.disabled"))
         b.js("const f=document.querySelector('#tab-feedback textarea.edit-section'); "
              "f.value='Teacher rephrased summary for the class.'; "
@@ -1267,6 +1699,291 @@ class ResearchBrowserTests(unittest.TestCase):
                  "'injected_generator_full_sections'}}, {})"),
             "Injected full-feedback generator - hosted provenance "
             "unavailable")
+        self.assertEqual(b.errors, [])
+
+    def test_teacher_grounded_full_package_editing_flow(self):
+        from tests.test_assessment_worked_review import (
+            grounded_rows, make_grounded_bank, make_grounded_taxonomy,
+            positions)
+        b = self.browser
+        bank = make_grounded_bank()
+        taxonomy = make_grounded_taxonomy(bank)
+        self.service.close(wait=True)
+        self.service = DemoService(
+            root=self.root / "grounded_data", bank=bank,
+            taxonomy=taxonomy, diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        created = self.service.create_session()
+        sid, token = (created["session_id"],
+                      created["student_token"])
+        wrong = sorted({positions(bank, "pct", 0)[0],
+                        positions(bank, "alg", 0)[0]})
+        for row in grounded_rows(bank, wrong):
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] in ("ready", "fallback")))
+        original_prompt = self.service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]["review_examples"][0][
+            "prompt"]
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        approve = ("document.querySelector('#tab-feedback "
+                   ".release-card button.primary')")
+        preview = ("document.querySelector('#tab-feedback "
+                   ".feedback-preview')")
+        b.wait(f"Boolean({release}) && Boolean({preview})")
+        edit_dd = ("document.querySelector('#tab-feedback "
+                   "details[data-disclosure-key=feedback-editing]')")
+        b.js(f"{edit_dd}.open = true")
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            "textarea.edit-section').length"), 4)
+        b.wait("document.querySelectorAll('#tab-feedback "
+               "textarea.edit-content').length > 10")
+        step0 = ("document.querySelector('#tab-feedback textarea"
+                 "[data-content-path=\"review_examples.0.steps\"]')")
+        prompt0 = ("document.querySelector('#tab-feedback textarea"
+                   "[data-content-path=\"review_examples.0.prompt\"]')")
+        reason0 = ("document.querySelector('#tab-feedback textarea"
+                   "[data-content-path=\"review_examples.0.reasoning_question\"]')")
+        step1 = ("document.querySelector('#tab-feedback textarea"
+                 "[data-content-path=\"review_examples.1.steps\"]')")
+        practice0 = ("document.querySelector('#tab-feedback textarea"
+                     "[data-content-path=\"practice_activities.0.message\"]')")
+        title0 = ("document.querySelector('#tab-feedback textarea"
+                  "[data-content-path=\"section_titles.review_focus\"]')")
+        for expr in (step0, prompt0, reason0, step1, practice0, title0):
+            self.assertTrue(b.js(f"Boolean({expr})"), expr)
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            "[data-disclosure-key=\"feedback-editing\"] > details.raw')"
+            ".length"), 5)
+        self.assertTrue(b.js(
+            "![...document.querySelectorAll('#tab-feedback "
+            "[data-disclosure-key=\"feedback-editing\"] > details.raw')]"
+            ".some((d) => d.open)"))
+        self.assertEqual(b.js(
+            "document.querySelector('#tab-feedback textarea"
+            "[data-content-path=\"review_examples.1.prompt\"]').value"),
+            "Simplify: 3x + 2x")
+        b.js(f"{step0}.value='Teacher step <b>one</b>.\\nTeacher step two.'; "
+             f"{step0}.dispatchEvent(new Event('input'))")
+        b.js(f"{prompt0}.value='Edited first prompt text?'; "
+             f"{prompt0}.dispatchEvent(new Event('input'))")
+        b.js(f"{reason0}.value='Explain the edited reasoning.'; "
+             f"{reason0}.dispatchEvent(new Event('input'))")
+        b.js(f"{step1}.value='Custom teacher step.'; "
+             f"{step1}.dispatchEvent(new Event('input'))")
+        b.js(f"{practice0}.value='Teacher practice note.'; "
+             f"{practice0}.dispatchEvent(new Event('input'))")
+        b.js(f"{title0}.value='Teacher heading'; "
+             f"{title0}.dispatchEvent(new Event('input'))")
+        b.js("const f=document.querySelector('#tab-feedback "
+             "textarea.edit-section'); "
+             "f.value='Edited narrative for the grounded card.'; "
+             "f.dispatchEvent(new Event('input'))")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        time.sleep(2.3)
+        self.assertEqual(b.js(f"{step0}.value"),
+                         "Teacher step <b>one</b>.\nTeacher step two.")
+        self.assertEqual(b.js(f"{title0}.value"), "Teacher heading")
+        b.js("const btns=[...document.querySelectorAll("
+             "'#tab-feedback .release-card button')]; "
+             "btns.find((n) => n.textContent === 'Save edited draft')"
+             ".click()")
+        b.wait(f"{release}.textContent.includes('Edited draft saved')")
+        b.wait(f"{preview}.textContent.includes('Teacher step')")
+        self.assertTrue(b.js(f"{release}.textContent.includes("
+                             "'Teacher-edited worked review')"))
+        self.assertTrue(b.js(f"{preview}.textContent.includes("
+                             "'Teacher heading')"))
+        self.assertTrue(b.js(f"{preview}.textContent.includes("
+                             "'Custom teacher step.')"))
+        self.assertTrue(b.js(f"{preview}.textContent.includes("
+                             "'Edited first prompt text?')"))
+        self.assertTrue(b.js(f"{preview}.textContent.includes("
+                             "'Simplify: 3x + 2x')"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".feedback-preview b'))"))
+        original_dd = ("document.querySelector('#tab-feedback "
+                       ".feedback-preview details[data-disclosure-key"
+                       "=\"worked-review-original-content:0\"]')")
+        self.assertTrue(b.js(f"Boolean({original_dd})"))
+        self.assertTrue(b.js(
+            f"{original_dd}.textContent.includes("
+            f"{json.dumps(original_prompt)})"))
+        b.wait(f"!{approve}.disabled")
+        b.screenshot("teacher-grounded-full-edit.png")
+        b.js(f"{approve}.click()")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        self.navigate(f"/?session={sid}#token={token}")
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Teacher step <b>one</b>.')")
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Teacher practice note.')"))
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Explain the edited reasoning.')"))
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Teacher heading')"))
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Edited first prompt text?')"))
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Simplify: 3x + 2x')"))
+        self.assertTrue(b.js(
+            f"{summary}.textContent.includes('Teacher-edited worked review')"))
+        self.assertFalse(b.js(
+            f"{summary}.textContent.includes('verify before release')"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('#end-summary b'))"))
+        b.screenshot("student-grounded-full-edit.png")
+        self.assertEqual(b.errors, [])
+
+    def test_teacher_selected_practice_editing_flow(self):
+        import copy
+        from unittest import mock
+        import feedback_practice
+        import research_runtime
+        from tests.test_demo_service import (
+            FakeAlignedRecommender, MultiGenerator, MultiSelector,
+            RecordingPredictor)
+        from tests.test_feedback_practice import make_graph, make_pool
+        b = self.browser
+        bank = make_bank()
+        pool = make_pool(("sA", "sB"))
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(pool)),
+                mock.patch.object(
+                    research_runtime, "load_current_practice_pool",
+                    return_value=copy.deepcopy(pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+        recommender = FakeAlignedRecommender(
+            pool, RecordingPredictor({"pool_q1": 0.6, "pool_q2": 0.55}))
+        self.service.close(wait=True)
+        self.service = DemoService(
+            root=self.root / "aligned_data", bank=bank,
+            taxonomy=make_taxonomy(bank),
+            diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source,
+            provider_mode="hosted",
+            selector=MultiSelector(prefer=("sA", "sB")),
+            generator=MultiGenerator(), recommender=recommender)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        created = self.service.create_session()
+        sid, token = (created["session_id"],
+                      created["student_token"])
+        wrong_skills = {"sA", "sB", "sC"}
+        for question in bank["questions"]:
+            index = question["answer_index"]
+            if question["skill_id"] in wrong_skills:
+                index = (index + 1) % len(question["options"])
+            self.service.submit_response(sid, token, {
+                "question_id": question["question_id"],
+                "selected_index": index})
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] in ("ready", "fallback")))
+        preview = self.service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]
+        activities = preview["practice_activities"]
+        self.assertTrue(all(a["status"] == "selected"
+                            for a in activities))
+        self.assertTrue(all(a["question"]["options"]
+                            for a in activities))
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        approve = ("document.querySelector('#tab-feedback "
+                   ".release-card button.primary')")
+        preview_el = ("document.querySelector('#tab-feedback "
+                      ".feedback-preview')")
+        b.wait(f"Boolean({release}) && Boolean({preview_el})")
+        edit_dd = ("document.querySelector('#tab-feedback "
+                   "details[data-disclosure-key=feedback-editing]')")
+        b.js(f"{edit_dd}.open = true")
+        instruction = ("document.querySelector('#tab-feedback textarea"
+                       "[data-content-path=\"practice_activities.0.instruction\"]')")
+        question_text = ("document.querySelector('#tab-feedback textarea"
+                         "[data-content-path=\"practice_activities.0.question.text\"]')")
+        option0 = ("document.querySelector('#tab-feedback textarea"
+                   "[data-content-path=\"practice_activities.0.question.options.0\"]')")
+        message0 = ("document.querySelector('#tab-feedback textarea"
+                     "[data-content-path=\"practice_activities.0.message\"]')")
+        relation0 = ("document.querySelector('#tab-feedback textarea"
+                      "[data-content-path=\"practice_activities.0.relationship.message\"]')")
+        for expr in (instruction, question_text, option0, message0,
+                     relation0):
+            self.assertTrue(b.js(f"Boolean({expr})"), expr)
+        b.js(f"{instruction}.value='Teacher instruction text.'; "
+             f"{instruction}.dispatchEvent(new Event('input'))")
+        b.js(f"{question_text}.value='Teacher practice question?'; "
+             f"{question_text}.dispatchEvent(new Event('input'))")
+        b.js(f"{option0}.value='Teacher option A'; "
+             f"{option0}.dispatchEvent(new Event('input'))")
+        b.js(f"{message0}.value='Teacher practice status note.'; "
+             f"{message0}.dispatchEvent(new Event('input'))")
+        b.js(f"{relation0}.value='Teacher relationship note.'; "
+             f"{relation0}.dispatchEvent(new Event('input'))")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        b.js("const btns=[...document.querySelectorAll("
+             "'#tab-feedback .release-card button')]; "
+             "btns.find((n) => n.textContent === 'Save edited draft')"
+             ".click()")
+        b.wait(f"{release}.textContent.includes('Edited draft saved')")
+        b.wait(f"{preview_el}.textContent.includes("
+               "'Teacher practice question?')")
+        for needle in ("Teacher instruction text.", "Teacher option A",
+                       "Teacher practice status note.",
+                       "Teacher relationship note.",
+                       "Teacher-edited practice — verify before release"):
+            self.assertTrue(b.js(
+                f"{preview_el}.textContent.includes({json.dumps(needle)})"),
+                needle)
+        original_dd = ("document.querySelector('#tab-feedback "
+                       ".feedback-preview details[data-disclosure-key"
+                       "=\"practice-original-content:0\"]')")
+        self.assertTrue(b.js(f"Boolean({original_dd})"))
+        self.assertTrue(b.js(
+            f"{original_dd}.textContent.includes('Pool practice prompt 1?')"))
+        b.wait(f"!{approve}.disabled")
+        b.js(f"{approve}.click()")
+        b.wait(f"{release}.textContent.includes('Released to the student')")
+        self.navigate(f"/?session={sid}#token={token}")
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Teacher practice question?')")
+        for needle in ("Teacher instruction text.", "Teacher option A",
+                       "Teacher practice status note.",
+                       "Teacher relationship note.",
+                       "Teacher-edited practice"):
+            self.assertTrue(b.js(
+                f"{summary}.textContent.includes({json.dumps(needle)})"),
+                needle)
+        self.assertFalse(b.js(
+            f"{summary}.textContent.includes('verify before release')"))
+        b.screenshot("student-selected-practice-edit.png")
         self.assertEqual(b.errors, [])
 
     def test_warm_cold_bank_ui_tokens_translation_and_teacher_context(self):

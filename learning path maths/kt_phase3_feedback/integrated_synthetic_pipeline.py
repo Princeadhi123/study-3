@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import math
+import threading
 import time
 from pathlib import Path
 
@@ -227,8 +228,26 @@ def aitta_request(payload, model, endpoint_hash):
 
 
 class CachedReviewSelector:
+    thread_safe = True
+
     def __init__(self, native, cache):
-        self.native, self.cache, self.execution = native, cache, None
+        self.native, self.cache = native, cache
+        self._exec_local = threading.local()
+        self._last_execution = None
+
+    @property
+    def execution(self):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        return self._exec_local.__dict__.get(
+            "value", getattr(self, "_last_execution", None))
+
+    @execution.setter
+    def execution(self, value):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        self._exec_local.value = value
+        self._last_execution = value
 
     def select(self, payload):
         request = jev_request(payload)
@@ -240,10 +259,27 @@ class CachedReviewSelector:
 
 
 class CachedReviewOpening:
+    thread_safe = True
+
     def __init__(self, native, cache, model, endpoint_hash):
         self.native, self.cache = native, cache
         self.model, self.endpoint_hash = model, endpoint_hash
-        self.execution = None
+        self._exec_local = threading.local()
+        self._last_execution = None
+
+    @property
+    def execution(self):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        return self._exec_local.__dict__.get(
+            "value", getattr(self, "_last_execution", None))
+
+    @execution.setter
+    def execution(self, value):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        self._exec_local.value = value
+        self._last_execution = value
 
     def generate(self, payload):
         request = aitta_request(payload, self.model, self.endpoint_hash)

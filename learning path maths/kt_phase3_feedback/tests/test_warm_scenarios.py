@@ -245,7 +245,7 @@ class WarmScenarioTests(unittest.TestCase):
                 review["message"]["text"].count(SCOPE), 1)
             preview = detail["feedback_delivery"]["preview"]
             self.assertEqual(preview["template_version"],
-                             "phase3_student_feedback_template_v7")
+                             "phase3_student_feedback_template_v8")
         first_case = run["cases"][0]["scenario_id"]
         rerun = start([first_case])
         self.assertEqual(rerun["status"], "complete")

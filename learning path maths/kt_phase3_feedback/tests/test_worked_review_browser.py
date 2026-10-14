@@ -273,6 +273,110 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertGreaterEqual(result["original"], 1)
         self.assertEqual(b.errors, [])
 
+    def test_concise_summary_table_teacher_and_student(self):
+        b = self.browser
+        wrong = [positions(self.bank, "pct", 0)[0],
+                 positions(self.bank, "alg", 0)[0]]
+        created = self.service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in grounded_rows(self.bank, wrong):
+            self.service.submit_response(sid, token, row)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if self.service._load_meta(sid)["provider_job"][
+                    "status"] in ("ready", "fallback"):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("provider job did not finish")
+        detail = self.service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v8")
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete'")
+        summary = "#end-summary"
+        b.wait("document.querySelector('" + summary + "')"
+               ".textContent.includes('reviewing your feedback')")
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('" + summary +
+            " .assessment-results'))"))
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("document.querySelector('#pin-input')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row, [data-session]')",
+               timeout=30)
+        b.js("document.querySelector('.session-row, [data-session]')"
+             ".click()")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]')"
+             ".click()")
+        results = "#tab-feedback .assessment-results"
+        b.wait(f"Boolean(document.querySelector('{results}'))",
+               timeout=30)
+        self.assertEqual(b.js(
+            f"document.querySelector('{results} p').textContent"),
+            "Overall: 38 of 40 correct on this assessment.")
+        self.assertEqual(b.js(
+            f"document.querySelectorAll('{results} "
+            ".assessment-topics tbody tr').length"), 4)
+        table_text = b.js(
+            f"document.querySelector('{results} "
+            ".assessment-topics').textContent")
+        for needle in ("Topic", "Result", "What this topic covers",
+                       "Percentages", "Fractions",
+                       "Working with percentages and amounts",
+                       "Working with fractions",
+                       "Questions about this topic."):
+            self.assertIn(needle, table_text)
+        preview_text = b.js(
+            "document.querySelector('#tab-feedback .feedback-preview')"
+            ".textContent")
+        for needle in ("Assessment complete", "What went well",
+                       "Answers to review", "What to do next"):
+            self.assertIn(needle, preview_text)
+        for needle in ("draft, not a diagnosis",
+                       "If your teacher approves"):
+            self.assertNotIn(needle, preview_text)
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            ".review-example').length"), 2)
+        teacher_table = b.js(
+            f"document.querySelector('{results}').textContent")
+        released = self.service.release_feedback(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"], "reviewer_label": "browser-test"})
+        self.assertTrue(released["released"])
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("Boolean(document.querySelector('" + summary +
+               " .assessment-results'))", timeout=30)
+        student_table = b.js(
+            "document.querySelector('" + summary +
+            " .assessment-results').textContent")
+        self.assertEqual(student_table, teacher_table)
+        student_text = b.js(
+            "document.querySelector('" + summary + "').textContent")
+        for needle in ("Assessment complete", "What went well",
+                       "Answers to review", "What to do next"):
+            self.assertIn(needle, student_text)
+        self.assertEqual(b.js(
+            "document.querySelectorAll('" + summary +
+            " .review-example').length"), 2)
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('" + summary +
+            " details.raw'))"))
+        b.viewport(390, 844)
+        self.assertFalse(b.js(
+            "document.documentElement.scrollWidth > "
+            "document.documentElement.clientWidth"))
+        self.assertEqual(b.errors, [])
+
     def test_aitta_provenance_guard_labels(self):
         b = self.browser
         b.command("Page.navigate", {"url": f"{self.url}/teacher"})

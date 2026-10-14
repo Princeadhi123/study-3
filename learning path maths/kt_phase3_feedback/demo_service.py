@@ -11,6 +11,7 @@ The single provider worker owns the Cached* adapters so provider state
 is shared by exactly one thread; the diagnostics worker owns the frozen
 model. Neither pool blocks student submissions.
 """
+import contextlib
 import copy
 import hashlib
 import hmac
@@ -27,10 +28,12 @@ import phase3_paths
 import worked_review_math
 from aitta_generator import AittaGenerator
 from assessment_worked_review import (
-    ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION)
+    ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION,
+    concise_student_preview)
 from active_payload import active_payload
 from evidence_feedback import (
-    build_evidence, build_research_evidence, canonical_digest, run_feedback,
+    MIDPOINT_MESSAGE_VERSION, build_evidence, build_research_evidence,
+    canonical_digest, compose_midpoint_message, run_feedback,
     run_multi_feedback, select_review_bundle, validate_evidence)
 from evidence_feedback_policy import (
     MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
@@ -79,6 +82,20 @@ PUBLIC_QUESTION_KEYS = (
     "skill_id", "text", "options")
 TEMPLATE_VERSION = "phase3_student_feedback_template_v1"
 
+EDIT_CONTENT_KEYS = {"section_titles", "skill_labels",
+                     "review_examples", "practice_activities",
+                     "worked_review_notice"}
+EDIT_REVIEW_FIELDS = {"title", "for_subtopic_name", "prompt",
+                      "options", "selected_answer", "correct_answer",
+                      "steps", "explanation", "reasoning_question",
+                      "notice"}
+EDIT_PRACTICE_FIELDS = {"topic_label", "message", "notice",
+                        "instruction", "question", "relationship"}
+EDIT_QUESTION_FIELDS = {"skill_name", "concept_name", "text",
+                        "options"}
+EDIT_MAX_LIST = 30
+EDIT_MAX_TEXT = 2000
+
 
 class ConflictError(Exception):
     """409: submitted against a changed or missing resource revision."""
@@ -108,11 +125,12 @@ class DemoService:
     def __init__(self, root=DEFAULT_ROOT, bank=None, taxonomy=None,
                  provider_mode="rules", jev_env_file=None, call_budget=12,
                  provider_timeout=120.0, diagnostics=None,
-                 selector=None, generator=None, max_pending_jobs=16,
+                 selector=None, generator=None, max_pending_jobs=64,
                  replay_report=DEFAULT_REPORT, replay_source=DEFAULT_SOURCE,
                  practice_pool=None, practice_target_band=None,
                  recommender=None, replay_bank_mode="demo",
-                 review_mode="aligned_two_topic"):
+                 review_mode="aligned_two_topic",
+                 provider_workers=8, diagnostics_workers=4):
         # Validate opt-in shadow wiring before any directory/pool/provider
         # side effects.
         if (practice_pool is None) != (practice_target_band is None):
@@ -168,10 +186,12 @@ class DemoService:
             self._bank_context(replay_bank_mode)
         self.meta_dir = self.root / "metadata"
         self.meta_dir.mkdir(parents=True, exist_ok=True)
+        self._provider_call_lock = threading.RLock()
         self.provider_pool = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="demo-provider")
+            max_workers=provider_workers, thread_name_prefix="demo-provider")
         self.diag_pool = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="demo-diagnostics")
+            max_workers=diagnostics_workers,
+            thread_name_prefix="demo-diagnostics")
         self.max_pending_jobs = max_pending_jobs
         self._pending_provider = 0
         self._pending_diag = 0
@@ -482,7 +502,8 @@ class DemoService:
                              "provider_mode": self.provider_mode},
             "checkpoints": {
                 "midpoint": {
-                    "baseline_student": None, "graph": None,
+                    "baseline_student": None, "student_message": None,
+                    "student_message_version": None, "graph": None,
                     "diagnostics": None,
                     "diagnostics_job": {"status": "not_requested"}},
                 "end": {
@@ -578,6 +599,14 @@ class DemoService:
     def _student_feedback(self, session_id, meta, checkpoint):
         """Return the student-visible draft message for a checkpoint."""
         block = meta["checkpoints"][checkpoint]
+        message = block.get("student_message")
+        if message is not None:
+            result = {"sections": copy.deepcopy(message["sections"]),
+                      "text": message["text"]}
+            for key in ("total", "skills"):
+                if key in message:
+                    result[key] = copy.deepcopy(message[key])
+            return result
         review = block["baseline_student"]
         if review is None:
             return None
@@ -730,6 +759,8 @@ class DemoService:
                     "status": "unavailable",
                     "message": PRACTICE_STATUS_MESSAGES["unavailable"],
                     "notice": None, "question": None}
+        if grounded:
+            return concise_student_preview(preview, originals)
         return preview
 
     @staticmethod
@@ -840,6 +871,8 @@ class DemoService:
         block = meta["checkpoints"]["midpoint"]
         block["baseline_student"] = run_feedback(
             evidence, "student", "midpoint")
+        block["student_message"] = compose_midpoint_message(evidence)
+        block["student_message_version"] = MIDPOINT_MESSAGE_VERSION
         block["graph"] = assessment_feedback_graph(
             context["bank"], context["taxonomy"], rows)
         self._admit_diagnostics(session_id, meta, "midpoint", rows)
@@ -1244,6 +1277,22 @@ class DemoService:
         review["trace"]["fallback_reason"] = reason
         return review
 
+    @contextlib.contextmanager
+    def _adapter_scope(self, *adapters):
+        if any(a is not None and not getattr(a, "thread_safe", False)
+               for a in adapters):
+            with self._provider_call_lock:
+                yield
+        else:
+            yield
+
+    def _jobs_complete(self, session_id):
+        with self.lock:
+            meta = self._load_meta(session_id)
+            return (meta["provider_job"]["status"] in ("ready", "fallback")
+                    and all(c["diagnostics_job"]["status"] != "pending"
+                            for c in meta["checkpoints"].values()))
+
     def _audience_result(self, evidence, audience, provider_mode=None,
                          practice_context=None):
         """One audience through providers; isolated failures per audience."""
@@ -1255,54 +1304,55 @@ class DemoService:
             executions["selector"] = {"status": "rules_mode_no_providers"}
             executions["generator"] = {"status": "rules_mode_no_providers"}
             return review, executions
-        try:
-            if hasattr(self.selector, "execution"):
-                self.selector.execution = None
-            if hasattr(self.generator, "execution"):
-                self.generator.execution = None
-            review = run_feedback(evidence, audience, "end",
-                                  self.selector, self.generator,
-                                  practice_context=practice_context)
-            executions["selector"] = copy.deepcopy(
-                getattr(self.selector, "execution", None))
-            executions["generator"] = copy.deepcopy(
-                getattr(self.generator, "execution", None))
-            if executions["selector"] is None:
-                executions["selector"] = (
-                    {"status": "local_single_candidate"}
-                    if len(review["candidates"]) == 1
-                    else {"status": "no_execution_record"})
-            if executions["generator"] is None:
-                if (review["trace"]["fallback_reason"]
-                        in SELECTOR_FAILURE_REASONS):
-                    executions["generator"] = {
-                        "status": "skipped_selector_failure"}
-                else:
-                    executions["generator"] = {
-                        "status": "no_execution_record"}
-        except SystemExit:
-            # Keep any completed stage record; only the stage that never
-            # ran is marked budget_exhausted.
-            review = self._baseline_review(
-                evidence, audience, "demo_call_budget_exhausted",
-                practice_context)
-            executions = {
-                "selector": copy.deepcopy(
+        with self._adapter_scope(self.selector, self.generator):
+            try:
+                if hasattr(self.selector, "execution"):
+                    self.selector.execution = None
+                if hasattr(self.generator, "execution"):
+                    self.generator.execution = None
+                review = run_feedback(evidence, audience, "end",
+                                      self.selector, self.generator,
+                                      practice_context=practice_context)
+                executions["selector"] = copy.deepcopy(
                     getattr(self.selector, "execution", None))
-                or {"status": "budget_exhausted"},
-                "generator": copy.deepcopy(
+                executions["generator"] = copy.deepcopy(
                     getattr(self.generator, "execution", None))
-                or {"status": "budget_exhausted"}}
-        except Exception:
-            review = self._baseline_review(
-                evidence, audience, "provider_error", practice_context)
-            executions = {
-                "selector": copy.deepcopy(
-                    getattr(self.selector, "execution", None))
-                or {"status": "worker_error"},
-                "generator": copy.deepcopy(
-                    getattr(self.generator, "execution", None))
-                or {"status": "worker_error"}}
+                if executions["selector"] is None:
+                    executions["selector"] = (
+                        {"status": "local_single_candidate"}
+                        if len(review["candidates"]) == 1
+                        else {"status": "no_execution_record"})
+                if executions["generator"] is None:
+                    if (review["trace"]["fallback_reason"]
+                            in SELECTOR_FAILURE_REASONS):
+                        executions["generator"] = {
+                            "status": "skipped_selector_failure"}
+                    else:
+                        executions["generator"] = {
+                            "status": "no_execution_record"}
+            except SystemExit:
+                # Keep any completed stage record; only the stage that never
+                # ran is marked budget_exhausted.
+                review = self._baseline_review(
+                    evidence, audience, "demo_call_budget_exhausted",
+                    practice_context)
+                executions = {
+                    "selector": copy.deepcopy(
+                        getattr(self.selector, "execution", None))
+                    or {"status": "budget_exhausted"},
+                    "generator": copy.deepcopy(
+                        getattr(self.generator, "execution", None))
+                    or {"status": "budget_exhausted"}}
+            except Exception:
+                review = self._baseline_review(
+                    evidence, audience, "provider_error", practice_context)
+                executions = {
+                    "selector": copy.deepcopy(
+                        getattr(self.selector, "execution", None))
+                    or {"status": "worker_error"},
+                    "generator": copy.deepcopy(
+                        getattr(self.generator, "execution", None))
+                    or {"status": "worker_error"}}
         return review, executions
 
     def _run_provider_job_with_cache_policy(self, session_id):
@@ -1463,15 +1513,17 @@ class DemoService:
                     meta = self._load_meta(session_id)
                     mode = meta["provider_job"]["provider_mode"]
                 evidence = self._evidence(meta, rows)
-                if (self.selector is not None
-                        and hasattr(self.selector, "execution")):
-                    self.selector.execution = None
-                selection = select_review_bundle(
-                    evidence, self.selector
-                    if mode == "hosted" else None)
-                if self.selector is not None:
-                    selector_exec = copy.deepcopy(
-                        getattr(self.selector, "execution", None))
+                with self._adapter_scope(
+                        self.selector if mode == "hosted" else None):
+                    if (self.selector is not None
+                            and hasattr(self.selector, "execution")):
+                        self.selector.execution = None
+                    selection = select_review_bundle(
+                        evidence, self.selector
+                        if mode == "hosted" else None)
+                    if self.selector is not None:
+                        selector_exec = copy.deepcopy(
+                            getattr(self.selector, "execution", None))
                 if selector_exec is None:
                     selector_exec = (
                         {"status": "local_single_candidate"}
@@ -1582,42 +1634,44 @@ class DemoService:
                             else "disabled"))
                     meta["provider_job"]["status"] = "pending"
                     self._save_meta(meta)
-                if (self.generator is not None
-                        and hasattr(self.generator, "execution")):
-                    self.generator.execution = None
                 try:
                     assessment_ctx = self._assessment_context(meta, rows)
                 except Exception:
                     assessment_ctx = None
-                try:
-                    if self._is_grounded(meta) and assessment_ctx is None:
-                        review = self._grounded_unavailable(
-                            run_multi_feedback(
+                with self._adapter_scope(
+                        self.generator if mode == "hosted" else None):
+                    if (self.generator is not None
+                            and hasattr(self.generator, "execution")):
+                        self.generator.execution = None
+                    try:
+                        if self._is_grounded(meta) and assessment_ctx is None:
+                            review = self._grounded_unavailable(
+                                run_multi_feedback(
+                                    evidence, selection=selection,
+                                    practice_contexts=[
+                                        c["context"] for c in contexts]))
+                        else:
+                            review = run_multi_feedback(
                                 evidence, selection=selection,
+                                generator=(
+                                    self.generator
+                                    if (mode == "hosted"
+                                        and not selection["trace"]
+                                        ["selector_failed"])
+                                    else None),
                                 practice_contexts=[
-                                    c["context"] for c in contexts]))
-                    else:
+                                    c["context"] for c in contexts],
+                                assessment_context=assessment_ctx)
+                    except (Exception, SystemExit):
                         review = run_multi_feedback(
                             evidence, selection=selection,
-                            generator=(
-                                self.generator
-                                if (mode == "hosted"
-                                    and not selection["trace"]
-                                    ["selector_failed"])
-                                else None),
                             practice_contexts=[
                                 c["context"] for c in contexts],
                             assessment_context=assessment_ctx)
-                except (Exception, SystemExit):
-                    review = run_multi_feedback(
-                        evidence, selection=selection,
-                        practice_contexts=[
-                            c["context"] for c in contexts],
-                        assessment_context=assessment_ctx)
-                    review["trace"]["fallback_reason"] = "provider_error"
-                generator_exec = (
-                    copy.deepcopy(getattr(self.generator, "execution", None))
-                    if self.generator is not None else None)
+                        review["trace"]["fallback_reason"] = "provider_error"
+                    generator_exec = (
+                        copy.deepcopy(getattr(self.generator, "execution", None))
+                        if self.generator is not None else None)
                 if generator_exec is None:
                     generator_exec = (
                         {"status": "skipped_grounding_unavailable"}
@@ -2167,7 +2221,8 @@ class DemoService:
     def save_feedback_edit(self, session_id, body):
         if (not isinstance(body, dict)
                 or not set(body) <= {
-                    "message_sha256", "sections", "reviewer_label"}
+                    "message_sha256", "sections", "content",
+                    "reviewer_label"}
                 or "message_sha256" not in body
                 or "sections" not in body):
             raise ValueError("feedback edit body has unexpected fields")
@@ -2188,10 +2243,13 @@ class DemoService:
             if not text.strip():
                 raise ValueError(f"sections.{key} must be nonempty")
             texts[key] = text
+        content = body.get("content")
+        if content is None and "content" in body:
+            raise ValueError("content must not be null")
+        if content is not None and not isinstance(content, dict):
+            raise ValueError("content must be an object")
         reviewer = _strict_text(
             body.get("reviewer_label", "anonymous"), "reviewer_label", 80)
-        titles = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
-                          FULL_FEEDBACK_SECTION_TITLES))
         with self.lock:
             meta = self._load_meta(session_id)
             session = self._context_for(meta)["mcqs"].private_record(
@@ -2206,6 +2264,12 @@ class DemoService:
             if current != digest:
                 raise ConflictError(
                     "stale feedback revision", current=current)
+            titles = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
+                              FULL_FEEDBACK_SECTION_TITLES))
+            for section in preview["sections"]:
+                if (section.get("kind") in titles
+                        and section.get("title")):
+                    titles[section["kind"]] = section["title"]
             edited = copy.deepcopy(preview)
             edited["sections"] = [
                 {"kind": kind, "title": titles[kind],
@@ -2213,15 +2277,209 @@ class DemoService:
                 for kind in FULL_FEEDBACK_SECTION_KEYS]
             edited["text"] = "\n\n".join(
                 s["text"] for s in edited["sections"] if s["text"])
+            if content is not None:
+                self._apply_feedback_content(edited, content)
+            prior = meta.get("feedback_edit")
             meta["feedback_edit"] = {
                 "preview": copy.deepcopy(edited),
                 "source_preview_sha256": current,
+                "source_preview": copy.deepcopy(
+                    prior["source_preview"]
+                    if prior is not None
+                    and prior.get("source_preview") is not None
+                    else preview),
                 "saved_at": utc_now(),
                 "reviewer_label": reviewer}
             self._save_meta(meta)
             return {"saved": True,
                     "preview_sha256": canonical_digest(edited),
                     "saved_at": meta["feedback_edit"]["saved_at"]}
+
+    @staticmethod
+    def _edit_text(value, field, nonempty=True):
+        text = _strict_text(value, field, EDIT_MAX_TEXT)
+        if nonempty and not text.strip():
+            raise ValueError(f"{field} must be nonempty")
+        return text
+
+    @classmethod
+    def _edit_text_list(cls, value, field, count=None, minimum=0):
+        if (not isinstance(value, list) or len(value) > EDIT_MAX_LIST
+                or len(value) < minimum
+                or (count is not None and len(value) != count)):
+            raise ValueError(f"{field} has an invalid length")
+        return [cls._edit_text(item, f"{field}.{index}")
+                for index, item in enumerate(value)]
+
+    @staticmethod
+    def _mark_teacher_edited(card, before):
+        card["teacher_edited"] = True
+        if "original_content" not in card:
+            card["original_content"] = {
+                key: value for key, value in before.items()
+                if key not in ("teacher_edited", "original_content")}
+
+    @classmethod
+    def _patch_review_card(cls, card, patch, field):
+        if (not isinstance(patch, dict)
+                or not set(patch) <= EDIT_REVIEW_FIELDS):
+            raise ValueError(f"{field} has unexpected fields")
+        for key, value in patch.items():
+            name = f"{field}.{key}"
+            if key not in card:
+                raise ValueError(f"{name} is not present in the card")
+            if key in ("title", "for_subtopic_name", "prompt",
+                       "selected_answer", "correct_answer",
+                       "reasoning_question"):
+                card[key] = cls._edit_text(value, name)
+            elif key == "options":
+                card[key] = cls._edit_text_list(
+                    value, name, count=len(card["options"]))
+            elif key == "steps":
+                card[key] = cls._edit_text_list(
+                    value, name,
+                    minimum=1 if card.get("status") == "ready" else 0)
+                if "explanation" not in patch and "explanation" in card:
+                    card["explanation"] = "\n".join(card[key])
+            else:
+                card[key] = cls._edit_text(value, name, nonempty=False)
+
+    @classmethod
+    def _patch_practice_card(cls, card, patch, field):
+        if (not isinstance(patch, dict)
+                or not set(patch) <= EDIT_PRACTICE_FIELDS):
+            raise ValueError(f"{field} has unexpected fields")
+        for key, value in patch.items():
+            name = f"{field}.{key}"
+            if key not in card:
+                raise ValueError(f"{name} is not present in the card")
+            if key in ("topic_label", "message", "instruction"):
+                card[key] = cls._edit_text(value, name)
+            elif key == "notice":
+                if value is None:
+                    if card["notice"] is not None:
+                        raise ValueError(f"{name} must be a string")
+                    card["notice"] = None
+                else:
+                    card["notice"] = cls._edit_text(
+                        value, name, nonempty=False)
+            elif key == "question":
+                question = card["question"]
+                if (not isinstance(question, dict)
+                        or not isinstance(value, dict)
+                        or not set(value) <= EDIT_QUESTION_FIELDS):
+                    raise ValueError(
+                        f"{name} has unexpected fields")
+                for qkey, qvalue in value.items():
+                    qname = f"{name}.{qkey}"
+                    if qkey not in question:
+                        raise ValueError(
+                            f"{qname} is not present in the card")
+                    if qkey == "options":
+                        question["options"] = cls._edit_text_list(
+                            qvalue, qname,
+                            count=len(question["options"]))
+                    else:
+                        question[qkey] = cls._edit_text(qvalue, qname)
+            else:
+                relationship = card["relationship"]
+                if (not isinstance(relationship, dict)
+                        or not isinstance(value, dict)
+                        or not set(value) <= {"message"}):
+                    raise ValueError(
+                        f"{name} may only patch message")
+                if "message" in value:
+                    card["relationship"]["message"] = cls._edit_text(
+                        value["message"], f"{name}.message")
+
+    @classmethod
+    def _apply_feedback_content(cls, preview, content):
+        if not set(content) <= EDIT_CONTENT_KEYS:
+            raise ValueError("content has unexpected fields")
+        for key, value in content.items():
+            if value is None:
+                raise ValueError(f"content.{key} must not be null")
+        titles = content.get("section_titles")
+        if titles is not None:
+            if (not isinstance(titles, dict) or not titles
+                    or not set(titles) <= set(FULL_FEEDBACK_SECTION_KEYS)):
+                raise ValueError(
+                    "content.section_titles must use the four "
+                    "section keys")
+            for section in preview["sections"]:
+                if section["kind"] in titles:
+                    section["title"] = cls._edit_text(
+                        titles[section["kind"]],
+                        f"content.section_titles.{section['kind']}")
+        labels = content.get("skill_labels")
+        if labels is not None:
+            skills = preview.get("skills") or []
+            if (not isinstance(labels, list)
+                    or len(labels) != len(skills)
+                    or len(labels) > EDIT_MAX_LIST):
+                raise ValueError(
+                    "content.skill_labels must supply one label per "
+                    "preview skill")
+            for index, (skill, label) in enumerate(zip(skills, labels)):
+                text = cls._edit_text(
+                    label, f"content.skill_labels.{index}")
+                if text != skill["skill_name"]:
+                    skill["skill_name"] = text
+                    skill["teacher_edited"] = True
+        if "worked_review_notice" in content:
+            if "worked_review_notice" not in preview:
+                raise ValueError(
+                    "content.worked_review_notice is not present in "
+                    "the preview")
+            preview["worked_review_notice"] = cls._edit_text(
+                content["worked_review_notice"],
+                "content.worked_review_notice", nonempty=False)
+        review_cards = preview.get("review_examples")
+        if review_cards is None:
+            single = preview.get("review_example")
+            review_cards = [single] if single is not None else None
+        review_patches = content.get("review_examples")
+        if review_patches is not None:
+            if (review_cards is None
+                    or not isinstance(review_patches, list)
+                    or len(review_patches) != len(review_cards)
+                    or len(review_patches) > EDIT_MAX_LIST):
+                raise ValueError(
+                    "content.review_examples must supply one patch per "
+                    "preview review card")
+            for index, (card, patch) in enumerate(
+                    zip(review_cards, review_patches)):
+                before = copy.deepcopy(card)
+                cls._patch_review_card(
+                    card, patch, f"content.review_examples.{index}")
+                if card != before:
+                    cls._mark_teacher_edited(card, before)
+        if (preview.get("review_examples")
+                and "review_example" in preview):
+            preview["review_example"] = preview["review_examples"][0]
+        practice_cards = preview.get("practice_activities")
+        if practice_cards is None:
+            single = preview.get("practice")
+            practice_cards = [single] if single is not None else None
+        practice_patches = content.get("practice_activities")
+        if practice_patches is not None:
+            if (practice_cards is None
+                    or not isinstance(practice_patches, list)
+                    or len(practice_patches) != len(practice_cards)
+                    or len(practice_patches) > EDIT_MAX_LIST):
+                raise ValueError(
+                    "content.practice_activities must supply one patch "
+                    "per preview practice card")
+            for index, (card, patch) in enumerate(
+                    zip(practice_cards, practice_patches)):
+                before = copy.deepcopy(card)
+                cls._patch_practice_card(
+                    card, patch, f"content.practice_activities.{index}")
+                if card != before:
+                    cls._mark_teacher_edited(card, before)
+        if (preview.get("practice_activities")
+                and "practice" in preview):
+            preview["practice"] = preview["practice_activities"][0]
 
     # ---------------- simulation ----------------
 

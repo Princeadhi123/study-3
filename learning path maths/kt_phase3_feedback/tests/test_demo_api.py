@@ -623,6 +623,84 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
                       snap["feedback"]["end"]["text"])
         self.assertNotIn("ed-1", json.dumps(snap))
 
+    def test_feedback_edits_content_over_http(self):
+        created = self.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        self.submit_all(sid, token)
+        cookie = self._fresh_cookie()
+
+        def ready():
+            status, view, _ = self.teacher_get(
+                f"/api/teacher/sessions/{sid}", cookie)
+            if status == 200 and (
+                    view["provider_job"]["status"]
+                    in ("ready", "fallback")):
+                return view
+            return None
+
+        self.assertTrue(wait_for(ready))
+        view = ready()
+        delivery = view["feedback_delivery"]
+        preview = delivery["preview"]
+        sha = delivery["preview_sha256"]
+        sections = {
+            "assessment_summary": "Assessment summary. HTTP edit.",
+            "observed_strengths": "Observed strengths. HTTP edit.",
+            "review_focus": "Review focus. HTTP edit.",
+            "next_steps": "Next steps. HTTP edit."}
+        content = {
+            "section_titles": {"review_focus": "HTTP heading"},
+            "skill_labels": [f"Label {i}"
+                             for i in range(len(preview["skills"]))]}
+        if preview.get("practice") is not None:
+            content["practice_activities"] = [
+                {"message": "HTTP practice note."}]
+        body = {"message_sha256": sha, "sections": sections,
+                "content": content, "reviewer_label": "ed-2"}
+        for headers in ({}, {"X-Demo-Session-Token": "x"}):
+            status, _, _ = self.request(
+                "POST",
+                f"/api/teacher/sessions/{sid}/feedback-edits",
+                body, headers=headers)
+            self.assertEqual(status, 403)
+        for bad in ({"content": {"bogus": 1}},
+                    {"content": "text"},
+                    {"content": {"skill_labels": ["only-one"]}},
+                    {"content": {"review_examples": [{"title": "x"}]}}):
+            status, _, _ = self.request(
+                "POST",
+                f"/api/teacher/sessions/{sid}/feedback-edits",
+                dict(body, **bad),
+                headers={"Cookie": f"demo_teacher={cookie}"})
+            self.assertEqual(status, 400, bad)
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/feedback-edits",
+            body, headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["saved"])
+        status, view, _ = self.teacher_get(
+            f"/api/teacher/sessions/{sid}", cookie)
+        edited = view["feedback_delivery"]["preview"]
+        self.assertEqual(edited["skills"][0]["skill_name"], "Label 0")
+        self.assertTrue(edited["skills"][0]["teacher_edited"])
+        focus = next(s for s in edited["sections"]
+                     if s["kind"] == "review_focus")
+        self.assertEqual(focus["title"], "HTTP heading")
+        if preview.get("practice") is not None:
+            self.assertEqual(edited["practice"]["message"],
+                             "HTTP practice note.")
+            self.assertTrue(edited["practice"]["teacher_edited"])
+        status, result, _ = self.request(
+            "POST", f"/api/teacher/sessions/{sid}/release",
+            {"message_sha256": result["preview_sha256"]},
+            headers={"Cookie": f"demo_teacher={cookie}"})
+        self.assertEqual(status, 200)
+        status, snap, _ = self.request(
+            "GET", f"/api/sessions/{sid}",
+            headers={"X-Demo-Session-Token": token})
+        self.assertEqual(snap["feedback"]["end"]["skills"][0]
+                         ["skill_name"], "Label 0")
+
     def _fresh_cookie(self):
         _, _, meta = self.unlock()
         return self.cookie_from(meta)
@@ -966,7 +1044,7 @@ class MultiModeAPITests(ApiClientMixin, unittest.TestCase):
         self.assertEqual(delivery["review_mode"], "aligned_two_topic")
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v5")
+                         "phase3_student_feedback_template_v8")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(

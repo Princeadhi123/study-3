@@ -171,6 +171,7 @@ MULTI_FULL_FEEDBACK_INSTRUCTIONS = (
 import copy
 import json
 import re
+import threading
 
 _FULL_KIND_GROUP = {
     "completion": "assessment_summary",
@@ -653,10 +654,26 @@ class FullFeedbackAittaGenerator:
         self._observer = _TransportObserver()
         self._generator._opener = _ObservingOpener(
             self._generator._opener, self._observer)
-        self._last_metadata = self._metadata("not_called")
+        self._meta_local = threading.local()
+        self._fallback_metadata = self._metadata("not_called")
 
     def __repr__(self):
         return f"FullFeedbackAittaGenerator({self._generator!r})"
+
+    @property
+    def _last_metadata(self):
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        return self._meta_local.__dict__.get(
+            "value", getattr(self, "_fallback_metadata",
+                             self._metadata("not_called")))
+
+    @_last_metadata.setter
+    def _last_metadata(self, value):
+        if not hasattr(self, "_meta_local"):
+            self._meta_local = threading.local()
+        self._meta_local.value = value
+        self._fallback_metadata = value
 
     @staticmethod
     def _metadata(status, model=None, usage=None,
@@ -802,11 +819,27 @@ class FullFeedbackAittaGenerator:
 
 class CachedFullFeedbackGenerator:
     supports_full_feedback = True
+    thread_safe = True
 
     def __init__(self, native, cache, model, endpoint_hash):
         self.native, self.cache = native, cache
         self.model, self.endpoint_hash = model, endpoint_hash
-        self.execution = None
+        self._exec_local = threading.local()
+        self._last_execution = None
+
+    @property
+    def execution(self):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        return self._exec_local.__dict__.get(
+            "value", getattr(self, "_last_execution", None))
+
+    @execution.setter
+    def execution(self, value):
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        self._exec_local.value = value
+        self._last_execution = value
 
     def generate(self, payload):
         request = {"endpoint_sha256": self.endpoint_hash,
