@@ -66,6 +66,10 @@ from session_store import SessionStore, bank_fingerprint, utc_now
 from shadow_practice import (
     ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
 from synthetic_feedback import PROMPT_VERSION
+from worked_first_context import (
+    CONTEXT_VERSION as WORKED_FIRST_CONTEXT_VERSION,
+    PROMPT_VERSION as WORKED_FIRST_GENERATION_PROMPT_VERSION,
+    build_worked_first_context)
 
 DEFAULT_ROOT = phase3_paths.ARTIFACTS / "live_demo_runtime"
 SESSION_ID_RE = re.compile(r"\A[a-f0-9]{32}\Z")
@@ -396,7 +400,8 @@ class DemoService:
                             "unavailable")
                     self._publish_baselines(meta)
                     changed = True
-                elif (job and job["status"] == "waiting_for_practice"
+                elif (job and job["status"] in (
+                        "waiting_for_practice", "waiting_for_diagnostics")
                       and meta.get("feedback_bundle_version")
                       == FEEDBACK_BUNDLE_VERSION):
                     job["status"] = "fallback"
@@ -535,6 +540,9 @@ class DemoService:
                 WORKED_FIRST_VERSION
                 if feedback_variant == "worked_first"
                 else QUESTION_FIRST_VERSION)
+            if feedback_variant == "worked_first":
+                meta["feedback_context_version"] = (
+                    WORKED_FIRST_CONTEXT_VERSION)
         return meta
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
@@ -1324,6 +1332,27 @@ class DemoService:
                     and all(c["diagnostics_job"]["status"] != "pending"
                             for c in meta["checkpoints"].values()))
 
+    def _generator_exec_record(self, status):
+        """Execution stand-in for adapters without an execution record."""
+        record = {"status": status}
+        # Per-thread slots only: the shared metadata/execution fallbacks
+        # could attribute another thread's failure to this attempt.
+        meta_local = getattr(self.generator, "_meta_local", None)
+        code = ((meta_local.__dict__.get("value") or {})
+                .get("rejection_code") if meta_local is not None else None)
+        if code is not None:
+            record["rejection_code"] = code
+        draft = getattr(self.generator, "last_rejected_draft", None)
+        if draft is not None:
+            record["rejected_draft"] = draft
+        return record
+
+    @staticmethod
+    def _reset_rejected_draft(adapter):
+        clear = getattr(adapter, "_clear_rejected_draft", None)
+        if clear is not None:
+            clear()
+
     def _audience_result(self, evidence, audience, provider_mode=None,
                          practice_context=None):
         """One audience through providers; isolated failures per audience."""
@@ -1341,6 +1370,7 @@ class DemoService:
                     self.selector.execution = None
                 if hasattr(self.generator, "execution"):
                     self.generator.execution = None
+                self._reset_rejected_draft(self.generator)
                 review = run_feedback(evidence, audience, "end",
                                       self.selector, self.generator,
                                       practice_context=practice_context)
@@ -1361,8 +1391,9 @@ class DemoService:
                         executions["generator"] = {
                             "status": "skipped_selector_failure"}
                     else:
-                        executions["generator"] = {
-                            "status": "no_execution_record"}
+                        executions["generator"] = (
+                            self._generator_exec_record(
+                                "no_execution_record"))
             except SystemExit:
                 # Keep any completed stage record; only the stage that never
                 # ran is marked budget_exhausted.
@@ -1385,7 +1416,7 @@ class DemoService:
                     or {"status": "worker_error"},
                     "generator": copy.deepcopy(
                         getattr(self.generator, "execution", None))
-                    or {"status": "worker_error"}}
+                    or self._generator_exec_record("worker_error")}
         return review, executions
 
     def _run_provider_job_with_cache_policy(self, session_id):
@@ -1537,6 +1568,31 @@ class DemoService:
                    "finished_at": utc_now()}
         return result, job
 
+    def _wait_for_worked_first_diagnostics(self, session_id):
+        """Worked-first authoring waits for terminal model diagnostics so
+        the provider context can carry their real (or explicitly
+        unavailable) projections. Returns a checkpoint snapshot or None."""
+        while True:
+            with self.lock:
+                if self._closing:
+                    return None
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return None
+                checkpoints = meta["checkpoints"]
+                if all(block["diagnostics_job"]["status"] != "pending"
+                       for block in checkpoints.values()):
+                    return copy.deepcopy(checkpoints)
+                if (meta["provider_job"]["status"]
+                        != "waiting_for_diagnostics"):
+                    meta["provider_job"]["status"] = (
+                        "waiting_for_diagnostics")
+                    checkpoints["end"]["provider_job"] = copy.deepcopy(
+                        meta["provider_job"])
+                    self._save_meta(meta)
+            time.sleep(0.05)
+
     def _run_multi_provider_job(self, session_id):
         selector_exec = generator_exec = None
         try:
@@ -1678,11 +1734,36 @@ class DemoService:
                     assessment_ctx = self._assessment_context(meta, rows)
                 except Exception:
                     assessment_ctx = None
+                worked_first_context = None
+                if (meta.get("feedback_variant") == "worked_first"
+                        and mode == "hosted"
+                        and getattr(self.generator,
+                                    "supports_full_feedback", False)
+                        and assessment_ctx is not None):
+                    diagnostic_blocks = (
+                        self._wait_for_worked_first_diagnostics(
+                            session_id))
+                    if diagnostic_blocks is None:
+                        # Closing or missing meta; restart recovery
+                        # publishes the deterministic baseline.
+                        return
+                    with self.lock:
+                        try:
+                            meta = self._load_meta(session_id)
+                        except FileNotFoundError:
+                            return
+                        meta["provider_job"]["status"] = "pending"
+                        meta["checkpoints"]["end"]["provider_job"] = (
+                            copy.deepcopy(meta["provider_job"]))
+                        self._save_meta(meta)
+                    worked_first_context = build_worked_first_context(
+                        evidence, assessment_ctx, diagnostic_blocks)
                 with self._adapter_scope(
                         self.generator if mode == "hosted" else None):
                     if (self.generator is not None
                             and hasattr(self.generator, "execution")):
                         self.generator.execution = None
+                    self._reset_rejected_draft(self.generator)
                     full_narrative = (
                         meta.get("feedback_variant") == "worked_first")
                     try:
@@ -1704,7 +1785,9 @@ class DemoService:
                                 practice_contexts=[
                                     c["context"] for c in contexts],
                                 assessment_context=assessment_ctx,
-                                provider_full_narrative=full_narrative)
+                                provider_full_narrative=full_narrative,
+                                worked_first_context=(
+                                    worked_first_context))
                     except (Exception, SystemExit):
                         review = run_multi_feedback(
                             evidence, selection=selection,
@@ -1724,7 +1807,8 @@ class DemoService:
                         if selection["trace"]["selector_failed"]
                         else {"status": "rules_mode_no_providers"}
                         if mode == "rules"
-                        else {"status": "no_execution_record"})
+                        else self._generator_exec_record(
+                            "no_execution_record"))
                 job_status = ("fallback"
                               if review["trace"]["fallback_reason"]
                               else "ready")
@@ -1756,10 +1840,14 @@ class DemoService:
                         "prompt_versions": {
                             "selection": MULTI_SELECTION_PROMPT_VERSION,
                             "generation": (
-                                MULTI_FULL_FEEDBACK_PROMPT_VERSION
-                                if getattr(self.generator,
-                                           "supports_full_feedback", False)
-                                else PROMPT_VERSION)}})
+                                review["trace"].get(
+                                    "generation_prompt_version")
+                                or (
+                                    MULTI_FULL_FEEDBACK_PROMPT_VERSION
+                                    if getattr(
+                                        self.generator,
+                                        "supports_full_feedback", False)
+                                    else PROMPT_VERSION))}})
                 end["provider_job"] = copy.deepcopy(meta["provider_job"])
                 self._save_meta(meta)
         except Exception:
@@ -1779,7 +1867,8 @@ class DemoService:
                 return
             end = meta["checkpoints"]["end"]
             if meta["provider_job"].get("status") not in (
-                    "pending", "waiting_for_practice"):
+                    "pending", "waiting_for_practice",
+                    "waiting_for_diagnostics"):
                 return
             try:
                 evidence = (end.get("evidence")
@@ -1918,6 +2007,11 @@ class DemoService:
             "generation_prompt_version": (
                 MULTI_FULL_FEEDBACK_PROMPT_VERSION if multi
                 else FULL_FEEDBACK_PROMPT_VERSION),
+            "worked_first_generation_prompt_version": (
+                WORKED_FIRST_GENERATION_PROMPT_VERSION
+                if multi else None),
+            "worked_first_generation_context_version": (
+                WORKED_FIRST_CONTEXT_VERSION if multi else None),
             "worked_review_version": (
                 ASSESSMENT_WORKED_REVIEW_VERSION if multi else None),
             "worked_solution_version": (

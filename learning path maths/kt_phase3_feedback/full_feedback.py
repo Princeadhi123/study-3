@@ -174,6 +174,13 @@ import copy
 import json
 import re
 import threading
+import urllib.parse
+
+from worked_first_context import (
+    INSTRUCTIONS as WF_INSTRUCTIONS,
+    PROMPT_VERSION as WF_PROMPT,
+    SCHEMA as WF_SCHEMA,
+    validate_worked_first_context)
 
 _FULL_KIND_GROUP = {
     "completion": "assessment_summary",
@@ -498,7 +505,8 @@ def guarded_multi_message(evidence, selected_candidates, review_examples=None,
 
 def build_multi_full_input(evidence, audience, selected_bundle,
                            practice_contexts=None,
-                           assessment_context=None):
+                           assessment_context=None,
+                           worked_first_context=None):
     from evidence_feedback import validate_evidence
     from evidence_feedback_policy import (
         build_feedback_plan, build_review_bundles)
@@ -541,38 +549,64 @@ def build_multi_full_input(evidence, audience, selected_bundle,
         safe, originals, assessment_context)
     baseline = multi_baseline_sections(
         safe, originals, review_examples=examples)
-    return {"schema": MULTI_FULL_FEEDBACK_SCHEMA, "audience": audience,
-            "checkpoint": "end", "evidence": safe,
-            "selected_candidate": selected, "feedback_plans": plans,
-            "baseline_sections": baseline, "practice_contexts": slots,
-            "review_examples": examples,
-            "assessment_context": copy.deepcopy(assessment_context),
-            "prompt_version": MULTI_FULL_FEEDBACK_PROMPT_VERSION}
+    payload = {"schema": MULTI_FULL_FEEDBACK_SCHEMA, "audience": audience,
+               "checkpoint": "end", "evidence": safe,
+               "selected_candidate": selected, "feedback_plans": plans,
+               "baseline_sections": baseline, "practice_contexts": slots,
+               "review_examples": examples,
+               "assessment_context": copy.deepcopy(assessment_context),
+               "prompt_version": MULTI_FULL_FEEDBACK_PROMPT_VERSION}
+    if worked_first_context is not None:
+        payload["worked_first_context"] = validate_worked_first_context(
+            worked_first_context, evidence, assessment_context)
+        payload["schema"] = WF_SCHEMA
+        payload["prompt_version"] = WF_PROMPT
+    return payload
 
 
 def _validate_multi_full_input(payload):
-    required = ("schema", "audience", "checkpoint", "evidence",
+    worked_first = (isinstance(payload, dict)
+                    and payload.get("schema") == WF_SCHEMA)
+    required = ["schema", "audience", "checkpoint", "evidence",
                 "selected_candidate", "feedback_plans",
                 "baseline_sections", "practice_contexts",
                 "review_examples", "assessment_context",
-                "prompt_version")
+                "prompt_version"]
+    if worked_first:
+        required.append("worked_first_context")
     if not isinstance(payload, dict) or set(payload) != set(required):
         raise ValueError(
             "multi feedback payload must contain exactly schema, audience, "
             "checkpoint, evidence, selected_candidate, feedback_plans, "
             "baseline_sections, practice_contexts, review_examples, "
-            "assessment_context, prompt_version")
-    if payload["schema"] != MULTI_FULL_FEEDBACK_SCHEMA:
+            "assessment_context, prompt_version"
+            + (", worked_first_context" if worked_first else ""))
+    if payload["schema"] not in (MULTI_FULL_FEEDBACK_SCHEMA, WF_SCHEMA):
         raise ValueError(
-            f"full feedback schema must be {MULTI_FULL_FEEDBACK_SCHEMA!r}")
-    if payload["prompt_version"] != MULTI_FULL_FEEDBACK_PROMPT_VERSION:
+            "full feedback schema must be "
+            f"{MULTI_FULL_FEEDBACK_SCHEMA!r} or {WF_SCHEMA!r}")
+    expected_prompt = (WF_PROMPT if worked_first
+                       else MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+    if payload["prompt_version"] != expected_prompt:
         raise ValueError(
-            f"full feedback prompt_version must be "
-            f"{MULTI_FULL_FEEDBACK_PROMPT_VERSION!r}")
+            f"full feedback prompt_version must be {expected_prompt!r}")
+    if worked_first and not isinstance(
+            payload["worked_first_context"], dict):
+        raise ValueError(
+            "worked_first_context must be a non-null object for schema "
+            f"{WF_SCHEMA!r}")
     normalized = build_multi_full_input(
         payload["evidence"], payload["audience"],
         payload["selected_candidate"], payload.get("practice_contexts"),
-        payload.get("assessment_context"))
+        payload.get("assessment_context"),
+        worked_first_context=(payload.get("worked_first_context")
+                              if worked_first else None))
+    if (normalized["schema"] != payload["schema"]
+            or normalized["prompt_version"]
+            != payload["prompt_version"]):
+        raise ValueError(
+            "rebuilt multi feedback payload does not match the declared "
+            "schema and prompt_version")
     if payload["checkpoint"] != "end":
         raise ValueError("full feedback checkpoint must be 'end'")
     if payload["feedback_plans"] != normalized["feedback_plans"]:
@@ -589,6 +623,10 @@ def _validate_multi_full_input(payload):
     if payload["assessment_context"] != normalized["assessment_context"]:
         raise ValueError(
             "assessment_context must match the local grounding context")
+    if (payload.get("worked_first_context")
+            != normalized.get("worked_first_context")):
+        raise ValueError(
+            "worked_first_context must match the rebuilt projection")
     return normalized
 
 
@@ -602,7 +640,8 @@ def _wire_evidence(evidence):
 
 def validate_full_input(payload):
     if (isinstance(payload, dict)
-            and payload.get("schema") == MULTI_FULL_FEEDBACK_SCHEMA):
+            and payload.get("schema")
+            in (MULTI_FULL_FEEDBACK_SCHEMA, WF_SCHEMA)):
         return _validate_multi_full_input(payload)
     required = ("schema", "audience", "checkpoint", "evidence",
                 "selected_candidate", "feedback_plan",
@@ -739,6 +778,9 @@ def full_message_sections(sections):
              "text": texts[k]} for k in FULL_FEEDBACK_SECTION_KEYS]
 
 
+_REJECTED_DRAFT_MAX_CHARS = 32768
+
+
 class FullFeedbackAittaGenerator:
     supports_full_feedback = True
 
@@ -754,6 +796,7 @@ class FullFeedbackAittaGenerator:
         self._generator._opener = _ObservingOpener(
             self._generator._opener, self._observer)
         self._meta_local = threading.local()
+        self._draft_local = threading.local()
         self._fallback_metadata = self._metadata("not_called")
 
     def __repr__(self):
@@ -793,10 +836,55 @@ class FullFeedbackAittaGenerator:
                 else transport["stage"])
         return metadata
 
+    @property
+    def last_rejected_draft(self):
+        """Assistant wording retained from the latest rejected generation.
+
+        Per-thread only: there is deliberately no global fallback, so a
+        thread that never generated sees None rather than another
+        thread's draft. Successful and transport-failed attempts
+        expose None.
+        """
+        if not hasattr(self, "_draft_local"):
+            self._draft_local = threading.local()
+        draft = self._draft_local.__dict__.get("value")
+        return copy.deepcopy(draft) if draft is not None else None
+
+    def _clear_rejected_draft(self):
+        if not hasattr(self, "_draft_local"):
+            self._draft_local = threading.local()
+        self._draft_local.value = None
+
+    def _draft_secrets(self):
+        secrets = [self._generator._api_key, self._generator._endpoint]
+        try:
+            parts = urllib.parse.urlsplit(self._generator._endpoint)
+            if parts.scheme and parts.netloc:
+                secrets.append(f"{parts.scheme}://{parts.netloc}")
+        except Exception:
+            pass
+        return [s for s in secrets if isinstance(s, str) and s]
+
+    def _retain_rejected_draft(self, choice):
+        message = choice.get("message")
+        if (not isinstance(message, dict)
+                or not isinstance(message.get("content"), str)):
+            return
+        content = message["content"]
+        for secret in self._draft_secrets():
+            content = content.replace(secret, "[REDACTED]")
+        truncated = choice.get("finish_reason") == "length"
+        if len(content) > _REJECTED_DRAFT_MAX_CHARS:
+            content = content[:_REJECTED_DRAFT_MAX_CHARS]
+            truncated = True
+        self._draft_local.value = {"content": content,
+                                   "truncated": truncated}
+
     def request(self, payload):
         normalized = validate_full_input(payload)
         import feedback_practice
-        if normalized["schema"] == MULTI_FULL_FEEDBACK_SCHEMA:
+        if normalized["schema"] in (MULTI_FULL_FEEDBACK_SCHEMA, WF_SCHEMA):
+            worked_first = normalized["schema"] == WF_SCHEMA
             slots = []
             originals = [c for c in normalized["selected_candidate"][
                 "review_candidates"] if c["focus"] is not None]
@@ -813,21 +901,30 @@ class FullFeedbackAittaGenerator:
                               if focus else None),
                     "selection": resolved["selection"]})
             context = {
-                "schema": MULTI_FULL_FEEDBACK_SCHEMA,
-                "prompt_version": MULTI_FULL_FEEDBACK_PROMPT_VERSION,
+                "schema": normalized["schema"],
+                "prompt_version": normalized["prompt_version"],
                 "audience": normalized["audience"],
                 "checkpoint": normalized["checkpoint"],
                 "evidence": _wire_evidence(normalized["evidence"]),
                 "selected_candidate": normalized["selected_candidate"],
-                "feedback_plans": normalized["feedback_plans"],
-                "baseline_sections": normalized["baseline_sections"],
-                "practice_contexts": slots,
-                "review_examples": normalized["review_examples"]}
+                "feedback_plans": normalized["feedback_plans"]}
+            instructions = MULTI_FULL_FEEDBACK_INSTRUCTIONS
+            if worked_first:
+                context["practice_contexts"] = slots
+                context["review_examples"] = normalized["review_examples"]
+                context["worked_first_context"] = normalized[
+                    "worked_first_context"]
+                instructions = WF_INSTRUCTIONS
+            else:
+                context["baseline_sections"] = normalized[
+                    "baseline_sections"]
+                context["practice_contexts"] = slots
+                context["review_examples"] = normalized["review_examples"]
             from aitta_generator import REASONING_EFFORT, RESPONSE_FORMAT
             return {"model": self._generator._model,
                     "messages": [
                         {"role": "system",
-                         "content": MULTI_FULL_FEEDBACK_INSTRUCTIONS},
+                         "content": instructions},
                         {"role": "user", "content": json.dumps(context)}],
                     "max_tokens": FULL_FEEDBACK_MAX_TOKENS,
                     "reasoning_effort": REASONING_EFFORT,
@@ -866,11 +963,9 @@ class FullFeedbackAittaGenerator:
         from aitta_generator import AittaGenerationError
         self._observer.reset()
         self._last_metadata = self._metadata("not_called")
+        self._clear_rejected_draft()
         normalized = validate_full_input(payload)
-        prompt_version = (MULTI_FULL_FEEDBACK_PROMPT_VERSION
-                          if normalized["schema"]
-                          == MULTI_FULL_FEEDBACK_SCHEMA
-                          else FULL_FEEDBACK_PROMPT_VERSION)
+        prompt_version = normalized["prompt_version"]
         selected_id = normalized["selected_candidate"]["candidate_id"]
         try:
             data = self._generator._request(self.request(payload))
@@ -887,6 +982,7 @@ class FullFeedbackAittaGenerator:
             raise
         self._last_metadata = self._metadata(
             "completed", model, usage, prompt_version=prompt_version)
+        self._draft_local.value = None
         return {"candidate_id": selected_id, "sections": sections}
 
     def _parse(self, data, selected_id):
@@ -898,6 +994,7 @@ class FullFeedbackAittaGenerator:
         choice = choices[0]
         if not isinstance(choice, dict):
             self._reject_response("invalid_choice")
+        self._retain_rejected_draft(choice)
         if choice.get("finish_reason") != "stop":
             self._reject_response("completion_truncated" if choice.get("finish_reason") == "length"
                                   else "completion_not_stopped")
@@ -956,7 +1053,21 @@ class CachedFullFeedbackGenerator:
         self._exec_local.value = value
         self._last_execution = value
 
+    @property
+    def last_rejected_draft(self):
+        """Rejected wording from this thread's latest failed execution.
+
+        Reads only the thread-local slot: the shared ``_last_execution``
+        fallback used by ``execution`` would leak another thread's draft.
+        """
+        if not hasattr(self, "_exec_local"):
+            self._exec_local = threading.local()
+        execution = self._exec_local.__dict__.get("value") or {}
+        draft = execution.get("rejected_draft")
+        return copy.deepcopy(draft) if draft is not None else None
+
     def generate(self, payload):
+        self.execution = None
         request = {"endpoint_sha256": self.endpoint_hash,
                    "body": self.native.request(payload)}
 

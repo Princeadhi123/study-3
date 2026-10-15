@@ -1575,5 +1575,153 @@ class MultiBaselineSectionsRegressionTests(unittest.TestCase):
                          "Custom one.\n\nCustom two.")
 
 
+class WorkedFirstWireTests(unittest.TestCase):
+    def setUp(self):
+        from worked_first_context import build_worked_first_context
+        self._build_context = build_worked_first_context
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        self.rows = responses(self.bank, correct=False, count=40)
+        self.evidence = build_evidence(
+            self.bank, self.taxonomy, self.rows)
+        self.assessment_context = {
+            "bank": self.bank, "taxonomy": self.taxonomy,
+            "responses": self.rows}
+        self.bundle = build_review_bundles(self.evidence)[0]
+        self.slots = [feedback_practice.empty_context("abstained")
+                      for _ in self.bundle["review_candidates"]]
+        self.wf_context = build_worked_first_context(
+            self.evidence, self.assessment_context)
+        self.full_input = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots,
+            assessment_context=self.assessment_context,
+            worked_first_context=self.wf_context)
+
+    def _generator(self, opener):
+        inner = AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                               opener=opener)
+        return FullFeedbackAittaGenerator(inner)
+
+    def test_worked_first_payload_schema_and_keys(self):
+        from worked_first_context import (
+            PROMPT_VERSION as WF_PROMPT, SCHEMA as WF_SCHEMA)
+        payload = self.full_input
+        self.assertEqual(payload["schema"], WF_SCHEMA)
+        self.assertEqual(payload["prompt_version"], WF_PROMPT)
+        self.assertIn("worked_first_context", payload)
+        self.assertIn("baseline_sections", payload)
+        normalized = validate_full_input(copy.deepcopy(payload))
+        self.assertEqual(normalized, payload)
+
+    def test_worked_first_validation_rejects_shape_errors(self):
+        from worked_first_context import SCHEMA as WF_SCHEMA
+        wf = copy.deepcopy(self.full_input)
+        wf.pop("worked_first_context")
+        with self.assertRaises(ValueError):
+            validate_full_input(wf)
+        v5 = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots,
+            assessment_context=self.assessment_context)
+        v5["worked_first_context"] = self.wf_context
+        with self.assertRaises(ValueError):
+            validate_full_input(v5)
+        tampered = copy.deepcopy(self.full_input)
+        tampered["prompt_version"] = MULTI_FULL_FEEDBACK_PROMPT_VERSION
+        with self.assertRaises(ValueError):
+            validate_full_input(tampered)
+        tampered = copy.deepcopy(self.full_input)
+        tampered["schema"] = MULTI_FULL_FEEDBACK_SCHEMA
+        with self.assertRaises(ValueError):
+            validate_full_input(tampered)
+        tampered = copy.deepcopy(self.full_input)
+        tampered["worked_first_context"]["assessment_records"][0][
+            "correct"] = True
+        with self.assertRaises(ValueError):
+            validate_full_input(tampered)
+
+    def test_worked_first_wire_omits_baseline_and_raw_context(self):
+        from worked_first_context import (
+            INSTRUCTIONS as WF_INSTRUCTIONS, PROMPT_VERSION as WF_PROMPT,
+            SCHEMA as WF_SCHEMA)
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        self._generator(opener).generate(copy.deepcopy(self.full_input))
+        body = opener.calls[0]["body"]
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][0]["content"], WF_INSTRUCTIONS)
+        context = json.loads(body["messages"][1]["content"])
+        self.assertEqual(context["schema"], WF_SCHEMA)
+        self.assertEqual(context["prompt_version"], WF_PROMPT)
+        self.assertNotIn("baseline_sections", context)
+        self.assertNotIn("assessment_context", context)
+        self.assertEqual(
+            len(context["worked_first_context"]["assessment_records"]),
+            40)
+        raw = json.dumps(context)
+        for forbidden in ('"baseline_sections"', '"assessment_context"',
+                          '"answer_index"', '"selected_index"',
+                          "session_id", "bank_sha256", "taxonomy_sha256",
+                          '"p_correct"', API_KEY):
+            self.assertNotIn(forbidden, raw)
+
+    def test_worked_first_rejects_invalid_context_before_opener(self):
+        bad_contexts = []
+        none_payload = copy.deepcopy(self.full_input)
+        none_payload["worked_first_context"] = None
+        bad_contexts.append(none_payload)
+        list_payload = copy.deepcopy(self.full_input)
+        list_payload["worked_first_context"] = []
+        bad_contexts.append(list_payload)
+        empty_payload = copy.deepcopy(self.full_input)
+        empty_payload["worked_first_context"] = {}
+        bad_contexts.append(empty_payload)
+        bad_version = copy.deepcopy(self.full_input)
+        bad_version["worked_first_context"] = copy.deepcopy(
+            self.wf_context)
+        bad_version["worked_first_context"]["version"] = "tampered_v0"
+        bad_contexts.append(bad_version)
+        bad_graph = copy.deepcopy(self.full_input)
+        bad_graph["worked_first_context"] = copy.deepcopy(
+            self.wf_context)
+        bad_graph["worked_first_context"]["concept_graph"][
+            "relation"] = "prerequisite"
+        bad_contexts.append(bad_graph)
+        for payload in bad_contexts:
+            with self.subTest(context=payload["worked_first_context"]
+                              if not isinstance(
+                                  payload["worked_first_context"], dict)
+                              else payload["worked_first_context"].get(
+                                  "version", "graph_tamper")):
+                opener = RecordingOpener(
+                    wire_reply(
+                        candidate_id=self.bundle["candidate_id"]))
+                generator = self._generator(opener)
+                request_payload = copy.deepcopy(payload)
+                generation_payload = copy.deepcopy(payload)
+                with self.assertRaises(ValueError):
+                    generator.request(request_payload)
+                with self.assertRaises(ValueError):
+                    generator.generate(generation_payload)
+                self.assertEqual(opener.calls, [])
+
+    def test_worked_first_metadata_and_cache_key_distinct(self):
+        from worked_first_context import PROMPT_VERSION as WF_PROMPT
+        opener = RecordingOpener(
+            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        generator = self._generator(opener)
+        generator.generate(copy.deepcopy(self.full_input))
+        self.assertEqual(
+            generator.last_metadata["prompt_version"], WF_PROMPT)
+        v5_input = build_multi_full_input(
+            self.evidence, "student", self.bundle, self.slots,
+            assessment_context=self.assessment_context)
+        v5_body = self._generator(RecordingOpener()).request(v5_input)
+        wf_body = generator.request(self.full_input)
+        self.assertNotEqual(json.dumps(v5_body), json.dumps(wf_body))
+        self.assertNotEqual(
+            v5_body["messages"][0]["content"],
+            wf_body["messages"][0]["content"])
+
+
 if __name__ == "__main__":
     unittest.main()

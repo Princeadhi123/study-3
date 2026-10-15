@@ -205,6 +205,11 @@ class CaptureCache:
                           "reply": reply, "metadata": metadata,
                           "original_call_latency_ms": latency_ms,
                           "origin": "hosted_replay"}
+                if not ok:
+                    rejected_draft = getattr(
+                        adapter, "last_rejected_draft", None)
+                    if rejected_draft is not None:
+                        record["rejected_draft"] = rejected_draft
                 if retry:
                     record.update({
                         "attempt_number": number + 1,
@@ -222,6 +227,9 @@ class CaptureCache:
             if key in record:
                 execution[key] = record[key]
         if not record["ok"]:
+            if record.get("rejected_draft") is not None:
+                execution["rejected_draft"] = copy.deepcopy(
+                    record["rejected_draft"])
             return None, execution
         return copy.deepcopy(record["reply"]), execution
 

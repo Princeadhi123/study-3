@@ -50,6 +50,7 @@ class ScenarioReplays:
                  "full_feedback.py", "feedback_practice.py",
                  "shadow_practice.py",
                  "assessment_worked_review.py", "worked_review_math.py",
+                 "worked_first_context.py",
                  "research_runtime.py", "active_payload.py")
         root = Path(__file__).parent
         paths = {name: root / name for name in names}

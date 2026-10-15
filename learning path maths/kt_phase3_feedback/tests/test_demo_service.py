@@ -3241,5 +3241,208 @@ class ProviderDiagnosticsRaceTests(unittest.TestCase):
                          ["diagnostics_job"]["status"], "ready")
 
 
+class RecordingFullGenerator(MultiGenerator):
+    def __init__(self, events=None):
+        super().__init__(events)
+        self.payloads = []
+
+    def generate(self, payload):
+        self.payloads.append(copy.deepcopy(payload))
+        return super().generate(payload)
+
+
+class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
+    """Hosted worked-first provider calls wait for terminal diagnostics
+    so the authored context carries real or explicitly unavailable
+    projections; question-first never waits and never sees it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        import feedback_practice
+        import research_runtime
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.pool = make_pool(("sA", "sB"))
+        from unittest import mock
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    research_runtime, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(self.pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _rows_wrong(self, skills=("sA", "sB")):
+        rows = []
+        for q in self.bank["questions"]:
+            index = q["answer_index"]
+            if q["skill_id"] in skills:
+                index = (index + 1) % len(q["options"])
+            rows.append({"question_id": q["question_id"],
+                         "selected_index": index})
+        return rows
+
+    def _service(self, root, gate, generator, end_result=None):
+        service = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=GatedDiagnostics(self.bank, gate, end_result),
+            provider_mode="hosted", generator=generator)
+        self.addCleanup(service.close, wait=True)
+        self.addCleanup(gate.set)
+        return service
+
+    def _complete(self, service, variant):
+        created = service.create_session(feedback_variant=variant)
+        sid, token = created["session_id"], created["student_token"]
+        for row in self._rows_wrong():
+            service.submit_response(sid, token, row)
+        return sid
+
+    def _provider_status(self, service, sid):
+        try:
+            return service._load_meta(sid)["provider_job"]["status"]
+        except FileNotFoundError:
+            return None
+
+    def test_worked_first_waits_then_sends_terminal_projections(self):
+        gate = threading.Event()
+        generator = RecordingFullGenerator()
+        service = self._service(Path(self.tmp.name), gate, generator)
+        sid = self._complete(service, "worked_first")
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            == "waiting_for_diagnostics"))
+        self.assertEqual(generator.calls, 0)
+        self.assertFalse(service._jobs_complete(sid))
+        self.assertEqual(
+            service._load_meta(sid)["checkpoints"]["end"]
+            ["provider_job"]["status"], "waiting_for_diagnostics")
+
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            in ("ready", "fallback")))
+        self.assertEqual(generator.calls, 1)
+        wf = generator.payloads[0]["worked_first_context"]
+        diag = LiveDiagnostics(
+            model_loader=lambda: FakeKT(self.bank))
+        rows = self._rows_wrong()
+        expected_mid = diag.evaluate(
+            self.bank, self.taxonomy, rows[:20])
+        expected_end = diag.evaluate(self.bank, self.taxonomy, rows)
+        self.assertEqual(
+            wf["model_context"]["checkpoints"]["midpoint"],
+            {"status": "available", "answer_count": 20,
+             "pre_answer_probabilities":
+                 expected_mid["kt"]["p_correct_before_each_answer"]})
+        self.assertEqual(
+            wf["model_context"]["checkpoints"]["end"],
+            {"status": "available", "answer_count": 40,
+             "pre_answer_probabilities":
+                 expected_end["kt"]["p_correct_before_each_answer"]})
+        self.assertEqual(len(wf["assessment_records"]), 40)
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(
+            review["trace"]["generation_context_version"],
+            "worked_first_assessment_research_context_v1")
+        self.assertEqual(
+            review["provider_context"]["version"],
+            "worked_first_assessment_research_context_v1")
+        self.assertEqual(
+            meta["feedback_context_version"],
+            "worked_first_assessment_research_context_v1")
+        self.assertEqual(
+            meta["provider_job"]["prompt_versions"]["generation"],
+            "aitta_worked_first_evidence_author_v1")
+        preview = service.teacher_session(sid)["feedback_delivery"][
+            "preview"]
+        self.assertNotIn("provider_context", json.dumps(preview))
+        self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
+
+    def test_worked_first_unavailable_diagnostics_still_invoke(self):
+        gate = threading.Event()
+        generator = RecordingFullGenerator()
+        service = self._service(
+            Path(self.tmp.name), gate, generator,
+            end_result={"status": "unavailable",
+                        "reason": "model_unavailable",
+                        "checkpoint": "end", "answer_count": 40})
+        sid = self._complete(service, "worked_first")
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            == "waiting_for_diagnostics"))
+        self.assertEqual(generator.calls, 0)
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            in ("ready", "fallback")))
+        self.assertEqual(generator.calls, 1)
+        wf = generator.payloads[0]["worked_first_context"]
+        self.assertEqual(
+            wf["model_context"]["checkpoints"]["end"],
+            {"status": "unavailable"})
+
+    def test_question_first_never_waits_or_sends_context(self):
+        from full_feedback import MULTI_FULL_FEEDBACK_PROMPT_VERSION
+        gate = threading.Event()
+        generator = RecordingFullGenerator()
+        service = self._service(Path(self.tmp.name), gate, generator)
+        sid = self._complete(service, "question_first")
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            in ("ready", "fallback")))
+        self.assertEqual(generator.calls, 1)
+        self.assertNotIn("worked_first_context",
+                         generator.payloads[0])
+        meta = service._load_meta(sid)
+        self.assertNotIn("feedback_context_version", meta)
+        self.assertEqual(
+            meta["provider_job"]["prompt_versions"]["generation"],
+            MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertNotIn("generation_context_version", review["trace"])
+        self.assertNotIn("provider_context", review)
+        self.assertFalse(service._jobs_complete(sid))
+        gate.set()
+        self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
+
+    def test_close_during_wait_then_restart_publishes_fallback(self):
+        gate = threading.Event()
+        generator = RecordingFullGenerator()
+        root = Path(self.tmp.name) / "svc"
+        service = self._service(root, gate, generator)
+        sid = self._complete(service, "worked_first")
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            == "waiting_for_diagnostics"))
+        # close(wait=False) sets _closing so the diagnostics wait exits
+        # without blocking on the gated end diagnostics.
+        service.close(wait=False)
+        self.assertTrue(wait_for(
+            lambda: service._pending_provider == 0))
+        self.assertEqual(generator.calls, 0)
+        gate.set()
+        service.close(wait=True)
+        reopened = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank),
+            provider_mode="hosted",
+            generator=RecordingFullGenerator())
+        self.addCleanup(reopened.close, wait=True)
+        meta = reopened._load_meta(sid)
+        self.assertEqual(meta["provider_job"]["status"], "fallback")
+        self.assertTrue(meta["provider_job"]["interrupted"])
+        self.assertIsNotNone(
+            meta["checkpoints"]["end"]["student_review"])
+
+
 if __name__ == "__main__":
     unittest.main()

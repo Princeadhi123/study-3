@@ -230,6 +230,19 @@ recorded at creation and never reinterpreted afterwards:
   application-owned. This narrative is shape-checked only — **not**
   fact-verified — and always requires educator review. Invalid provider
   output falls back to the deterministic four sections.
+  For hosted worked-first runs the provider job first waits for terminal
+  model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
+  with a distinct wire schema
+  (`phase3_worked_first_feedback_generation_v1`, prompt
+  `aitta_worked_first_evidence_author_v1`) whose context contains all 40
+  answered assessment records with selected/correct options, a
+  descriptive concept graph (content membership only — not prerequisite
+  order), the checked review cards, selected practice context, and
+  available experimental pre-answer KT estimates (explicitly *not*
+  mastery). The deterministic baseline is never sent to the provider; it
+  is retained locally for educator comparison and fallback and is not a
+  hallucination detector. The new prompt/context intentionally invalidates
+  earlier request captures. Question-first is unchanged.
 
 Historical sessions without a recorded variant display as
 "Historical / unspecified" and keep their saved preview behaviour.
@@ -521,6 +534,15 @@ per focus. The dashboard distinguishes fresh hosted,
 fresh hosted retry, cached hosted, local resolution, deterministic
 fallback, and unverified
 provenance; terminal "Captured" logs show only new calls.
+
+New failed captures may also retain a `rejected_draft` field holding the
+unvalidated assistant wording (assistant `message.content` only, capped
+at 32768 characters with configured secrets redacted before truncation).
+It is shown to teachers under the research details as "Rejected Aitta
+draft (unvalidated)" for diagnosis; it never feeds the Current preview,
+student snapshots, or releases. Captures recorded before this field
+existed keep no wording and show "Rejected wording is unavailable in
+this capture" — the historic text is unrecoverable, not hidden.
 
 The UI's English labels and question translations are display-layer prototype
 text. They do not change answer indices, scoring, provider inputs, stored

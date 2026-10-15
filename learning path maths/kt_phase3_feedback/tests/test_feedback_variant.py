@@ -391,6 +391,80 @@ class FeedbackVariantTests(unittest.TestCase):
             else:
                 self.assertEqual(texts[kind], text)
 
+    def test_worked_first_context_authoring_and_teacher_only_scope(self):
+        # The supplied narrative is intentionally a qualitative claim the
+        # shape guardrails cannot fact-check; the educator-review warning
+        # must remain — format acceptance is not hallucination detection.
+        unsupported = {
+            "assessment_summary":
+                "This assessment is complete; the written work invites "
+                "a calm conversation with your teacher.",
+            "observed_strengths":
+                "Your careful effort throughout this assessment is "
+                "evident to your teacher.",
+            "review_focus":
+                "A gentle place to begin review is the assessed topic "
+                "your teacher selects.",
+            "next_steps":
+                "If your teacher approves, revisit the checked answers "
+                "and explain each step aloud."}
+        generator = FullStubGenerator(sections=unsupported)
+        service = self._service(provider_mode="hosted",
+                                generator=generator)
+        sid, token = self._complete(
+            service, feedback_variant="worked_first")
+        self.assertEqual(generator.calls, 1)
+        wf = generator.payloads[0]["worked_first_context"]
+        self.assertEqual(
+            wf["version"],
+            "worked_first_assessment_research_context_v1")
+        self.assertEqual(len(wf["assessment_records"]), 40)
+        self.assertEqual(
+            wf["model_context"]["checkpoints"]["end"]["status"],
+            "available")
+        self.assertEqual(
+            wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
+        self.assertEqual(
+            generator.payloads[0]["prompt_version"],
+            "aitta_worked_first_evidence_author_v1")
+        self.assertEqual(
+            generator.payloads[0]["schema"],
+            "phase3_worked_first_feedback_generation_v1")
+
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(
+            review["trace"]["generation_context_version"],
+            "worked_first_assessment_research_context_v1")
+        self.assertEqual(
+            review["provider_context"]["version"], wf["version"])
+        self.assertEqual(
+            review["trace"]["validation"],
+            "provider_full_narrative_shape_checks_only_requires_"
+            "educator_review")
+        # Deterministic baseline stays an independent local reference.
+        baseline_text = "\n".join(
+            s["text"] for s in review["template_baseline"]["sections"])
+        provider_text = "\n".join(unsupported.values())
+        self.assertNotEqual(baseline_text, provider_text)
+
+        detail = service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        texts = {s["kind"]: s["text"] for s in preview["sections"]}
+        for kind, text in unsupported.items():
+            self.assertTrue(texts[kind].startswith(text))
+        service.release_feedback(
+            sid, {"message_sha256":
+                  detail["feedback_delivery"]["preview_sha256"]})
+        snap = service.snapshot(sid, token)
+        snap_text = json.dumps(snap)
+        self.assertNotIn("provider_context", snap_text)
+        self.assertNotIn("assessment_records", snap_text)
+        self.assertIn(unsupported["observed_strengths"],
+                      json.dumps(snap["feedback"]["end"]))
+        self.assertTrue(wait_for(
+            lambda: service._jobs_complete(sid)))
+
 
 class ReplayVariantTests(unittest.TestCase):
     def setUp(self):

@@ -234,6 +234,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const statusLabel = (value) => ({not_requested: "Not started", pending: "Processing",
   ready: "Ready", fallback: "Baseline fallback", unavailable: "Unavailable",
   waiting_for_practice: "Waiting for practice selection",
+  waiting_for_diagnostics: "Waiting for model diagnostics",
   in_progress: "In progress", complete: "Complete", queued: "Queued", running: "Running",
   cancelling: "Finishing current case", cancelled: "Stopped", interrupted: "Interrupted",
   failed: "Failed", complete_with_errors: "Finished with errors"}[value] || String(value || "Unknown").replaceAll("_", " "));
@@ -1266,7 +1267,10 @@ function buildStudentSnapshotFromDetail(detail, releasedFeedback) {
       status: "released",
       released_at: delivery.released_at || new Date().toISOString(),
     },
-    provider_job: detail.provider_job || {status: "ready", provider_mode: "rules"},
+    provider_job: {
+      status: (detail.provider_job || {}).status || "ready",
+      provider_mode: (detail.provider_job || {}).provider_mode || "rules",
+    },
   };
 }
 
@@ -1834,6 +1838,46 @@ function createDetailView(root, options = {}) {
     return d;
   }
 
+  /* Teacher-only view of Aitta wording that failed validation. The
+     content is rendered exclusively through textContent inside a <pre>;
+     it is never used for the Current preview, student snapshot, or any
+     release action. Older captures may record the rejection without
+     retaining the wording. */
+  function rejectedDraftDetails(job) {
+    const gen = ((((job || {}).executions || {}).student || {})
+                 .generator) || {};
+    const draft = gen.rejected_draft || null;
+    const code = ((gen.metadata || {}).rejection_code)
+      || gen.rejection_code || null;
+    if (!draft && !code) return null;
+    const box = el("details", null, "raw rejected-draft");
+    box.dataset.disclosureKey = "rejected-aitta-draft";
+    box.appendChild(el("summary", "Rejected Aitta draft (unvalidated)"));
+    const inner = el("div");
+    if (code) {
+      inner.appendChild(kv("Rejection reason", String(code)));
+    }
+    inner.appendChild(el("p",
+      "This draft failed validation and is not used in the Current " +
+      "preview or any automatic release. The currently displayed " +
+      "draft remains the fallback.", "warn"));
+    if (draft) {
+      if (draft.truncated) {
+        inner.appendChild(el("p",
+          "The response was incomplete or the retained wording " +
+          "reached the 32768-character limit.", "meta small"));
+      }
+      const pre = el("pre", null, "mono");
+      pre.textContent = draft.content || "";
+      inner.appendChild(pre);
+    } else {
+      inner.appendChild(el("p",
+        "Rejected wording is unavailable in this capture.", "meta"));
+    }
+    box.appendChild(inner);
+    return box;
+  }
+
   /* Disclosure preservation: before a pane is redrawn, the open state
      of every keyed <details> in the live DOM is recorded under the scope
      that produced that DOM (pane.dataset.renderedScope). After the
@@ -2351,6 +2395,16 @@ function createDetailView(root, options = {}) {
       strip.appendChild(el("p",
         "Aitta narrative is shape-checked, not fact-verified; " +
         "educator review is required.", "warn"));
+      if ((selReview.trace || {}).generation_context_version) {
+        strip.appendChild(kv("Aitta input",
+          "answered assessment, descriptive concept graph, checked " +
+          "review cards, practice context, and available experimental " +
+          "KT estimates."));
+        strip.appendChild(el("p",
+          "Deterministic feedback is a reference, not a hallucination " +
+          "detector. Check claims against the recorded evidence.",
+          "boundary-note"));
+      }
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;
@@ -2381,7 +2435,8 @@ function createDetailView(root, options = {}) {
     card.appendChild(strip);
     if (!preview) {
       const waiting = ["not_requested", "pending",
-                       "waiting_for_practice"].includes(job.status);
+                       "waiting_for_practice",
+                       "waiting_for_diagnostics"].includes(job.status);
       card.appendChild(el("p",
         delivery.practice_status_message ||
         (waiting
@@ -3011,6 +3066,8 @@ function createDetailView(root, options = {}) {
         "Provider executions (provenance, metadata, latency)",
         detail.provider_job.executions, "executions"));
     }
+    const rejected = rejectedDraftDetails(detail.provider_job);
+    if (rejected) card.appendChild(rejected);
     pane.appendChild(research);
   }
 

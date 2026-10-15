@@ -587,7 +587,8 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
 
 def _multi_generated_message(safe, selected, generator,
                              sel_trace, practice_contexts,
-                             assessment_context):
+                             assessment_context,
+                             worked_first_context=None):
     from full_feedback import (
         MULTI_FULL_FEEDBACK_PROMPT_VERSION, build_multi_full_input,
         full_message_sections, validate_full_reply)
@@ -598,7 +599,9 @@ def _multi_generated_message(safe, selected, generator,
         return None, fallback_reason, "deterministic", None
     full_input = build_multi_full_input(
         safe, "student", selected, practice_contexts or [],
-        assessment_context=assessment_context)
+        assessment_context=assessment_context,
+        worked_first_context=worked_first_context)
+    prompt_version = full_input["prompt_version"]
     callback_payload = copy.deepcopy(full_input)
     try:
         reply = generator.generate(callback_payload)
@@ -646,7 +649,8 @@ def _multi_feedback_validation_label(message, full_message):
 def run_multi_feedback(evidence, selection=None, selector=None,
                        generator=None, practice_contexts=None,
                        assessment_context=None,
-                       provider_full_narrative=False):
+                       provider_full_narrative=False,
+                       worked_first_context=None):
     from full_feedback import guarded_multi_message
     from assessment_worked_review import (
         ASSESSMENT_WORKED_REVIEW_VERSION,
@@ -664,11 +668,15 @@ def run_multi_feedback(evidence, selection=None, selector=None,
     examples = build_assessment_review_examples(
         safe, originals, assessment_context)
     plans = [copy.deepcopy(build_feedback_plan(c)) for c in originals]
+    if worked_first_context is not None and not provider_full_narrative:
+        raise ValueError(
+            "worked_first_context requires provider_full_narrative")
     sel_trace = selection["trace"]
     full_message, fallback_reason, phrasing_source, \
         generation_prompt_version = _multi_generated_message(
             safe, selected, generator, sel_trace,
-            practice_contexts, assessment_context)
+            practice_contexts, assessment_context,
+            worked_first_context=worked_first_context)
 
     def deterministic(cands, exs=None):
         return guarded_multi_message(safe, cands, review_examples=exs)
@@ -712,6 +720,10 @@ def run_multi_feedback(evidence, selection=None, selector=None,
             "validation": _multi_feedback_validation_label(
                 message, full_message),
             "provider_advantage_demonstrated": False}}
+    if worked_first_context is not None:
+        from worked_first_context import CONTEXT_VERSION
+        review["trace"]["generation_context_version"] = CONTEXT_VERSION
+        review["provider_context"] = copy.deepcopy(worked_first_context)
     if assessment_context is not None:
         review["review_examples"] = copy.deepcopy(examples)
         review["worked_review_version"] = ASSESSMENT_WORKED_REVIEW_VERSION

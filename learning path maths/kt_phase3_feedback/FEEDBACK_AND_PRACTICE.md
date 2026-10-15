@@ -143,7 +143,21 @@ Key contracts:
   `provider_full_narrative_shape_checked_v1` (shape-checked draft
   requiring educator review; counts, selections, keys, checked maths and
   practice cards stay application-owned; deterministic fallback keeps
-  the authored practice follow-up). Scenario replays record the variant
+  the authored practice follow-up). For hosted worked-first sessions the
+  provider job waits for terminal midpoint/end diagnostics
+  (`waiting_for_diagnostics`, which explains added latency) and then calls
+  Aitta under a separate wire schema
+  (`phase3_worked_first_feedback_generation_v1`, prompt
+  `aitta_worked_first_evidence_author_v1`, context version
+  `worked_first_assessment_research_context_v1`) carrying all 40 answered
+  records with recorded/correct options, a descriptive
+  membership-only concept graph, the checked review cards, practice
+  context, and explicitly available-or-unavailable experimental
+  pre-answer KT estimates — never post-answer mastery. The deterministic
+  baseline sections stay local (comparison/fallback reference, not a
+  hallucination detector) and the new context deliberately misses old
+  v5 cache keys. Rules-mode worked-first needs no wait and sends no
+  context. Scenario replays record the variant
   per run; separate runs of the same answers under each variant are
   saved independently, and historical records without the field display
   as "Historical / unspecified" and are never regenerated.

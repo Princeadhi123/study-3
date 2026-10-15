@@ -20,7 +20,7 @@ from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_assessment_worked_review import (
     make_grounded_bank, make_grounded_taxonomy)
 from tests.test_demo_service import (
-    GatedDiagnostics, fake_diagnostics, wait_for)
+    GatedDiagnostics, MULTI_SECTIONS, fake_diagnostics, wait_for)
 from tests.test_feedback_variant import (
     WORKED_SECTIONS, FullStubGenerator)
 from tests.test_research_workspace import judgment
@@ -2417,10 +2417,12 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(b.errors, [])
 
     def test_replay_progress_refresh_and_stage_notice(self):
-        # A provider-ready replay whose end diagnostics are still
-        # running must show an explicit stage notice, keep refreshing
-        # while the run record itself is unchanged, and transition to
-        # complete automatically once diagnostics finish.
+        # Question-first: a provider-ready replay whose end diagnostics
+        # are still running must show an explicit stage notice, keep
+        # refreshing while the run record itself is unchanged, and
+        # transition to complete automatically once diagnostics finish.
+        # (Worked-first intentionally waits for diagnostics before the
+        # provider call and is covered by the next test.)
         self.service.close(wait=True)
         fixture_root = self.root / "gated_fixture"
         fixture_root.mkdir()
@@ -2446,13 +2448,13 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('[data-workspace=library]').click()")
         b.wait("document.querySelectorAll('.scenario-row').length === 4")
 
-        def start_worked_first(hosted=True):
+        def start_replay(hosted=True):
             known = {r["id"] for r in self.service.replays.list()["runs"]}
             b.js("document.querySelectorAll('.scenario-row')[1].click()")
             b.wait("!document.querySelector('#scenario-ws-detail').hidden")
             b.js("document.querySelector('#replay-selected').click()")
             b.wait("document.querySelector('dialog[open]')")
-            b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+            b.js("document.querySelector('#replay-feedback-variant').value='question_first';"
                  "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
             if hosted:
                 b.js("document.querySelector('#replay-provider-mode').value='hosted';"
@@ -2484,7 +2486,7 @@ class ResearchBrowserTests(unittest.TestCase):
 
         # --- Part A: provider finishes while end diagnostics blocked ---
         gen_gate.set()
-        run_a = start_worked_first()
+        run_a = start_replay()
         self.assertTrue(wait_for(
             lambda: provider_status(run_a) == "ready"),
             "provider job did not reach ready")
@@ -2492,13 +2494,13 @@ class ResearchBrowserTests(unittest.TestCase):
             self.service.replays.get(run_a["id"])["status"], "running")
         b.js(f"document.querySelector('.run-record[data-run-id=\"{run_a['id']}\"] .run-case').click()")
         b.wait(f"{detail}.textContent.includes("
-               f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+               f"{json.dumps(MULTI_SECTIONS['assessment_summary'])})")
         b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
                "diagnostics are still pending. This replay is not complete.')")
-        b.screenshot("worked_first_pending_diagnostics_desktop.png")
+        b.screenshot("qf_pending_diagnostics_desktop.png")
         b.viewport(390, 844)
         self.assert_no_overflow()
-        b.screenshot("worked_first_pending_diagnostics_mobile.png")
+        b.screenshot("qf_pending_diagnostics_mobile.png")
         b.viewport(1440, 1100)
 
         # Diagnostics release: the already-selected view must reach the
@@ -2509,20 +2511,23 @@ class ResearchBrowserTests(unittest.TestCase):
             == "complete"),
             f"replay run {run_a['id']} did not complete")
         b.wait(f"{notice}.textContent.includes('Replay is complete')")
-        self.assertTrue(b.js(f"{detail}.textContent.includes("
-                             f"{json.dumps(WORKED_SECTIONS['next_steps'][:60])})"))
+        self.assertTrue(b.js(
+            f"{detail}.textContent.includes("
+            f"{json.dumps(MULTI_SECTIONS['assessment_summary'])})"))
 
         # --- Part B: delayed generator under unchanged run JSON ---
         gen_gate.clear()
         diag_gate.clear()
-        run_b = start_worked_first()
+        run_b = start_replay()
         self.assertTrue(wait_for(lambda: provider_status(run_b) is not None))
         b.js(f"document.querySelector('.run-record[data-run-id=\"{run_b['id']}\"] .run-case').click()")
         b.wait(f"{notice}.textContent.includes('Feedback is still being "
                "prepared; this replay is not complete.')")
-        # No final preview and no stale worked narrative while pending.
+        # No final preview while pending; deterministic baseline text is
+        # rendered locally, so the provider summary wording is not a
+        # discriminating marker — the notice transition is.
         detail_text = b.js(f"{detail}.textContent")
-        self.assertNotIn(WORKED_SECTIONS["observed_strengths"], detail_text)
+        self.assertNotIn("Preview hash", detail_text)
         self.assertNotIn("shape-checked, not fact-verified", detail_text)
 
         gen_gate.set()
@@ -2534,16 +2539,121 @@ class ResearchBrowserTests(unittest.TestCase):
             "provider job did not reach ready")
         self.assertEqual(
             self.service.replays.get(run_b["id"])["status"], "running")
-        b.wait(f"{detail}.textContent.includes("
-               f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+        # The notice derives from the re-fetched response, so this wait
+        # proves the case detail refreshed under unchanged run JSON.
         b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
                "diagnostics are still pending. This replay is not complete.')")
+        b.wait(f"{detail}.textContent.includes('Preview hash')")
         diag_gate.set()
         self.assertTrue(wait_for(
             lambda: self.service.replays.get(run_b["id"])["status"]
             == "complete"),
             f"replay run {run_b['id']} did not complete")
         b.wait(f"{notice}.textContent.includes('Replay is complete')")
+        self.assert_no_overflow()
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
+    def test_replay_worked_first_waits_for_diagnostics(self):
+        # Worked-first authoring must not call the provider until the
+        # midpoint/end diagnostics jobs are terminal; the notice shows
+        # the dedicated waiting stage, then the full narrative appears.
+        self.service.close(wait=True)
+        fixture_root = self.root / "wf_wait_fixture"
+        fixture_root.mkdir()
+        bank = make_grounded_bank()
+        source, report, _ = replay_fixture(
+            fixture_root, bank, make_grounded_taxonomy(bank), count=4)
+        diag_gate = threading.Event()
+        generator = FullStubGenerator()
+        self.service = DemoService(
+            root=self.root / "wf_wait_data", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            diagnostics=GatedDiagnostics(bank, diag_gate),
+            replay_report=report, replay_source=source,
+            provider_mode="hosted", generator=generator)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+
+        b.js("document.querySelectorAll('.scenario-row')[1].click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+             "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+        b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+             "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+        b.js("document.querySelector('#replay-hosted-consent').click()")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.list()["runs"]),
+            "new replay run was not admitted")
+        run = self.service.replays.list()["runs"][0]
+
+        def provider_status():
+            current = next(
+                (r for r in self.service.replays.list()["runs"]
+                 if r["id"] == run["id"]), None)
+            sid = (current or {}).get("cases", [{}])[0].get(
+                "session_id")
+            if not sid:
+                return None
+            try:
+                return self.service._load_meta(sid)[
+                    "provider_job"]["status"]
+            except FileNotFoundError:
+                return None
+
+        # The provider must stay in the dedicated wait stage while the
+        # end diagnostics job is still pending — no generator call.
+        self.assertTrue(wait_for(
+            lambda: provider_status() == "waiting_for_diagnostics"),
+            "provider never entered waiting_for_diagnostics")
+        self.assertEqual(generator.calls, 0)
+        b.wait(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] .run-case')")
+        b.js(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] .run-case').click()")
+        detail = "document.querySelector('#scenario-ws-detail')"
+        notice = ("document.querySelector("
+                  "'#scenario-detail > p[role=\"status\"]')")
+        b.wait(f"{notice}.textContent.includes('Waiting for model "
+               "diagnostics before Aitta can draft the worked-first "
+               "feedback. This replay is not complete.')")
+        self.assertNotIn(WORKED_SECTIONS["observed_strengths"],
+                         b.js(f"{detail}.textContent"))
+        b.screenshot("worked_first_waiting_diagnostics_desktop.png")
+
+        # Release diagnostics: provider generates, narrative appears,
+        # and the run completes through normal polling.
+        diag_gate.set()
+        self.assertTrue(wait_for(
+            lambda: provider_status() == "ready"),
+            "provider job did not reach ready")
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run["id"])["status"]
+            == "complete"),
+            f"replay run {run['id']} did not complete")
+        self.assertEqual(generator.calls, 1)
+        self.assertEqual(
+            generator.payloads[0]["worked_first_context"]["version"],
+            "worked_first_assessment_research_context_v1")
+        b.wait(f"{detail}.textContent.includes("
+               f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+        b.wait(f"{notice}.textContent.includes('Replay is complete')")
+        detail_text = b.js(f"{detail}.textContent")
+        self.assertIn("shape-checked, not fact-verified", detail_text)
+        self.assertIn("Aitta input", detail_text)
+        b.screenshot("worked_first_wait_result_desktop.png")
         self.assert_no_overflow()
         b.viewport(390, 844)
         self.assert_no_overflow()
