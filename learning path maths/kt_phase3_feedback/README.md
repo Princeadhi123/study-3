@@ -224,7 +224,7 @@ recorded at creation and never reinterpreted afterwards:
 - `worked_first` (aligned mode only): the original structured four sections
   with standard titles and the exact checked review/practice cards. When a
   validated Aitta reply is available it may supply all four narrative
-  sections under guardrails `provider_full_narrative_shape_checked_v1`; the
+  sections under guardrails `provider_full_narrative_shape_checked_v2`; the
   application-owned scope notice is appended exactly once and all counts,
   selected topics, answer keys, checked maths and practice cards remain
   application-owned. This narrative is shape-checked only — **not**
@@ -234,7 +234,7 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v1`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v3`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the checked review cards, selected practice context, and
@@ -243,6 +243,31 @@ recorded at creation and never reinterpreted afterwards:
   is retained locally for educator comparison and fallback and is not a
   hallucination detector. The new prompt/context intentionally invalidates
   earlier request captures. Question-first is unchanged.
+  The v3 reply additionally carries `worked_reviews`: one entry per ready
+  checked card with provider-authored `steps` and a `reasoning_question`
+  (shape-checked only — the teaching text is not semantically verified
+  and `solution_version` still refers to the application-checked
+  mathematics, not the prose). Displayed cards keep the deterministic
+  wording under `checked_steps`/`checked_reasoning_question`, record
+  `explanation_source` (`provider`/`application`) per card in
+  `trace.worked_review_sources`, and show the AI-draft provenance label
+  in teacher preview and release. A malformed hosted reply (bad
+  sections or bad `worked_reviews`) rejects the whole generation and
+  falls back to the deterministic draft, retaining a teacher-only
+  rejected draft; a legacy two-field reply from an injected generator
+  still supplies the narrative while the deterministic checked cards
+  are retained. A fresh hosted call happens only
+  when the user explicitly starts one.
+
+  Section wording may now use digits or number words (20 and twenty are
+  both fine). Reply validation still checks only shape — section keys,
+  titles, length, markup, control characters, internal-process wording,
+  candidate match, and secrets; it does not verify that a numerical claim
+  matches the observed evidence, so educator review stays required and
+  scored results/cards remain application-owned. The prompt version bumps
+  (`..._v4`, `..._v6`, `..._v2`, `shape_checked_v2`) leave prior captures
+  untouched and never trigger a retry implicitly — a fresh hosted call
+  happens only when the user explicitly starts one.
 
 Historical sessions without a recorded variant display as
 "Historical / unspecified" and keep their saved preview behaviour.

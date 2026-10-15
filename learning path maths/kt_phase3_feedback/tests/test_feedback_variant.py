@@ -24,7 +24,7 @@ from tests.test_scenario_replays import replay_fixture
 
 WORKED_FIRST_VERSION = "worked_first_full_feedback_v1"
 WORKED_FIRST_TEMPLATE = "phase3_student_feedback_worked_first_full_v1"
-FULL_NARRATIVE_GUARDRAILS = "provider_full_narrative_shape_checked_v1"
+FULL_NARRATIVE_GUARDRAILS = "provider_full_narrative_shape_checked_v2"
 STANDARD_TITLES = {
     "assessment_summary": "Assessment summary",
     "observed_strengths": "Observed strengths",
@@ -426,7 +426,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v1")
+            "aitta_worked_first_evidence_author_v3")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")

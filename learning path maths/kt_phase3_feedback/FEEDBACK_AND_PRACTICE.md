@@ -48,7 +48,7 @@ Key contracts:
 - **Aitta** writes one shared student-facing draft through
   `FullFeedbackAittaGenerator`'s multi schema
   `phase3_multi_topic_feedback_generation_v2`, prompt
-  `aitta_assessment_grounded_two_topic_feedback_v2`. It receives observed
+  `aitta_assessment_grounded_two_topic_feedback_v6`. It receives observed
   aggregate evidence, the validated bundle and per-focus plans, the
   deterministic baseline, the grounded review cards (see below), and safe
   practice status/task descriptions — never the whole bank, raw responses,
@@ -107,7 +107,7 @@ Key contracts:
   keep template `phase3_student_feedback_template_v4`. Retained
   single-mode identifiers:
   full schema `phase3_full_feedback_generation_v2`, prompt
-  `aitta_feedback_with_practice_v3`, template
+  `aitta_feedback_with_practice_v4`, template
   `phase3_student_feedback_template_v3`. Practice context schema
   `phase3_feedback_practice_context_v1` and bundle version
   `phase3_feedback_practice_bundle_v1` remain unchanged for compatibility.
@@ -140,7 +140,7 @@ Key contracts:
   rewriting passes, keeps the standard four-section titles and exact
   checked cards, and — only when a validated Aitta reply exists — lets
   the provider supply all four narrative sections under guardrails
-  `provider_full_narrative_shape_checked_v1` (shape-checked draft
+  `provider_full_narrative_shape_checked_v2` (shape-checked draft
   requiring educator review; counts, selections, keys, checked maths and
   practice cards stay application-owned; deterministic fallback keeps
   the authored practice follow-up). For hosted worked-first sessions the
@@ -148,7 +148,7 @@ Key contracts:
   (`waiting_for_diagnostics`, which explains added latency) and then calls
   Aitta under a separate wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v1`, context version
+  `aitta_worked_first_evidence_author_v3`, context version
   `worked_first_assessment_research_context_v1`) carrying all 40 answered
   records with recorded/correct options, a descriptive
   membership-only concept graph, the checked review cards, practice
@@ -156,7 +156,19 @@ Key contracts:
   pre-answer KT estimates — never post-answer mastery. The deterministic
   baseline sections stay local (comparison/fallback reference, not a
   hallucination detector) and the new context deliberately misses old
-  v5 cache keys. Rules-mode worked-first needs no wait and sends no
+  v5 cache keys. The v3 reply also returns `worked_reviews` — one
+  provider-authored `steps`/`reasoning_question` entry per ready checked
+  card, shape-validated only (never semantically verified); displayed
+  cards retain the deterministic explanation as
+  `checked_steps`/`checked_reasoning_question`, carry
+  `explanation_source` provenance (`provider`/`application`) audited in
+  `trace.worked_review_sources`, and keep the teacher edit/release gate
+  with `solution_version` still naming the application-checked
+  mathematics. Malformed card explanations (`invalid_worked_reviews`,
+  `secret_in_worked_reviews`) reject the whole hosted reply and fall
+  back to the deterministic draft; a legacy two-field reply from an
+  injected generator still supplies the narrative and keeps the
+  deterministic checked cards without overlay. Rules-mode worked-first needs no wait and sends no
   context. Scenario replays record the variant
   per run; separate runs of the same answers under each variant are
   saved independently, and historical records without the field display
@@ -172,7 +184,7 @@ Key contracts:
 focus, one independently selected practice question (the independent
 practice recommendation is computed before review selection), the full
 four-section Aitta draft through `FullFeedbackAittaGenerator` (prompt
-`aitta_feedback_with_practice_v3`, schema
+`aitta_feedback_with_practice_v4`, schema
 `phase3_full_feedback_generation_v2`), the same narrative-edit/preview-hash/
 approval-release gate, and template `phase3_student_feedback_template_v3`.
 It still produces no teacher-addressed end draft; legacy batch tools and old

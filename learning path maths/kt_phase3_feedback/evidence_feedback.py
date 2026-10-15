@@ -444,7 +444,7 @@ def _end_message(safe, audience, checkpoint, selected, opening,
 
 def _feedback_validation_label(full_message, opening):
     if full_message is not None:
-        return "shape_and_numeric_guardrails_not_semantic_verification"
+        return "shape_guardrails_not_semantic_verification"
     if opening:
         return "shape_and_heuristic_opening_checks_only"
     return "deterministic_evidence_and_draft_actions"
@@ -591,7 +591,8 @@ def _multi_generated_message(safe, selected, generator,
                              worked_first_context=None):
     from full_feedback import (
         MULTI_FULL_FEEDBACK_PROMPT_VERSION, build_multi_full_input,
-        full_message_sections, validate_full_reply)
+        full_message_sections, validate_full_reply,
+        validate_worked_reviews)
     prompt_version = MULTI_FULL_FEEDBACK_PROMPT_VERSION
     fallback_reason = sel_trace["fallback_reason"]
     if (generator is None or sel_trace["selector_failed"]
@@ -611,11 +612,28 @@ def _multi_generated_message(safe, selected, generator,
     except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
         return None, "generator_error", "deterministic", prompt_version
     checked = validate_full_reply(reply, selected["candidate_id"])
+    worked_reviews = None
+    if worked_first_context is not None:
+        # Worked-first replies may additionally carry provider-authored
+        # worked_reviews; a legacy two-field reply still supplies the
+        # narrative while the deterministic checked cards are retained.
+        expected = full_input["review_examples"]
+        if checked is None:
+            checked = validate_full_reply(
+                reply, selected["candidate_id"], expected)
+            worked_reviews = (validate_worked_reviews(
+                reply["worked_reviews"], expected)
+                if checked is not None else None)
+        else:
+            worked_reviews = validate_worked_reviews(
+                reply.get("worked_reviews"), expected)
     if callback_payload != full_input or checked is None:
         return None, "invalid_generation", "deterministic", \
             prompt_version
     message = {"sections": full_message_sections(checked)}
     message["text"] = "\n\n".join(s["text"] for s in message["sections"])
+    if worked_reviews is not None:
+        message["worked_reviews"] = worked_reviews
     return (message, fallback_reason,
             "injected_generator_full_sections", prompt_version)
 
@@ -644,6 +662,51 @@ def _multi_feedback_validation_label(message, full_message):
         return ("application_owned_facts_and_actions_provider_summary_"
                 "shape_checked")
     return "deterministic_evidence_and_draft_actions"
+
+
+def _overlay_worked_review(card, overlay):
+    """Apply a validated provider explanation to a ready card copy,
+    preserving the deterministic checked wording for audit."""
+    card["checked_steps"] = card.get("steps")
+    card["checked_reasoning_question"] = card.get("reasoning_question")
+    card["steps"] = copy.deepcopy(overlay["steps"])
+    card["reasoning_question"] = overlay["reasoning_question"]
+    card["explanation"] = "\n".join(overlay["steps"])
+    card["explanation_source"] = "provider"
+    card["explanation_validation"] = "shape_only_requires_educator_review"
+
+
+def _display_worked_review_examples(examples, assessment_context,
+                                    provider_full_narrative,
+                                    worked_first_context, full_message):
+    """Build the displayed example list, overlaying validated provider
+    worked_reviews only for worked-first provider-full narratives.
+    Returns (displayed_examples, worked_review_sources); both are None
+    when there is no assessment context, and sources is None unless the
+    worked-first overlay path is active."""
+    displayed = (copy.deepcopy(examples)
+                 if assessment_context is not None else None)
+    if displayed is None or not (
+            provider_full_narrative
+            and worked_first_context is not None):
+        return displayed, None
+    from full_feedback import validate_worked_reviews
+    overlays = (validate_worked_reviews(
+        full_message.get("worked_reviews"), examples)
+        if full_message is not None else None)
+    by_id = ({entry["question_id"]: entry for entry in overlays}
+             if overlays is not None else {})
+    sources = {}
+    for card in displayed:
+        overlay = by_id.get(card.get("question_id"))
+        if overlay is not None and card.get("status") == "ready":
+            _overlay_worked_review(card, overlay)
+            sources[card["question_id"]] = "provider"
+        else:
+            if card.get("status") == "ready":
+                card["explanation_source"] = "application"
+            sources[card.get("question_id")] = "application"
+    return displayed, sources
 
 
 def run_multi_feedback(evidence, selection=None, selector=None,
@@ -692,6 +755,10 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         safe, originals, examples, assessment_context,
         practice_contexts, full_message,
         provider_full_narrative=provider_full_narrative)
+    displayed_examples, worked_review_sources = \
+        _display_worked_review_examples(
+            examples, assessment_context, provider_full_narrative,
+            worked_first_context, full_message)
     review = {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
         "audience": "student", "checkpoint": "end",
@@ -720,11 +787,13 @@ def run_multi_feedback(evidence, selection=None, selector=None,
             "validation": _multi_feedback_validation_label(
                 message, full_message),
             "provider_advantage_demonstrated": False}}
+    if worked_review_sources is not None:
+        review["trace"]["worked_review_sources"] = worked_review_sources
     if worked_first_context is not None:
         from worked_first_context import CONTEXT_VERSION
         review["trace"]["generation_context_version"] = CONTEXT_VERSION
         review["provider_context"] = copy.deepcopy(worked_first_context)
     if assessment_context is not None:
-        review["review_examples"] = copy.deepcopy(examples)
+        review["review_examples"] = displayed_examples
         review["worked_review_version"] = ASSESSMENT_WORKED_REVIEW_VERSION
     return review

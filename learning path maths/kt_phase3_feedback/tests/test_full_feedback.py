@@ -75,11 +75,14 @@ class RecordingOpener:
 
 
 def wire_reply(sections=None, candidate_id=None, model=MODEL,
-               usage=None, finish_reason="stop", content=None):
+               usage=None, finish_reason="stop", content=None,
+               worked_reviews=None):
     if sections is None:
         sections = dict(VALID_SECTIONS)
     if content is None:
         reply = {"candidate_id": candidate_id, "sections": sections}
+        if worked_reviews is not None:
+            reply["worked_reviews"] = worked_reviews
         content = json.dumps(reply)
     return {
         "choices": [{"finish_reason": finish_reason,
@@ -216,8 +219,9 @@ class FullFeedbackTests(unittest.TestCase):
 
     def _reject(self, reply):
         opener = RecordingOpener(reply)
+        generator = self._generator(opener)
         with self.assertRaises(AittaGenerationError):
-            self._generator(opener).generate(self.full_input)
+            generator.generate(self.full_input)
 
     def test_wrong_candidate_id_rejected(self):
         self._reject(wire_reply(candidate_id="someone_else"))
@@ -231,10 +235,9 @@ class FullFeedbackTests(unittest.TestCase):
         self._reject(wire_reply(sections=extra,
                                 candidate_id=self.selected_id))
 
-    def test_empty_overlength_numeric_and_markup_rejected(self):
+    def test_empty_overlength_and_markup_rejected(self):
         for key, value in (("assessment_summary", "   "),
                            ("observed_strengths", "x" * 2001),
-                           ("review_focus", "You scored 20 correct."),
                            ("next_steps", "Use <b>this</b> tip.")):
             sections = dict(VALID_SECTIONS)
             sections[key] = value
@@ -267,18 +270,30 @@ class FullFeedbackTests(unittest.TestCase):
         self.assertEqual(result["sections"]["next_steps"],
                          sections["next_steps"])
 
-    def test_prompt_version_v3_request_and_isolation(self):
+    def test_prompt_version_v4_request_and_isolation(self):
         self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION,
-                         "aitta_feedback_with_practice_v3")
-        payload = copy.deepcopy(self.full_input)
-        payload["prompt_version"] = "aitta_feedback_with_practice_v2"
-        with self.assertRaises(ValueError):
-            validate_full_input(payload)
+                         "aitta_feedback_with_practice_v4")
+        for stale in ("aitta_feedback_with_practice_v2",
+                      "aitta_feedback_with_practice_v3"):
+            with self.subTest(stale=stale):
+                payload = copy.deepcopy(self.full_input)
+                payload["prompt_version"] = stale
+                with self.assertRaises(ValueError):
+                    validate_full_input(payload)
         body = self._generator(
             RecordingOpener()).request(self.full_input)
         context = json.loads(body["messages"][1]["content"])
         self.assertEqual(context["prompt_version"],
                          FULL_FEEDBACK_PROMPT_VERSION)
+        system = body["messages"][0]["content"]
+        self.assertEqual(system, FULL_FEEDBACK_INSTRUCTIONS)
+        self.assertIn("Digits and number words are both allowed, "
+                      "including 20 and twenty.", system)
+        self.assertIn("Every numerical claim must match the supplied "
+                      "observed evidence", system)
+        for banned in ("numeric digits", "numerical quantities in words",
+                       "spell out"):
+            self.assertNotIn(banned, system)
 
     def test_truncated_finish_reason_and_json_rejected(self):
         self._reject(wire_reply(candidate_id=self.selected_id,
@@ -304,8 +319,9 @@ class FullFeedbackTests(unittest.TestCase):
             mutate(payload)
             opener = RecordingOpener(
                 wire_reply(candidate_id=self.selected_id))
+            generator = self._generator(opener)
             with self.assertRaises(ValueError):
-                self._generator(opener).generate(payload)
+                generator.generate(payload)
             self.assertEqual(opener.calls, [])
 
     def test_cache_keys_differ_and_reuse(self):
@@ -370,7 +386,7 @@ class FullFeedbackTests(unittest.TestCase):
                          FULL_FEEDBACK_PROMPT_VERSION)
         self.assertEqual(
             review["trace"]["validation"],
-            "shape_and_numeric_guardrails_not_semantic_verification")
+            "shape_guardrails_not_semantic_verification")
 
     def test_run_feedback_invalid_full_falls_back_keeping_selection(self):
         class BadFull:
@@ -429,19 +445,23 @@ class FullFeedbackTests(unittest.TestCase):
         normalized = validate_full_input(copy.deepcopy(self.full_input))
         self.assertEqual(normalized["selected_candidate"], self.selected)
 
-    def test_validate_full_reply_rejects_spelled_quantities(self):
-        for bad in ("Ten of ten assessed answers were incorrect.",
-                    "Six out of six answers were recorded.",
-                    "Twenty-one correct answers were observed.",
-                    "Half of the questions were correct.",
-                    "One possible topic is offered for review."):
+    def test_validate_full_reply_accepts_numeric_formats(self):
+        for text in ("20 out of 40 assessed answers were correct.",
+                     "Twenty out of forty answers were recorded.",
+                     "Result ٣ shown for twenty-one items.",
+                     "Continue one step at a time.",
+                     "Half of the questions were correct."):
             for key in FULL_FEEDBACK_SECTION_KEYS:
-                with self.subTest(text=bad, key=key):
+                with self.subTest(text=text, key=key):
                     sections = dict(VALID_SECTIONS)
-                    sections[key] = bad
-                    self.assertIsNone(validate_full_reply(
-                        {"candidate_id": self.selected_id,
-                         "sections": sections}, self.selected_id))
+                    sections[key] = text
+                    reply = {"candidate_id": self.selected_id,
+                             "sections": sections}
+                    self.assertIsNotNone(
+                        validate_full_reply(reply, self.selected_id))
+                    self.assertIsNone(
+                        full_reply_rejection_code(
+                            reply, self.selected_id))
 
     def test_validate_full_reply_scope_only_and_scope_strip(self):
         for key in FULL_FEEDBACK_SECTION_KEYS:
@@ -590,9 +610,10 @@ class FullFeedbackTests(unittest.TestCase):
 
     def test_practice_context_requires_end_checkpoint(self):
         pool = self._patched_pool()
+        ctx = self._practice_ctx(pool)
         with self.assertRaises(ValueError):
             run_feedback(self.evidence, "student", "midpoint",
-                         practice_context=self._practice_ctx(pool))
+                         practice_context=ctx)
 
     def _reject_code(self, reply, code):
         opener = RecordingOpener(reply)
@@ -665,9 +686,7 @@ class FullFeedbackTests(unittest.TestCase):
             ("   ", "empty_section"),
             ("x" * (room + 1), "section_too_long"),
             ("Invalid control\x01character.", "control_character"),
-            ("Result \u0663 shown.", "numeric_character"),
             ("Use <b>this</b> tip.", "markup"),
-            ("Continue one step at a time.", "number_word"),
             ("This follows the plan.", "internal_process_language"))
         for key in FULL_FEEDBACK_SECTION_KEYS:
             for value, reason in bad_values:
@@ -836,7 +855,7 @@ class FullFeedbackTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = CaptureCache(Path(tmp), 4)
             bad = dict(VALID_SECTIONS)
-            bad["next_steps"] = "One quick step."
+            bad["next_steps"] = "Take <b>one</b> quick step."
             opener = RecordingOpener(
                 wire_reply(sections=bad,
                            candidate_id=self.selected_id))
@@ -850,16 +869,16 @@ class FullFeedbackTests(unittest.TestCase):
             record = json.loads(path.read_text())
             self.assertIsNone(record["reply"])
             self.assertEqual(record["metadata"]["rejection_code"],
-                             "number_word_in_next_steps")
+                             "markup_in_next_steps")
             self.assertEqual(
                 cached.execution["metadata"]["rejection_code"],
-                "number_word_in_next_steps")
+                "markup_in_next_steps")
             with self.assertRaises(RuntimeError):
                 cached.generate(copy.deepcopy(self.full_input))
             self.assertTrue(cached.execution["reused"])
             self.assertEqual(
                 cached.execution["metadata"]["rejection_code"],
-                "number_word_in_next_steps")
+                "markup_in_next_steps")
             self.assertEqual(len(opener.calls), 1)
             self.assertEqual(
                 len(list(Path(tmp).glob("aitta_full_*.json"))), 1)
@@ -972,8 +991,8 @@ class MultiFullFeedbackTests(unittest.TestCase):
                     candidate_id="review_bundle_forged"),
                 lambda p: p["review_examples"].append({})):
             payload = copy.deepcopy(self.full_input)
+            mutate(payload)
             with self.assertRaises(ValueError):
-                mutate(payload)
                 validate_full_input(payload)
 
     def test_wire_safe_no_private_ids_or_probabilities(self):
@@ -995,10 +1014,10 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
-    def test_v5_prompt_wording_contract(self):
+    def test_v6_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v5")
+            "aitta_assessment_grounded_two_topic_feedback_v6")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1016,17 +1035,22 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 "'similar practice tasks'",
                 "shown on each practice card",
                 "The application owns the final observed-strengths "
-                "list"):
+                "list",
+                "Digits and number words are both allowed, including "
+                "20 and twenty."):
             self.assertIn(needle, system)
+        for banned in ("numeric digits", "spell out"):
+            self.assertNotIn(banned, system)
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v5")
+            "aitta_assessment_grounded_two_topic_feedback_v6")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
                 "aitta_assessment_grounded_two_topic_feedback_v3",
-                "aitta_assessment_grounded_two_topic_feedback_v4"):
+                "aitta_assessment_grounded_two_topic_feedback_v4",
+                "aitta_assessment_grounded_two_topic_feedback_v5"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1217,7 +1241,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         wrong_kind = narrative()
         wrong_kind[0]["kind"] = "forged"
         bad_text = narrative(
-            review_focus="Review 3 incorrect answers now")
+            review_focus="Review <b>incorrect</b> answers now")
         missing_title = narrative()
         del missing_title[2]["title"]
         # A provider-supplied scope notice is stripped and the canonical
@@ -1305,16 +1329,18 @@ class MultiFullFeedbackTests(unittest.TestCase):
             "practice activit",
             next(s["text"] for s in abstained["sections"]
                  if s["kind"] == "next_steps"))
+        invalid_first = [self._selected_ctx(pool, "pool_q1")]
         with self.assertRaises(ValueError):
             guarded_multi_message(
                 safe, originals,
-                practice_contexts=[self._selected_ctx(pool, "pool_q1")])
+                practice_contexts=invalid_first)
+        invalid_second = [
+            self._selected_ctx(pool, "pool_q2"),
+            feedback_practice.empty_context("abstained")]
         with self.assertRaises(ValueError):
             guarded_multi_message(
                 safe, originals,
-                practice_contexts=[
-                    self._selected_ctx(pool, "pool_q2"),
-                    feedback_practice.empty_context("abstained")])
+                practice_contexts=invalid_second)
 
     def test_cached_generator_enforces_guardrails_and_reuse(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1350,12 +1376,12 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 self.assertEqual(
                     review["message"]["text"].count(SCOPE), 1)
 
-    def test_spelled_quantity_reply_falls_back_guarded(self):
-        bad = dict(VALID_SECTIONS)
-        bad["observed_strengths"] = (
+    def test_spelled_quantity_reply_accepted_guarded(self):
+        good = dict(VALID_SECTIONS)
+        good["observed_strengths"] = (
             "Ten of ten assessed answers were incorrect.")
         opener = RecordingOpener(
-            wire_reply(sections=bad,
+            wire_reply(sections=good,
                        candidate_id=self.bundle["candidate_id"]))
         with tempfile.TemporaryDirectory() as tmp:
             cache = CaptureCache(Path(tmp), None)
@@ -1367,13 +1393,18 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 practice_contexts=self.slots)
         self.assertEqual(len(opener.calls), 1)
         self.assertEqual(review["trace"]["phrasing_source"],
-                         "deterministic")
-        self.assertIsNotNone(review["trace"]["fallback_reason"])
+                         "injected_generator_full_sections")
+        self.assertIsNone(review["trace"]["fallback_reason"])
         self.assertEqual(review["trace"]["guardrails_version"],
                          MULTI_FEEDBACK_GUARDRAILS_VERSION)
         self.assertEqual(
-            set(review["trace"]["section_sources"].values()),
-            {"application"})
+            review["trace"]["section_sources"],
+            {"assessment_summary": "provider",
+             "observed_strengths": "application",
+             "review_focus": "application",
+             "next_steps": "application"})
+        # Spelled-quantity wording in an application-owned section is
+        # accepted but never reaches the displayed message.
         self.assertNotIn(
             "Ten of ten", review["message"]["text"])
 
@@ -1602,6 +1633,19 @@ class WorkedFirstWireTests(unittest.TestCase):
                                opener=opener)
         return FullFeedbackAittaGenerator(inner)
 
+    def _wf_reply(self):
+        ready = [e for e in self.full_input["review_examples"]
+                 if e["status"] == "ready"]
+        return wire_reply(
+            candidate_id=self.bundle["candidate_id"],
+            worked_reviews=[
+                {"question_id": e["question_id"],
+                 "steps": ["Follow the checked method shown for "
+                           "this question."],
+                 "reasoning_question":
+                     "Why does the checked method work here?"}
+                for e in ready])
+
     def test_worked_first_payload_schema_and_keys(self):
         from worked_first_context import (
             PROMPT_VERSION as WF_PROMPT, SCHEMA as WF_SCHEMA)
@@ -1643,8 +1687,7 @@ class WorkedFirstWireTests(unittest.TestCase):
         from worked_first_context import (
             INSTRUCTIONS as WF_INSTRUCTIONS, PROMPT_VERSION as WF_PROMPT,
             SCHEMA as WF_SCHEMA)
-        opener = RecordingOpener(
-            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        opener = RecordingOpener(self._wf_reply())
         self._generator(opener).generate(copy.deepcopy(self.full_input))
         body = opener.calls[0]["body"]
         self.assertEqual(body["messages"][0]["role"], "system")
@@ -1706,8 +1749,7 @@ class WorkedFirstWireTests(unittest.TestCase):
 
     def test_worked_first_metadata_and_cache_key_distinct(self):
         from worked_first_context import PROMPT_VERSION as WF_PROMPT
-        opener = RecordingOpener(
-            wire_reply(candidate_id=self.bundle["candidate_id"]))
+        opener = RecordingOpener(self._wf_reply())
         generator = self._generator(opener)
         generator.generate(copy.deepcopy(self.full_input))
         self.assertEqual(

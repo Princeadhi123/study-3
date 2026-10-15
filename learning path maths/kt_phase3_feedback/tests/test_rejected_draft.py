@@ -21,7 +21,8 @@ from aitta_generator import AittaGenerationError, AittaGenerator
 from demo_api import make_server
 from demo_service import DemoService
 from evidence_feedback import build_evidence
-from evidence_feedback_policy import build_candidates
+from evidence_feedback_policy import SCOPE, build_candidates
+from feedback_practice import resolve_practice
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
     _REJECTED_DRAFT_MAX_CHARS, build_full_input)
@@ -61,7 +62,7 @@ class RejectedDraftGeneratorTests(unittest.TestCase):
     def test_rejected_sections_draft_retained_verbatim(self):
         sections = dict(
             VALID_SECTIONS,
-            assessment_summary="You completed two parts of the assessment.")
+            assessment_summary="You completed <b>the</b> assessment.")
         content = json.dumps(
             {"candidate_id": self.selected_id, "sections": sections})
         opener = RecordingOpener(wire_reply(content=content))
@@ -71,9 +72,9 @@ class RejectedDraftGeneratorTests(unittest.TestCase):
                          {"content": content, "truncated": False})
         self.assertEqual(
             generator.last_metadata["rejection_code"],
-            "number_word_in_assessment_summary")
+            "markup_in_assessment_summary")
         # Raw wording never leaks into the metadata contract.
-        self.assertNotIn("two parts", json.dumps(
+        self.assertNotIn("<b>the</b>", json.dumps(
             generator.last_metadata))
 
     def test_malformed_json_and_truncated_content_retained(self):
@@ -177,7 +178,7 @@ class RejectedDraftCaptureTests(unittest.TestCase):
     def test_failed_capture_stores_draft_and_reuses(self):
         sections = dict(
             VALID_SECTIONS,
-            assessment_summary="You completed two parts of the assessment.")
+            assessment_summary="You completed <b>the</b> assessment.")
         content = json.dumps(
             {"candidate_id": self.selected_id, "sections": sections})
         opener = RecordingOpener(wire_reply(content=content))
@@ -409,9 +410,20 @@ class ContextOpener(RecordingOpener):
     def open(self, request, timeout=None):
         body = json.loads(request.data.decode("utf-8"))
         context = json.loads(body["messages"][1]["content"])
+        worked_reviews = None
+        if context.get("schema") \
+                == "phase3_worked_first_feedback_generation_v1":
+            worked_reviews = [
+                {"question_id": example["question_id"],
+                 "steps": ["Follow the checked method shown for "
+                           "this question."],
+                 "reasoning_question":
+                     "Why does the checked method work here?"}
+                for example in context.get("review_examples") or []
+                if example.get("status") == "ready"]
         self.payload = wire_reply(
             candidate_id=context["selected_candidate"]["candidate_id"],
-            sections=self.sections)
+            sections=self.sections, worked_reviews=worked_reviews)
         return super().open(request, timeout)
 
 
@@ -419,7 +431,7 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
     """The real worked_first multi path must retain the rejected draft
     for teachers while every student surface stays clean."""
 
-    SENTINEL = "You completed one step toward review."
+    SENTINEL = "You completed <b>one</b> step toward review."
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -472,7 +484,7 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
                 self.assertEqual(len(opener.calls), 1)
                 request = opener.calls[0]["body"]
                 self.assertIn(
-                    "aitta_worked_first_evidence_author_v1",
+                    "aitta_worked_first_evidence_author_v3",
                     request["messages"][1]["content"])
                 job = service._load_meta(sid)["provider_job"]
                 self.assertEqual(job["status"], "fallback")
@@ -481,7 +493,7 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
                         or (gen_exec.get("metadata") or {})
                         .get("rejection_code"))
                 self.assertEqual(
-                    code, "number_word_in_assessment_summary")
+                    code, "markup_in_assessment_summary")
                 draft = gen_exec["rejected_draft"]
                 self.assertIn(self.SENTINEL, draft["content"])
                 self.assertFalse(draft["truncated"])
@@ -498,6 +510,123 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
                 self.assertTrue(released["released"])
                 snapshot = service.snapshot(sid, token)
                 self.assertNotIn(self.SENTINEL, json.dumps(snapshot))
+
+    def test_worked_first_numeric_sections_native_and_cached(self):
+        numeric = {
+            "assessment_summary":
+                "You finished the assessment; 38 of 40 answers were "
+                "correct.",
+            "observed_strengths":
+                "You answered thirty-eight questions correctly on "
+                "this assessment.",
+            "review_focus":
+                "Two assessed topics are possible starting points "
+                "for review.",
+            "next_steps":
+                "If your teacher approves, work through one checked "
+                "example at a time with your teacher."}
+        for mode in ("native", "cached"):
+            with self.subTest(mode=mode):
+                opener = ContextOpener(numeric)
+                native = FullFeedbackAittaGenerator(
+                    AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                                   opener=opener))
+                cache = None
+                generator = native
+                if mode == "cached":
+                    cache_root = Path(self.tmp.name) / "num_captures"
+                    cache_root.mkdir(exist_ok=True)
+                    cache = CaptureCache(cache_root, None)
+                    generator = CachedFullFeedbackGenerator(
+                        native, cache, MODEL, "hash")
+                service, sid, token = self._complete(
+                    generator, Path(self.tmp.name) / f"num_{mode}",
+                    cache=cache)
+                self.assertEqual(len(opener.calls), 1)
+                job = service._load_meta(sid)["provider_job"]
+                self.assertEqual(job["status"], "ready")
+                gen_exec = job["executions"]["student"]["generator"]
+                self.assertNotIn("rejected_draft", gen_exec)
+                self.assertIsNone(generator.last_rejected_draft)
+                end = service._load_meta(sid)["checkpoints"]["end"]
+                review = end["student_review"]
+                self.assertEqual(
+                    review["trace"]["guardrails_version"],
+                    "provider_full_narrative_shape_checked_v2")
+                sources = review["message"]["section_sources"]
+                self.assertTrue(all(
+                    source == "provider" for source in sources.values()))
+                sections = review["message"]["sections"]
+                self.assertEqual(
+                    [s["kind"] for s in sections],
+                    ["assessment_summary", "observed_strengths",
+                     "review_focus", "next_steps"])
+                self.assertEqual(
+                    [s["title"] for s in sections],
+                    ["Assessment summary", "Observed strengths",
+                     "Review focus", "Next steps"])
+                texts = {s["kind"]: s["text"] for s in sections}
+                for kind, text in numeric.items():
+                    if kind == "review_focus":
+                        self.assertTrue(texts[kind].startswith(text))
+                        self.assertTrue(texts[kind].endswith(SCOPE))
+                    else:
+                        self.assertEqual(texts[kind], text)
+                # Scores, checked examples and practice stay
+                # application-owned and unchanged.
+                detail = service.teacher_session(sid)
+                preview = detail["feedback_delivery"]["preview"]
+                self.assertEqual(preview["total"],
+                                 {"correct": 38, "out_of": 40})
+                self.assertEqual(preview["review_examples"],
+                                 review.get("review_examples") or [])
+                by_id = {c["candidate_id"]: c for c in
+                         review.get("selected_candidates") or []}
+                expected_cards = [
+                    resolve_practice(
+                        slot["context"], end["evidence"],
+                        candidate=by_id.get(slot.get("candidate_id")),
+                        aligned=True)["card"]
+                    for slot in end.get("practice_contexts") or []]
+                self.assertEqual(
+                    preview.get("practice_activities") or [],
+                    expected_cards)
+                # No automatic release: teacher must approve first.
+                pre = service.snapshot(sid, token)
+                self.assertIsNone(pre["feedback"]["end"])
+                self.assertEqual(pre["feedback_delivery"]["status"],
+                                 "awaiting_teacher_review")
+                released = service.release_feedback(sid, {
+                    "message_sha256": detail["feedback_delivery"]
+                    ["preview_sha256"]})
+                self.assertTrue(released["released"])
+                out = service._load_meta(
+                    sid)["feedback_release"]["released_feedback"]
+                self.assertEqual(out["total"], preview["total"])
+                self.assertEqual(out["review_examples"],
+                                 preview["review_examples"])
+                self.assertEqual(out["practice_activities"],
+                                 preview["practice_activities"])
+                snapshot = service.snapshot(sid, token)
+                self.assertNotIn("rejected_draft", json.dumps(snapshot))
+                if mode == "cached":
+                    # An identical request reuses the capture - no
+                    # second provider call.
+                    again = service.create_session(
+                        feedback_variant="worked_first")
+                    sid2, token2 = (again["session_id"],
+                                    again["student_token"])
+                    for row in self.rows:
+                        service.submit_response(sid2, token2, row)
+                    self.assertTrue(wait_for(
+                        lambda: service._load_meta(sid2)
+                        ["provider_job"]["status"]
+                        in ("ready", "fallback")))
+                    self.assertEqual(len(opener.calls), 1)
+                    gen_exec2 = (service._load_meta(sid2)
+                                 ["provider_job"]["executions"]
+                                 ["student"]["generator"])
+                    self.assertTrue(gen_exec2["reused"])
 
 
 @unittest.skipUnless(os.environ.get("RUN_BROWSER_TESTS") == "1",

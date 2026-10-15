@@ -388,8 +388,8 @@ function aittaProvenance(review, genExec) {
     return `Aitta - ${captureProvenanceKind(exec, true)}` +
       `${detail ? ` (${detail})` : ""} - deterministic feedback used`;
   }
-  if (trace.guardrails_version
-      === "provider_full_narrative_shape_checked_v1") {
+  if (String(trace.guardrails_version || "")
+      .startsWith("provider_full_narrative_shape_checked_")) {
     const label = " (four narrative sections; shape-checked draft, " +
       "educator review required)";
     if (hostedConfirmed(exec, "aitta_")) {
@@ -977,6 +977,15 @@ function renderStructuredFeedback(container, payload) {
           ? "Teacher-edited worked review — verify before release"
           : "Teacher-edited worked review",
         "warn"));
+    }
+    if (example.explanation_source === "provider") {
+      box.appendChild(el("p",
+        example.teacher_edited
+          ? "Teacher-edited AI-drafted explanation — teacher " +
+            "wording, review before release."
+          : "AI-drafted explanation based on checked mathematics; " +
+            "teacher review required.",
+        "meta"));
     }
     let solutionHost = null;
     if (example.source === "incorrect_assessment_response") {
@@ -2379,8 +2388,8 @@ function createDetailView(root, options = {}) {
       if ((selReview.trace || {}).guardrails_version
           && delivery.preview_source !== "teacher_edited") {
         strip.appendChild(kv("Feedback safeguards",
-          (selReview.trace || {}).guardrails_version
-            === "provider_full_narrative_shape_checked_v1"
+          String((selReview.trace || {}).guardrails_version || "")
+            .startsWith("provider_full_narrative_shape_checked_")
             ? "All four narrative sections are provider-drafted and " +
               "shape-checked, not fact-verified. Counts, selected " +
               "topics, answer keys, checked maths and practice cards " +
@@ -2390,8 +2399,9 @@ function createDetailView(root, options = {}) {
       }
     }
     if (detail.feedback_variant === "worked_first" && preview
-        && (selReview && (selReview.trace || {}).guardrails_version)
-           === "provider_full_narrative_shape_checked_v1") {
+        && String((selReview && (selReview.trace || {})
+                  .guardrails_version) || "")
+           .startsWith("provider_full_narrative_shape_checked_")) {
       strip.appendChild(el("p",
         "Aitta narrative is shape-checked, not fact-verified; " +
         "educator review is required.", "warn"));
