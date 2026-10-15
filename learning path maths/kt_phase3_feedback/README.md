@@ -165,7 +165,9 @@ authentication.
 - serves key-free question payloads;
 - accepts ordered `{question_token, selected_index}` responses (opaque
   session/position tokens; no private question IDs);
-- hides scores at midpoint (deterministic neutral pause, no provider call);
+- shows application-owned midpoint results and a deterministic check-in
+  at 20 answers; in hosted mode a separate teacher-only comparison draft
+  may be generated asynchronously — it is never student-facing;
 - shows only observed totals at the end until the teacher approves;
 - displays the approved end package — review-focus narrative, worked review
   cards revisiting the student's own earliest incorrect assessment answers
@@ -268,6 +270,24 @@ recorded at creation and never reinterpreted afterwards:
   (`..._v4`, `..._v6`, `..._v2`, `shape_checked_v2`) leave prior captures
   untouched and never trigger a retry implicitly — a fresh hosted call
   happens only when the user explicitly starts one.
+
+  Midpoint has a separate teacher-only draft: after answer 20 a hosted
+  session queues at most one extra provider call (shared call budget and
+  capture cache, `aitta_midpoint` namespace) under wire schema
+  `phase3_midpoint_feedback_generation_v1`. The request carries only
+  first-half aggregate counts per broad topic — no questions, options,
+  answers, identifiers, subtopics, baselines, or second-half
+  information. The reply (`candidate_id` `midpoint_check_in`, the same
+  four section keys) is shape-checked with the same rejection codes,
+  then overlaid onto the deterministic check-in's headings, totals, and
+  topic table via `compose_midpoint_draft`; the result is stored as the
+  checkpoint's `provider_draft` for teacher comparison only
+  (`phase3_teacher_midpoint_llm_draft_v1`). It is shape-checked, not
+  fact-verified, is never shown to the student, and is never released
+  automatically; failures leave the deterministic check-in untouched and
+  retain any rejected draft in the teacher-only `phrasing_job` record.
+  Rules sessions and sessions without a midpoint adapter record
+  `not_requested` and make no call.
 
 Historical sessions without a recorded variant display as
 "Historical / unspecified" and keep their saved preview behaviour.
@@ -439,7 +459,11 @@ DemoService (demo_service.py)
 Checkpoint behavior:
 
 - provider and diagnostics work is queued only at responses 20 and 40;
-- midpoint student feedback is deterministic and neutral;
+- midpoint student feedback is deterministic and neutral; a hosted
+  midpoint phrasing job may additionally produce a teacher-only Aitta
+  comparison draft (`aitta_midpoint_check_in_v1`) from first-20
+  broad-topic aggregates only — never shown to the student and never
+  released automatically;
 - under `aligned_two_topic`, the end preview is not published until bundle
   selection, aligned practice, and generation all reach terminal states —
   students see only observed totals before teacher approval;

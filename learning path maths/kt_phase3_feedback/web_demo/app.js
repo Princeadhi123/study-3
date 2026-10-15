@@ -2948,7 +2948,87 @@ function createDetailView(root, options = {}) {
           midpoint.student_message_version));
       }
     }
+    renderMidpointProviderDraft(card, midpoint);
     pane.appendChild(card);
+  }
+
+  /* Teacher-only Aitta midpoint comparison draft. Never shown to the
+     student and never released automatically; the deterministic
+     check-in above remains the student-facing wording regardless. */
+  function renderMidpointProviderDraft(card, midpoint) {
+    const job = midpoint.phrasing_job || null;
+    const draft = midpoint.provider_draft || null;
+    if (!job && !draft) return;
+    const box = el("details", null, "raw midpoint-provider-draft");
+    box.dataset.disclosureKey = "midpoint-provider-draft";
+    box.appendChild(el("summary",
+      "Aitta midpoint draft - teacher comparison only"));
+    const inner = el("div");
+    inner.appendChild(el("p",
+      "Unvalidated educator-comparison draft. It is not shown to the " +
+      "student, is not released automatically, and is shape-checked " +
+      "only - not fact-verified.", "warn"));
+    renderMidpointDraftJob(inner, midpoint, job);
+    renderMidpointDraftMessage(inner, draft);
+    const rejected = (job && job.execution
+      && job.execution.rejected_draft) || null;
+    if (rejected) {
+      inner.appendChild(el("p",
+        "Retained rejected provider wording (unvalidated):",
+        "meta small"));
+      const pre = el("pre", null, "mono");
+      pre.textContent = rejected.content || "";
+      inner.appendChild(pre);
+    }
+    if (job && job.execution) {
+      inner.appendChild(jsonDetails(
+        "Execution record", job.execution,
+        "midpoint-provider-execution"));
+    }
+    box.appendChild(inner);
+    card.appendChild(box);
+  }
+
+  function renderMidpointDraftJob(inner, midpoint, job) {
+    if (!job) return;
+    inner.appendChild(kv("Draft status", job.status));
+    if (job.reason) inner.appendChild(kv("Reason", job.reason));
+    if (job.prompt_version) {
+      inner.appendChild(kv("Prompt version", job.prompt_version));
+    }
+    if (midpoint.provider_draft_version) {
+      inner.appendChild(kv("Draft version",
+        midpoint.provider_draft_version));
+    }
+    const exec = job.execution || {};
+    if (exec.capture_file) {
+      inner.appendChild(kv("Capture", exec.capture_file));
+    }
+    if (exec.reused !== undefined && exec.reused !== null) {
+      inner.appendChild(kv("Generation source",
+        exec.reused ? "reused capture" : "new provider call"));
+    }
+  }
+
+  function renderMidpointDraftMessage(inner, draft) {
+    if (draft && Array.isArray(draft.sections) && draft.sections.length) {
+      const text = el("div", null, "midpoint-feedback-message");
+      draft.sections.forEach((section) => {
+        if (section.title) text.appendChild(el("h4", section.title));
+        text.appendChild(el("p", section.text || ""));
+        if (section.kind === "encouragement") {
+          renderMidpointSummary(text, draft);
+        }
+      });
+      inner.appendChild(text);
+    } else if (draft) {
+      renderMidpointSummary(inner, draft);
+      inner.appendChild(el("p", draft.text || ""));
+    } else {
+      inner.appendChild(el("p",
+        "No Aitta draft was produced; the deterministic student " +
+        "check-in above remains unchanged.", "meta"));
+    }
   }
 
   function renderFeedbackContent() {

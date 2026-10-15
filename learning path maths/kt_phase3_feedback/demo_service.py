@@ -54,6 +54,11 @@ from full_feedback import (
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, structured_sections)
 from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
+from midpoint_feedback import (
+    MESSAGE_VERSION as MIDPOINT_DRAFT_VERSION,
+    PROMPT_VERSION as MIDPOINT_PROMPT_VERSION,
+    CachedMidpointGenerator, MidpointAittaGenerator,
+    build_midpoint_input, compose_midpoint_draft)
 from replay_provider_scenarios import CaptureCache
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace, case_display
 from research_runtime import (
@@ -137,7 +142,8 @@ class DemoService:
                  practice_pool=None, practice_target_band=None,
                  recommender=None, replay_bank_mode="demo",
                  review_mode="aligned_two_topic",
-                 provider_workers=8, diagnostics_workers=4):
+                 provider_workers=8, diagnostics_workers=4,
+                 midpoint_generator=None):
         # Validate opt-in shadow wiring before any directory/pool/provider
         # side effects.
         if (practice_pool is None) != (practice_target_band is None):
@@ -210,14 +216,18 @@ class DemoService:
         self.call_budget = call_budget
         self.provider_timeout = provider_timeout
         self.cache = None
+        self.midpoint_generator = midpoint_generator
         if selector is not None or generator is not None:
-            # Injected adapters (tests or pre-wired hosted providers).
+            # Injected adapters (tests or pre-wired hosted providers);
+            # they never gain a hosted midpoint call implicitly.
             self.selector, self.generator = selector, generator
         elif provider_mode == "hosted":
             self.selector, self.generator = self._hosted_adapters(
                 jev_env_file, call_budget, provider_timeout)
         else:
             self.selector, self.generator = None, None
+        if midpoint_generator is not None:
+            self.midpoint_generator = midpoint_generator
         if practice_pool is not None:
             self.recommender = ShadowPracticeRecommender(
                 practice_pool, practice_target_band,
@@ -322,12 +332,20 @@ class DemoService:
         """
         inner = AittaGenerator.from_env()
         inner._timeout = timeout
+        # One credential read; the shallow copy gives the midpoint
+        # adapter its own opener slot so each observer stays separate.
+        midpoint_inner = copy.copy(inner)
+        midpoint_inner._meta_local = threading.local()
+        midpoint_inner._fallback_metadata = dict(inner._fallback_metadata)
         native_generator = FullFeedbackAittaGenerator(inner)
         captures = self.root / "provider_captures"
         captures.mkdir(exist_ok=True)
         self.cache = CaptureCache(captures, call_budget)
         endpoint_hash = hashlib.sha256(
             inner._endpoint.encode("utf-8")).hexdigest()
+        self.midpoint_generator = CachedMidpointGenerator(
+            MidpointAittaGenerator(midpoint_inner),
+            self.cache, inner._model, endpoint_hash)
         return (None, CachedFullFeedbackGenerator(
             native_generator, self.cache, inner._model, endpoint_hash))
 
@@ -350,6 +368,12 @@ class DemoService:
                         checkpoint["diagnostics"] = {
                             "status": "unavailable",
                             "reason": "interrupted_by_restart"}
+                        changed = True
+                    pjob = checkpoint.get("phrasing_job")
+                    if pjob and pjob["status"] == "pending":
+                        pjob["status"] = "fallback"
+                        pjob["reason"] = "interrupted_by_restart"
+                        pjob["finished_at"] = utc_now()
                         changed = True
                     rjob = checkpoint.get("recommendation_job")
                     if rjob and rjob["status"] == "pending":
@@ -915,6 +939,8 @@ class DemoService:
         block["graph"] = assessment_feedback_graph(
             context["bank"], context["taxonomy"], rows)
         self._admit_diagnostics(session_id, meta, "midpoint", rows)
+        self._admit_midpoint_phrasing(
+            session_id, meta, copy.deepcopy(evidence))
 
     def _finish_end(self, session_id, meta):
         rows = copy.deepcopy(self._rows(session_id))
@@ -1092,6 +1118,125 @@ class DemoService:
             "status": "pending", "queued_at": utc_now()}
         self.diag_pool.submit(
             self._run_recommendation, session_id, copy.deepcopy(rows))
+
+    def _admit_midpoint_phrasing(self, session_id, meta, evidence):
+        """Queue the teacher-only Aitta midpoint comparison draft.
+
+        The student check-in message is already saved by the caller; this
+        job only fills the teacher-visible provider_draft record and never
+        touches student-facing fields. The evidence snapshot is frozen at
+        the 20th answer by the caller.
+        """
+        block = meta["checkpoints"]["midpoint"]
+        block["provider_draft"] = None
+        block["provider_draft_version"] = None
+        mode = meta["provider_job"]["provider_mode"]
+        if mode != "hosted" or self.midpoint_generator is None:
+            block["phrasing_job"] = {
+                "status": "not_requested",
+                "reason": ("rules_mode_no_providers" if mode != "hosted"
+                           else "midpoint_provider_not_configured"),
+                "finished_at": utc_now()}
+            return
+        if self._closing:
+            block["phrasing_job"] = {
+                "status": "fallback", "reason": "service_closing",
+                "queued_at": utc_now(), "finished_at": utc_now()}
+            return
+        if self._pending_provider >= self.max_pending_jobs:
+            block["phrasing_job"] = {
+                "status": "unavailable",
+                "reason": "demo_provider_queue_capacity",
+                "finished_at": utc_now()}
+            return
+        self._pending_provider += 1
+        block["phrasing_job"] = {"status": "pending",
+                                 "queued_at": utc_now()}
+        retry = (mode == "hosted"
+                 and (meta.get("replay") or {}).get(
+                     "retry_failed_provider_calls") is True)
+        try:
+            self.provider_pool.submit(
+                self._run_midpoint_phrasing, session_id, evidence,
+                retry_failed=retry)
+        except RuntimeError:
+            self._pending_provider -= 1
+            block["phrasing_job"] = {
+                "status": "fallback", "reason": "service_closing",
+                "queued_at": utc_now(), "finished_at": utc_now()}
+
+    @staticmethod
+    def _midpoint_exec_record(adapter):
+        """Execution stand-in for midpoint adapters without a cache
+        record; sanitized metadata only, never exception text."""
+        record = {"status": "no_execution_record"}
+        metadata = getattr(adapter, "last_metadata", None)
+        if isinstance(metadata, dict):
+            record["metadata"] = copy.deepcopy(metadata)
+            if metadata.get("status") is not None:
+                record["status"] = metadata["status"]
+        draft = getattr(adapter, "last_rejected_draft", None)
+        if draft is not None:
+            record["rejected_draft"] = draft
+        return record
+
+    def _run_midpoint_phrasing(self, session_id, evidence,
+                               retry_failed=False):
+        """Worker: one midpoint draft call; stores teacher-only output."""
+        adapter = self.midpoint_generator
+        cache = getattr(adapter, "cache", None) or self.cache
+        retry_scope = (cache.retry_failed_scope(retry_failed)
+                       if cache is not None else
+                       contextlib.nullcontext())
+        draft = None
+        try:
+            with self._adapter_scope(adapter):
+                if hasattr(adapter, "execution"):
+                    adapter.execution = None
+                self._reset_rejected_draft(adapter)
+                try:
+                    with retry_scope:
+                        reply = adapter.generate(
+                            build_midpoint_input(evidence))
+                    draft = compose_midpoint_draft(evidence, reply)
+                    job = {"status": "ready",
+                           "prompt_version": MIDPOINT_PROMPT_VERSION,
+                           "message_version": MIDPOINT_DRAFT_VERSION,
+                           "finished_at": utc_now()}
+                except SystemExit:
+                    job = {"status": "fallback",
+                           "reason": "demo_call_budget_exhausted",
+                           "finished_at": utc_now()}
+                except Exception:
+                    job = {"status": "fallback",
+                           "reason": "provider_error",
+                           "finished_at": utc_now()}
+                # Read per-thread adapter state while still inside the
+                # adapter scope so a later request cannot overwrite it.
+                execution = copy.deepcopy(
+                    getattr(adapter, "execution", None))
+                if execution is None:
+                    execution = self._midpoint_exec_record(adapter)
+            job["execution"] = execution
+            with self.lock:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return
+                block = meta["checkpoints"]["midpoint"]
+                queued = (block.get("phrasing_job") or {}).get("queued_at")
+                if queued is not None:
+                    job["queued_at"] = queued
+                block["provider_draft"] = draft
+                block["provider_draft_version"] = (
+                    MIDPOINT_DRAFT_VERSION
+                    if draft is not None else None)
+                block["phrasing_job"] = job
+                self._save_meta(meta)
+        finally:
+            with self.lock:
+                self._pending_provider = max(
+                    0, self._pending_provider - 1)
 
     # ---------------- background jobs ----------------
 
@@ -1328,7 +1473,10 @@ class DemoService:
     def _jobs_complete(self, session_id):
         with self.lock:
             meta = self._load_meta(session_id)
+            midpoint = meta["checkpoints"].get("midpoint", {})
             return (meta["provider_job"]["status"] in ("ready", "fallback")
+                    and midpoint.get("phrasing_job", {}).get("status")
+                    != "pending"
                     and all(c["diagnostics_job"]["status"] != "pending"
                             for c in meta["checkpoints"].values()))
 
