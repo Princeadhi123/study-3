@@ -35,8 +35,8 @@ behavior claims.
 |---|---|
 | Student + teacher web UI (`web_demo/`) | Implemented |
 | Local PIN teacher auth, owner-token student auth | Implemented (local demo separation only) |
-| Async provider jobs (Jev bundle/single-focus selection + Aitta draft) | Implemented (aligned_two_topic default; legacy_single keeps the earlier one-focus full draft) |
-| Aligned two-topic end package (Jev bundle + aligned KT practice + shared Aitta draft) | Implemented; default `aligned_two_topic` mode |
+| Async provider jobs (deterministic rules bundle selection + Aitta draft) | Implemented (aligned_two_topic default; legacy_single keeps the earlier one-focus full draft) |
+| Aligned two-topic end package (rules bundle + aligned KT practice + shared Aitta draft) | Implemented; default `aligned_two_topic` mode |
 | Teacher edit + one-approval release of the whole end package | Implemented (prototype workflow, not formal sign-off) |
 | Shared practice cards inside the approved package | Implemented: 0–2 aligned slots, review content only — no in-app answering/scoring |
 | Frozen KT research diagnostics | Implemented; active conformal computation/output removed |
@@ -69,7 +69,8 @@ DemoService (demo_service.py)
    |-- bank-bound ordered MCQ scoring (one selected 40-question bank)
    |-- observed evidence + assessment graph at n=20 / n=40
    |-- branch A (aligned_two_topic, default): baseline + permitted review
-   |            bundles -> one Jev bundle selection (1-2 focuses, distinct
+   |            bundles -> one deterministic rules bundle selection (1-2
+   |            focuses, distinct
    |            broad skills) -> aligned KT practice (0-2 questions, one
    |            per selected skill) -> one Aitta shared 4-section draft
    |            -> teacher edit/approve -> approved released student snapshot
@@ -80,7 +81,7 @@ DemoService (demo_service.py)
 ```
 
 - Provider/diagnostic work triggers **only at n=20 and n=40**, never on poll.
-- At question 20: no Jev/Aitta call; a deterministic neutral student pause,
+- At question 20: no provider call; a deterministic neutral student pause,
   plus private graph + diagnostics for the teacher.
 - At question 40 (current aligned mode): the provider worker runs selection,
   aligned practice, then generation; the teacher preview appears only at the
@@ -98,11 +99,16 @@ DemoService (demo_service.py)
   not prerequisites; no conformal gate is used for advice.
 - Boundary: student payloads exclude diagnostics, private question/item IDs,
   content text, source paths and answer keys. Submissions use opaque
-  session/position tokens plus an option index. Jev receives allow-listed
-  aggregate observed skill/subtopic counts and permitted candidates only —
-  each carrying an application-owned planning block (error pattern, item
-  coverage, parent-topic totals, priority group, tied ids) — never raw
-  responses, question texts, session IDs, or research probabilities.
+  session/position tokens plus an option index. Review selection is
+  deterministic rules over allow-listed aggregate observed
+  skill/subtopic counts and permitted candidates — each carrying an
+  application-owned planning block (error pattern, item coverage,
+  parent-topic totals, priority group, tied ids); no selection provider
+  runs. The optional wording provider receives only the selected
+  grounded assessment review cards (the shown question and recorded
+  answer for the selected topics) plus allow-listed aggregates — never
+  the full raw bank, all responses, session IDs, or research
+  probabilities.
 
 ## 4. Student and teacher experience
 
@@ -125,7 +131,8 @@ DemoService (demo_service.py)
   priority group, tied candidate ids, strategy, `KT used for review-focus
   selection: No` — this label records that KT was not used for review-focus
   selection, not that aligned practice is disabled). Also shown: selection
-  provenance (Jev cached/fresh/local fallback/unverified), Aitta provenance,
+  provenance (deterministic rules / injected-selector captures), Aitta
+  provenance,
   per-slot practice status (selected/abstained/unavailable/disabled), and
   selector model version only for confirmed hosted executions. Research
   traces and raw comparisons stay collapsed under Research details; the edit
@@ -239,10 +246,13 @@ claims are generated. Completed reviews are not learner-delivery approval.
 - Historical conformal evidence remains on disk. Active API projections,
   including replay exports, omit conformal/calibration output without
   rewriting saved captures.
-- Jev (current aligned mode) selects one permitted review *bundle* — up to
-  two error focuses from different broad skills — in a single call; a single
-  permitted bundle bypasses Jev locally (all-correct, one error candidate, or
-  exactly two distinct-skill candidates). Each original candidate carries an
+- Review-bundle selection (current aligned mode) is deterministic rules:
+  one permitted review *bundle* — up to two error focuses from different
+  broad skills — is selected locally with no provider call (all-correct,
+  one error candidate, or exactly two distinct-skill candidates yield a
+  single permitted bundle). The archived Jev selection seam survives only
+  as an explicit injected-selector test hook and for offline replay.
+  Each original candidate carries an
   application-owned planning block (isolated vs multiple errors, item
   coverage, parent-topic totals, priority group, tied ids). Candidate
   priority: highest incorrect count, then highest incorrect fraction, then
@@ -290,9 +300,9 @@ env vars in an existing local `.env` file (values not printed here).
 # rules mode (no providers; generates a teacher PIN at startup)
 python demo_api.py --host 127.0.0.1 --port 8766 --providers rules
 
-# hosted mode (optional; requires a Jev env file you hold locally)
+# hosted mode (optional; only the Aitta generator is configured, selection is deterministic)
 python demo_api.py --host 127.0.0.1 --port 8766 --providers hosted `
-  --jev-env-file "C:/path/to/jev.env" --call-budget 12 --provider-timeout 120
+  --call-budget 12 --provider-timeout 120
 
 # warm research-bank scenario library (rules; stop any running server first)
 python demo_api.py --port 8766 --providers rules --replay-bank-mode warm
@@ -304,7 +314,6 @@ python demo_api.py --host 127.0.0.1 --port 8766 `
   --review-mode aligned_two_topic `
   --replay-bank-mode warm `
   --unlimited-calls `
-  --jev-env-file "C:\path\to\jev.env" `
   --shadow-practice-pool "artifacts\synthetic_practice_supplement_20261006\practice_pool_v2_private.json" `
   --shadow-target-band 0.40 0.80
 ```

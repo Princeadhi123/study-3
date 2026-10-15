@@ -9,9 +9,12 @@ import phase3_paths  # noqa: F401
 import worked_review_math
 from assessment_worked_review import (
     ASSESSMENT_WORKED_REVIEW_VERSION, CONCISE_PRACTICE_NOTICE,
-    CONCISE_READY_NOTICE, CONCISE_TEMPLATE_VERSION, READY_NOTICE,
-    UNAVAILABLE_NOTICE, build_assessment_review_examples,
-    concise_student_preview)
+    CONCISE_READY_NOTICE, CONCISE_TEMPLATE_VERSION,
+    QUESTION_FIRST_NEXT_STEPS,
+    QUESTION_FIRST_READY_NOTICE, QUESTION_FIRST_TEMPLATE_VERSION,
+    QUESTION_FIRST_VERSION, READY_NOTICE, UNAVAILABLE_NOTICE,
+    build_assessment_review_examples, concise_student_preview,
+    question_first_preview)
 from aitta_generator import AittaGenerator
 from demo_service import ConflictError, DemoService
 from evidence_feedback import (
@@ -925,7 +928,7 @@ class GroundedServiceTests(unittest.TestCase):
         detail = service.teacher_session(sid)
         preview = detail["feedback_delivery"]["preview"]
         self.assertEqual(preview["template_version"],
-                         CONCISE_TEMPLATE_VERSION)
+                         QUESTION_FIRST_TEMPLATE_VERSION)
         self.assertIn("review_examples", preview)
         cards = preview["review_examples"]
         self.assertTrue(all(c["source"] == "incorrect_assessment_response"
@@ -977,9 +980,75 @@ class GroundedServiceTests(unittest.TestCase):
         second = reopened.teacher_session(sid)[
             "feedback_delivery"]["preview"]
         self.assertEqual(second["template_version"],
-                         CONCISE_TEMPLATE_VERSION)
+                         QUESTION_FIRST_TEMPLATE_VERSION)
         self.assertEqual(second["review_examples"],
                          first["review_examples"])
+
+    def test_question_first_fields_edit_and_release(self):
+        service = self._service()
+        sid, token, _ = self._complete(
+            service, [positions(self.bank, "pct", 0)[0]])
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["review_presentation_version"],
+                         QUESTION_FIRST_VERSION)
+        detail = service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        self.assertEqual(preview["template_version"],
+                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(preview["review_presentation_version"],
+                         QUESTION_FIRST_VERSION)
+        self.assertEqual(len(preview["review_examples"]), 1)
+        card = preview["review_examples"][0]
+        self.assertEqual(card["subtopic_id"], "percentage_amount")
+        self.assertEqual(len(card["progressive_hints"]), 2)
+        sections = {s["kind"]: s["text"]
+                    for s in preview["sections"]}
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"],
+            "sections": sections,
+            "content": {"review_examples": [{
+                "socratic_prompt": "What did you try first?",
+                "option_contrast": "",
+                "progressive_hints": ["Edited hint one.",
+                                      "Edited hint two."]}]}})
+        edited = service.teacher_session(sid)[
+            "feedback_delivery"]["preview"]["review_examples"][0]
+        self.assertEqual(edited["socratic_prompt"],
+                         "What did you try first?")
+        self.assertEqual(edited["option_contrast"], "")
+        self.assertEqual(edited["progressive_hints"],
+                         ["Edited hint one.", "Edited hint two."])
+        self.assertTrue(edited["teacher_edited"])
+        self.assertEqual(edited["original_content"]["socratic_prompt"],
+                         card["socratic_prompt"])
+        for bad in ({"progressive_hints": ["only one"]},
+                    {"progressive_hints": ["a", ""]},
+                    {"progressive_hints": ["a", "b", "c"]},
+                    {"progressive_hints": "x"},
+                    {"progressive_hints": [5, "b"]},
+                    {"socratic_prompt": ""},
+                    {"presentation_version": "x"},
+                    {"scaffold_source": "x"},
+                    {"option_contrast_source": "x"}):
+            with self.assertRaises(ValueError):
+                service.save_feedback_edit(sid, {
+                    "message_sha256": res["preview_sha256"],
+                    "sections": sections,
+                    "content": {"review_examples": [bad]}})
+        released = service.release_feedback(sid, {
+            "message_sha256": res["preview_sha256"],
+            "reviewer_label": "t"})
+        self.assertTrue(released["released"])
+        card_after = service.snapshot(sid, token)[
+            "feedback"]["end"]["review_examples"][0]
+        self.assertEqual(card_after["progressive_hints"],
+                         ["Edited hint one.", "Edited hint two."])
+        self.assertEqual(card_after["socratic_prompt"],
+                         "What did you try first?")
+        self.assertEqual(card_after["correct_answer"],
+                         card["correct_answer"])
 
     def test_legacy_single_mode_unchanged(self):
         service = self._service(review_mode="legacy_single")
@@ -1674,6 +1743,271 @@ class ConciseStudentPreviewTests(unittest.TestCase):
             self.assertEqual(card["notice"], CONCISE_PRACTICE_NOTICE)
         self.assertTrue(self._texts(result)["next_steps"].endswith(
             "Then try the practice activities below."))
+
+
+class QuestionFirstPreviewTests(unittest.TestCase):
+    def _concise(self, wrong=(), unsupported_fri=False, practices=None):
+        preview, candidates, _ = ConciseStudentPreviewTests._fixture(
+            self, wrong=wrong, unsupported_fri=unsupported_fri,
+            practices=practices)
+        return concise_student_preview(preview, candidates)
+
+    @staticmethod
+    def _texts(preview):
+        return {s["kind"]: s["text"] for s in preview["sections"]}
+
+    def test_scaffold_covers_all_supported_methods(self):
+        self.assertEqual(len(worked_review_math.PRE_REVEAL_SCAFFOLDS),
+                         20)
+        self.assertEqual(len(worked_review_math.PRE_REVEAL_ALIASES), 3)
+        covered = (set(worked_review_math.PRE_REVEAL_SCAFFOLDS)
+                   | set(worked_review_math.PRE_REVEAL_ALIASES))
+        self.assertEqual(covered,
+                         set(worked_review_math._SOLUTION_HANDLERS))
+        for key, wording in worked_review_math.PRE_REVEAL_SCAFFOLDS.items():
+            scaffold = worked_review_math.pre_reveal_scaffold(key)
+            self.assertEqual(scaffold["socratic_prompt"], wording[0])
+            self.assertEqual(scaffold["progressive_hints"],
+                             list(wording[1:]))
+            self.assertEqual(len(scaffold["progressive_hints"]), 2)
+        for alias, target in worked_review_math.PRE_REVEAL_ALIASES.items():
+            self.assertEqual(
+                worked_review_math.pre_reveal_scaffold(alias),
+                worked_review_math.pre_reveal_scaffold(target))
+
+    def test_unknown_subtopic_falls_back_to_generic_prompt(self):
+        scaffold = worked_review_math.pre_reveal_scaffold("unknown_x")
+        self.assertEqual(scaffold["socratic_prompt"],
+                         worked_review_math.GENERIC_SOCRATIC_PROMPT)
+        self.assertEqual(scaffold["progressive_hints"], [])
+
+    def test_overlay_fields_preserve_source_and_input(self):
+        bank = make_grounded_bank()
+        wrong = (positions(bank, "pct", 0)[0],
+                 positions(bank, "div", 0)[0])
+        concise = self._concise(wrong)
+        original = copy.deepcopy(concise)
+        result = question_first_preview(concise)
+        self.assertEqual(concise, original)
+        self.assertEqual(result["template_version"],
+                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(result["review_presentation_version"],
+                         QUESTION_FIRST_VERSION)
+        self.assertNotIn("review_presentation_version", concise)
+        self.assertEqual(concise["template_version"],
+                         CONCISE_TEMPLATE_VERSION)
+        sections = {s["kind"]: s for s in result["sections"]}
+        concise_sections = {s["kind"]: s for s in concise["sections"]}
+        self.assertEqual(sections["review_focus"]["title"],
+                         concise_sections["review_focus"]["title"])
+        self.assertEqual(sections["next_steps"]["title"],
+                         concise_sections["next_steps"]["title"])
+        self.assertTrue(sections["next_steps"]["text"].startswith(
+            QUESTION_FIRST_NEXT_STEPS))
+        self.assertEqual(
+            result["text"],
+            "\n\n".join(s["text"] for s in result["sections"]
+                        if s["text"]))
+        for before, after in zip(concise["review_examples"],
+                                 result["review_examples"]):
+            for key in ("prompt", "options", "selected_answer",
+                        "correct_answer", "steps",
+                        "reasoning_question", "status", "question_id",
+                        "subtopic_id"):
+                self.assertEqual(after[key], before[key])
+            self.assertNotIn("socratic_prompt", before)
+            self.assertEqual(after["presentation_version"],
+                             QUESTION_FIRST_VERSION)
+            self.assertEqual(after["scaffold_source"],
+                             "application_authored_method_prompt_v1")
+            self.assertEqual(
+                after["socratic_prompt"],
+                worked_review_math.pre_reveal_scaffold(
+                    after["subtopic_id"])["socratic_prompt"])
+            self.assertEqual(len(after["progressive_hints"]), 2)
+            self.assertEqual(after["option_contrast"], "")
+            self.assertIsNone(after["option_contrast_source"])
+            self.assertEqual(after["notice"], QUESTION_FIRST_READY_NOTICE)
+
+    @staticmethod
+    def _mini(cards):
+        sections = [{"kind": "review_focus", "title": "t",
+                     "text": "focus"},
+                    {"kind": "next_steps", "title": "t",
+                     "text": "next"}]
+        return {"sections": sections, "text": "focus\n\nnext",
+                "review_examples": cards}
+
+    def test_unavailable_card_generic_prompt_no_hints(self):
+        bank = make_grounded_bank(unsupported_fri=True)
+        pos = positions(bank, "fri", 0)[0]
+        concise = self._concise(
+            (pos,), unsupported_fri=True,
+            practices=[{"status": "abstained",
+                        "message": "No eligible practice activity.",
+                        "notice": None, "question": None}])
+        self.assertEqual(concise["review_examples"][0]["status"],
+                         "unavailable")
+        result = question_first_preview(concise)
+        card = result["review_examples"][0]
+        self.assertEqual(card["socratic_prompt"],
+                         worked_review_math.GENERIC_SOCRATIC_PROMPT)
+        self.assertEqual(card["progressive_hints"], [])
+        self.assertEqual(card["option_contrast"], "")
+        self.assertIsNone(card["option_contrast_source"])
+        self.assertEqual(card["scaffold_source"],
+                         "application_authored_method_prompt_v1")
+        self.assertEqual(card["notice"], UNAVAILABLE_NOTICE)
+
+    def test_all_correct_keeps_concise_next_steps_no_focus(self):
+        concise = self._concise(())
+        result = question_first_preview(concise)
+        self.assertEqual(result["review_examples"], [])
+        self.assertEqual(result["template_version"],
+                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(self._texts(result), self._texts(concise))
+        self.assertEqual(self._texts(result)["next_steps"],
+                         "Keep building on these results.")
+
+    def test_next_steps_mixed_availability_and_practice_counts(self):
+        bank = make_grounded_bank()
+        wrong = (positions(bank, "pct", 0)[0],)
+        practice = lambda i: {
+            "status": "selected", "message": "m", "notice": None,
+            "question": {"skill_name": "Prosenttilaskenta",
+                         "concept_name": f"Concept {i}",
+                         "text": "t", "options": []},
+            "relationship": {"kind": "different_content",
+                             "message": "x"}}
+        for count in (0, 1, 2):
+            concise = self._concise(
+                wrong, practices=[practice(i) for i in range(count)])
+            result = question_first_preview(concise)
+            text = self._texts(result)["next_steps"]
+            self.assertTrue(text.startswith(QUESTION_FIRST_NEXT_STEPS))
+            if count == 0:
+                self.assertNotIn("practice activit", text)
+            elif count == 1:
+                self.assertTrue(text.endswith(
+                    "Then try the practice activity below."))
+            else:
+                self.assertTrue(text.endswith(
+                    "Then try the practice activities below."))
+        concise_mixed = self._concise(
+            (positions(bank, "pct", 0)[0],
+             positions(bank, "fri", 0)[0]),
+            unsupported_fri=True)
+        result = question_first_preview(concise_mixed)
+        text = self._texts(result)["next_steps"]
+        self.assertTrue(text.startswith(QUESTION_FIRST_NEXT_STEPS))
+        self.assertIn("ask your teacher for help", text)
+
+
+EXPECTED_WARM_CONTRASTS = {
+    ("32978__p2__qad057f930f90539d__of1e565b0fb849511", "7w"):
+        "Your selected option uses w, while both terms in the "
+        "question use v. How did you choose the variable letter in "
+        "your answer?",
+    ("32978__p2__qad057f930f90539d__of1e565b0fb849511", "5v2v"):
+        "Your selected option places the terms next to each other "
+        "without the original plus sign. How did you represent the "
+        "addition?",
+    ("512961__p2__q5f787a330af2b755__o03da091c4f2e8d2f", "2xy"):
+        "Your selected option writes x and y together as a product. "
+        "What operation is shown between x and y in the question?"}
+
+
+class WarmBankQuestionFirstTests(unittest.TestCase):
+    def setUp(self):
+        self.bank, self.taxonomy, _ = load_research_bank("warm")
+        self.questions = {q["question_id"]: q
+                          for q in self.bank["questions"]}
+        self.leaf_for = {}
+        for topic in self.taxonomy["topics"]:
+            for leaf in topic["subtopics"]:
+                for qid in leaf["question_ids"]:
+                    self.leaf_for[qid] = leaf["id"]
+
+    def _card(self, qid, selected):
+        question = self.questions[qid]
+        correct = question["options"][question["answer_index"]]
+        self.assertNotEqual(selected, correct)
+        solved = worked_review_math.solution(
+            question, self.leaf_for[qid])
+        return {"source": "incorrect_assessment_response",
+                "status": "ready", "question_id": qid,
+                "prompt": question["text"],
+                "options": list(question["options"]),
+                "selected_answer": selected,
+                "correct_answer": correct,
+                "subtopic_id": self.leaf_for[qid],
+                "steps": solved["steps"],
+                "reasoning_question": solved["reasoning_question"],
+                "notice": CONCISE_READY_NOTICE}
+
+    @staticmethod
+    def _overlay(card):
+        return question_first_preview(
+            QuestionFirstPreviewTests._mini([card])
+        )["review_examples"][0]
+
+    def test_exact_contrast_records_from_actual_bank(self):
+        for (qid, selected), expected in EXPECTED_WARM_CONTRASTS.items():
+            out = self._overlay(self._card(qid, selected))
+            self.assertEqual(out["option_contrast"], expected)
+            self.assertEqual(
+                out["option_contrast_source"],
+                "application_authored_exact_option_observation_v1")
+            scaffold = worked_review_math.pre_reveal_scaffold(
+                out["subtopic_id"])
+            self.assertEqual(out["socratic_prompt"],
+                             scaffold["socratic_prompt"])
+            self.assertEqual(len(out["progressive_hints"]), 2)
+            self.assertEqual(out["notice"], QUESTION_FIRST_READY_NOTICE)
+
+    def test_contrast_suppressed_by_each_mismatch(self):
+        for qid, selected in EXPECTED_WARM_CONTRASTS:
+            mutations = (
+                lambda c: c.update(question_id="other_qid"),
+                lambda c: c.update(prompt="Muutettu kysymys?"),
+                lambda c: c.update(
+                    options=list(reversed(c["options"]))),
+                lambda c: c.update(correct_answer="nomatch"),
+                lambda c: c.update(subtopic_id="divisibility"),
+                lambda c: c.update(status="unavailable", steps=[]))
+            for mutate in mutations:
+                card = self._card(qid, selected)
+                mutate(card)
+                out = self._overlay(card)
+                self.assertEqual(out["option_contrast"], "",
+                                 (qid, selected))
+                self.assertIsNone(out["option_contrast_source"])
+
+    def test_all_wrong_options_preserve_answers_and_steps(self):
+        seen = set()
+        for qid, question in self.questions.items():
+            leaf = self.leaf_for[qid]
+            scaffold = worked_review_math.pre_reveal_scaffold(leaf)
+            self.assertEqual(len(scaffold["progressive_hints"]), 2,
+                             (qid, leaf))
+            correct = question["options"][question["answer_index"]]
+            for option in question["options"]:
+                if option == correct:
+                    continue
+                card = self._card(qid, option)
+                out = self._overlay(card)
+                self.assertEqual(out["selected_answer"], option)
+                self.assertEqual(out["correct_answer"], correct)
+                self.assertEqual(out["steps"], card["steps"])
+                self.assertTrue(out["steps"])
+                self.assertEqual(out["presentation_version"],
+                                 QUESTION_FIRST_VERSION)
+                if out["option_contrast"]:
+                    seen.add((qid, option))
+                    self.assertEqual(out["option_contrast"],
+                                     EXPECTED_WARM_CONTRASTS[
+                                         (qid, option)])
+        self.assertEqual(seen, set(EXPECTED_WARM_CONTRASTS))
 
 
 if __name__ == "__main__":

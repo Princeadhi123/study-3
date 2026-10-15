@@ -2282,7 +2282,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v8")
+                         "phase3_student_feedback_template_v9")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2326,7 +2326,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v8")
+                         "phase3_student_feedback_template_v9")
         self.assertEqual(
             [s["title"] for s in preview["sections"]],
             ["Assessment complete", "What went well",
@@ -2403,7 +2403,7 @@ class MultiModeTests(unittest.TestCase):
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v8")
+                         "phase3_student_feedback_template_v9")
         ptexts = {s["kind"]: s["text"] for s in preview["sections"]}
         self.assertEqual(ptexts["assessment_summary"],
                          texts["assessment_summary"])
@@ -2557,6 +2557,122 @@ class MultiModeTests(unittest.TestCase):
         self.assertEqual(released["sections"], preview["sections"])
         self.assertEqual(released["practice_activities"],
                          preview["practice_activities"])
+
+    def test_aligned_session_marks_question_first_preview(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, _ = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["review_presentation_version"],
+                         "question_first_worked_review_v1")
+        preview = self._delivery(service, sid)["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v9")
+        self.assertEqual(preview["review_presentation_version"],
+                         "question_first_worked_review_v1")
+        cards = preview["review_examples"]
+        self.assertTrue(cards)
+        for card in cards:
+            self.assertEqual(card["presentation_version"],
+                             "question_first_worked_review_v1")
+            self.assertEqual(card["scaffold_source"],
+                             "application_authored_method_prompt_v1")
+            self.assertTrue(card["socratic_prompt"])
+            self.assertEqual(card["progressive_hints"], [])
+            self.assertEqual(card["option_contrast"], "")
+            self.assertIsNone(card["option_contrast_source"])
+
+    def test_missing_presentation_marker_recreates_v8_preview(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        meta.pop("review_presentation_version")
+        service._save_meta(meta)
+        preview = self._delivery(service, sid)["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v8")
+        self.assertNotIn("review_presentation_version", preview)
+        for card in preview["review_examples"]:
+            for field in ("presentation_version", "scaffold_source",
+                          "socratic_prompt", "option_contrast",
+                          "option_contrast_source",
+                          "progressive_hints"):
+                self.assertNotIn(field, card)
+        delivery = self._delivery(service, sid)
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        service.close(wait=True)
+        reopened = DemoService(
+            root=Path(self.tmp.name), bank=self.bank,
+            taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank))
+        self.addCleanup(reopened.close, wait=True)
+        released = reopened.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["template_version"],
+                         "phase3_student_feedback_template_v8")
+        for card in released["review_examples"]:
+            self.assertNotIn("socratic_prompt", card)
+
+    def test_question_first_card_edits_release_and_rejections(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        delivery = self._delivery(service, sid)
+        originals = copy.deepcopy(delivery["preview"]
+                                  ["review_examples"])
+        patch = [{"socratic_prompt": "Teacher prompt.",
+                  "option_contrast": "Teacher observation.",
+                  "progressive_hints": []},
+                 {"option_contrast": ""}]
+        res = service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": dict(MULTI_SECTIONS),
+            "content": {"review_examples": patch}})
+        cards = self._delivery(service, sid)["preview"][
+            "review_examples"]
+        self.assertEqual(cards[0]["socratic_prompt"],
+                         "Teacher prompt.")
+        self.assertEqual(cards[0]["option_contrast"],
+                         "Teacher observation.")
+        self.assertTrue(cards[0]["teacher_edited"])
+        self.assertEqual(cards[0]["original_content"],
+                         originals[0])
+        self.assertEqual(cards[1]["option_contrast"], "")
+        self.assertNotIn("teacher_edited", cards[1])
+        service.release_feedback(sid, {
+            "message_sha256": res["preview_sha256"]})
+        released = service.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["review_examples"], cards)
+        for bad in ({"progressive_hints": ["x"]},
+                    {"progressive_hints": "x"},
+                    {"progressive_hints": [""]},
+                    {"progressive_hints": [5]},
+                    {"socratic_prompt": ""},
+                    {"socratic_prompt": 5},
+                    {"presentation_version": "x"},
+                    {"scaffold_source": "x"},
+                    {"option_contrast_source": "x"}):
+            with self.assertRaises(ValueError):
+                service.save_feedback_edit(sid, {
+                    "message_sha256": res["preview_sha256"],
+                    "sections": dict(MULTI_SECTIONS),
+                    "content": {"review_examples": [bad, {}]}})
 
     def test_teacher_content_edit_selected_practice(self):
         selector = MultiSelector(prefer=("sA", "sB"))
@@ -2958,6 +3074,171 @@ class MultiModeTests(unittest.TestCase):
         self.assertNotIn("feedback_selection_version", meta)
         self.assertEqual(
             reopened.snapshot(sid, token)["feedback"]["end"], released)
+
+
+class GatedDiagnostics:
+    """FakeKT-backed diagnostics whose 40-answer evaluation parks on a
+    gate so tests can hold the end diagnostics job in 'pending'."""
+
+    def __init__(self, bank, gate, end_result=None):
+        self.inner = LiveDiagnostics(model_loader=lambda: FakeKT(bank))
+        self.gate = gate
+        self.end_result = end_result
+
+    def warmup(self):
+        return self.inner.warmup()
+
+    @property
+    def state(self):
+        return self.inner.state
+
+    def evaluate(self, bank, taxonomy, rows):
+        if len(rows) == 40:
+            self.gate.wait(timeout=60)
+            if self.end_result is not None:
+                return self.end_result
+        return self.inner.evaluate(bank, taxonomy, rows)
+
+
+class ProviderDiagnosticsRaceTests(unittest.TestCase):
+    """Deterministic reproduction of the stale-meta race: a diagnostics
+    result persisted between the provider job's waiting_for_practice save
+    and its practice-admission save must not be reverted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bank = make_bank()
+        self.taxonomy = make_taxonomy(self.bank)
+        import feedback_practice
+        import research_runtime
+        from tests.test_feedback_practice import make_graph, make_pool
+        self.pool = make_pool(("sA", "sB"))
+        from unittest import mock
+        for patch in (
+                mock.patch.object(
+                    feedback_practice, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    research_runtime, "load_current_practice_pool",
+                    return_value=copy.deepcopy(self.pool)),
+                mock.patch.object(
+                    feedback_practice, "teacher_content_context",
+                    return_value=make_graph(self.pool))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _rows_wrong(self, skills=("sA", "sB")):
+        rows = []
+        for q in self.bank["questions"]:
+            index = q["answer_index"]
+            if q["skill_id"] in skills:
+                index = (index + 1) % len(q["options"])
+            rows.append({"question_id": q["question_id"],
+                         "selected_index": index})
+        return rows
+
+    def _service(self, gate, end_result=None):
+        predictor = RecordingPredictor({"pool_q1": 0.6, "pool_q2": 0.55})
+        service = DemoService(
+            root=Path(self.tmp.name),
+            bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=GatedDiagnostics(self.bank, gate, end_result),
+            recommender=FakeAlignedRecommender(self.pool, predictor))
+        self.addCleanup(service.close, wait=True)
+        return service
+
+    def _interleave_diagnostics(self, service, sid, job, result):
+        original_save = service._save_meta
+        fired = []
+
+        def wrapped(meta):
+            original_save(meta)
+            if (not fired
+                    and meta.get("provider_job", {}).get("status")
+                    == "waiting_for_practice"
+                    and "multi_selection"
+                    in meta["checkpoints"]["end"]):
+                fired.append(True)
+                latest = service._load_meta(sid)
+                end = latest["checkpoints"]["end"]
+                end["diagnostics_job"] = dict(job)
+                end["diagnostics"] = copy.deepcopy(result)
+                original_save(latest)
+
+        service._save_meta = wrapped
+        return fired
+
+    def _create(self, service):
+        created = service.create_session()
+        return created["session_id"], created["student_token"]
+
+    def _submit(self, service, sid, token):
+        for row in self._rows_wrong():
+            service.submit_response(sid, token, row)
+
+    def _wait_provider_done(self, service, sid):
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] in ("ready", "fallback")))
+
+    def test_interleaved_ready_diagnostics_survive_admission(self):
+        gate = threading.Event()
+        service = self._service(gate)
+        sid, token = self._create(service)
+        marker = {"status": "ready", "checkpoint": "end",
+                  "answer_count": 40, "marker": "interleaved_ready"}
+        fired = self._interleave_diagnostics(
+            service, sid, {"status": "ready",
+                           "finished_at": "2026-10-15T00:00:00Z"},
+            marker)
+        self._submit(service, sid, token)
+        self._wait_provider_done(service, sid)
+        self.assertTrue(fired)
+        end = service._load_meta(sid)["checkpoints"]["end"]
+        self.assertEqual(end["diagnostics_job"]["status"], "ready")
+        self.assertEqual(end["diagnostics"], marker)
+        self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["checkpoints"]["end"]
+            ["diagnostics"].get("kt") is not None))
+        self.assertTrue(service._jobs_complete(sid))
+
+    def test_interleaved_unavailable_diagnostics_survive_admission(self):
+        gate = threading.Event()
+        service = self._service(gate)
+        sid, token = self._create(service)
+        marker = {"status": "unavailable", "reason": "model_unavailable",
+                  "checkpoint": "end", "answer_count": 40,
+                  "marker": "interleaved_unavailable"}
+        fired = self._interleave_diagnostics(
+            service, sid, {"status": "unavailable",
+                           "reason": "model_unavailable",
+                           "finished_at": "2026-10-15T00:00:00Z"},
+            marker)
+        self._submit(service, sid, token)
+        self._wait_provider_done(service, sid)
+        self.assertTrue(fired)
+        end = service._load_meta(sid)["checkpoints"]["end"]
+        self.assertEqual(end["diagnostics_job"]["status"], "unavailable")
+        self.assertEqual(end["diagnostics"], marker)
+        self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
+        gate.set()
+
+    def test_pending_end_diagnostics_block_jobs_complete(self):
+        gate = threading.Event()
+        service = self._service(gate)
+        sid, token = self._create(service)
+        self._submit(service, sid, token)
+        self._wait_provider_done(service, sid)
+        self.assertFalse(service._jobs_complete(sid))
+        self.assertEqual(service._load_meta(sid)["checkpoints"]["end"]
+                         ["diagnostics_job"]["status"], "pending")
+        gate.set()
+        self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
+        self.assertEqual(service._load_meta(sid)["checkpoints"]["end"]
+                         ["diagnostics_job"]["status"], "ready")
 
 
 if __name__ == "__main__":

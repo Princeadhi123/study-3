@@ -179,9 +179,17 @@ class ScenarioReplays:
     def start(self, body):
         keys = {"request_id", "report_sha256", "scenario_ids",
                 "provider_mode", "allow_provider_calls"}
-        optional = {"retry_failed_provider_calls", "max_parallel"}
+        optional = {"retry_failed_provider_calls", "max_parallel",
+                    "feedback_variant"}
         if not (isinstance(body, dict) and keys <= set(body) <= keys | optional):
             raise ValueError("invalid replay request")
+        feedback_variant = body.get("feedback_variant", "question_first")
+        if (not isinstance(feedback_variant, str)
+                or feedback_variant not in ("question_first", "worked_first")):
+            raise ValueError("invalid replay selection")
+        if (feedback_variant == "worked_first"
+                and self.service.review_mode != "aligned_two_topic"):
+            raise ValueError("invalid replay selection")
         retry_failed = body.get("retry_failed_provider_calls", False)
         if type(retry_failed) is not bool:
             raise ValueError("invalid replay selection")
@@ -228,6 +236,7 @@ class ScenarioReplays:
                       "report_sha256": body["report_sha256"], "source": library["source"],
                       "code_sha256": self.code, "provider_mode": body["provider_mode"],
                       "retry_failed_provider_calls": retry_failed,
+                      "feedback_variant": feedback_variant,
                       "max_parallel": min(max_parallel, len(ids)),
                       "diagnostics_mode": "fresh_frozen_model_inference", "cancel_requested": False,
                       "cases": [{"scenario_id": i, "name": index[i]["name"],
@@ -274,12 +283,16 @@ class ScenarioReplays:
                 retry_failed = record.get("retry_failed_provider_calls", False)
                 provider_mode = record["provider_mode"]
                 bank_mode = record.get("bank_mode", "demo")
+                feedback_variant = record.get(
+                    "feedback_variant", "question_first")
             replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
                       "scenario_name": row["name"], "report_sha256": report_sha256,
-                      "retry_failed_provider_calls": retry_failed}
+                      "retry_failed_provider_calls": retry_failed,
+                      "feedback_variant": feedback_variant}
             created = self.service.create_session(label=row["display_name"], replay=replay,
                                                   provider_mode=provider_mode,
-                                                  bank_mode=bank_mode)
+                                                  bank_mode=bank_mode,
+                                                  feedback_variant=feedback_variant)
             session_id, token = created["session_id"], created["student_token"]
             with self.lock:
                 record = self._read(run_id)

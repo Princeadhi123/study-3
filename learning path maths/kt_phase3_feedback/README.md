@@ -7,7 +7,8 @@ assessment. The current project is an interactive localhost prototype with:
 - a private teacher dashboard;
 - deterministic scoring and observed evidence;
 - a descriptive assessment graph;
-- optional hosted Jev candidate selection;
+- deterministic review-bundle selection (no selection provider in the
+  active hosted path);
 - optional hosted Aitta full structured feedback;
 - private frozen KT research diagnostics;
 - educator review records and JSON export.
@@ -27,8 +28,9 @@ Implemented:
   diagnostics jobs, review records, and teacher payloads;
 - fixed-order 40-question assessment over the approved Phase 2 bank;
 - midpoint and end checkpoints at responses 20 and 40;
-- deterministic baseline feedback with Jev/Aitta fallback;
-- aligned two-topic end feedback: one Jev-selected review bundle (up to two
+- deterministic baseline feedback with optional Aitta narrative and
+  deterministic fallback;
+- aligned two-topic end feedback: one rules-selected review bundle (up to two
   error focuses from different broad skills), aligned KT practice selection
   (at most one question per selected skill), one Aitta student-facing draft,
   and one teacher-approved package released to the student with its
@@ -109,8 +111,11 @@ python demo_api.py --host 127.0.0.1 --port 8766 --providers rules `
   --review-mode legacy_single
 ```
 
-Hosted mode is optional and requires a local Jev key file. The current
-full configuration, including the optional aligned KT practice pool:
+Hosted mode is optional and configures only the Aitta feedback generator
+(from `AITTA_*` environment variables or a local `.env`). Review-bundle
+selection is deterministic rules for every demo mode; `--jev-env-file` is
+deprecated and ignored. The current full configuration, including the
+optional aligned KT practice pool:
 
 ```powershell
 $env:KT_PHASE2_TEXT_EMBEDDINGS = (Resolve-Path "..\kt_phase2_inference\artifacts\text_embeddings_v2_synthetic_practice_20261007.npz").Path
@@ -120,13 +125,11 @@ python demo_api.py --host 127.0.0.1 --port 8766 `
   --review-mode aligned_two_topic `
   --replay-bank-mode warm `
   --unlimited-calls `
-  --jev-env-file "C:\path\to\jev.env" `
   --shadow-practice-pool "artifacts\synthetic_practice_supplement_20261006\practice_pool_v2_private.json" `
   --shadow-target-band 0.40 0.80
 ```
 
-Replace the `C:\path\to\jev.env` placeholder with your own local key file;
-never commit it. `--unlimited-calls` removes the per-process new-call cap and
+`--unlimited-calls` removes the per-process new-call cap and
 is mutually exclusive with `--call-budget N` (finite default cap: 12);
 external provider charges, rate limits and timeouts still apply. To keep a
 finite cap instead, substitute `--call-budget 12` — do not pass both.
@@ -209,6 +212,28 @@ The dashboard polls approximately every two seconds. Unchanged payloads skip
 redraws; expanded sections and unsaved review edits are preserved across real
 updates.
 
+### Feedback variants
+
+`aligned_two_topic` sessions carry an explicit per-session `feedback_variant`
+recorded at creation and never reinterpreted afterwards:
+
+- `question_first` (default): the current presentation — concise student
+  titles and question-first worked review cards; a hosted Aitta reply
+  contributes only the shape-checked completion wording while strengths,
+  review focus and next steps stay application-owned.
+- `worked_first` (aligned mode only): the original structured four sections
+  with standard titles and the exact checked review/practice cards. When a
+  validated Aitta reply is available it may supply all four narrative
+  sections under guardrails `provider_full_narrative_shape_checked_v1`; the
+  application-owned scope notice is appended exactly once and all counts,
+  selected topics, answer keys, checked maths and practice cards remain
+  application-owned. This narrative is shape-checked only — **not**
+  fact-verified — and always requires educator review. Invalid provider
+  output falls back to the deterministic four sections.
+
+Historical sessions without a recorded variant display as
+"Historical / unspecified" and keep their saved preview behaviour.
+
 ### Scenario Library
 
 The library can read a saved integrated replay report. The former bundled
@@ -224,7 +249,11 @@ name or observed score. Each case exposes checkpoint/audience packages,
 observed skill/subtopic counts, baseline and selected text, execution provenance,
 and private frozen graph/diagnostics. Summary counts are derived from packages,
 not copied from the report summary. Selection differences are not quality scores.
-Original results are read-only. Individual answers are joined from the matching
+Original results are read-only. Replays can run the same answers under either
+feedback variant; each run is saved separately (variant, provider mode and
+results are recorded per run) so both variants can be exercised before any
+comparison — historical outputs are never regenerated or edited. Individual
+answers are joined from the matching
 private source and bank; if those inputs are unavailable or incompatible, the UI
 says so instead of inventing answers. Historical diagnostics stay labelled as saved
 inference, not newly computed results.
@@ -351,8 +380,8 @@ DemoService (demo_service.py)
         +-- feedback branch (aligned_two_topic, current default)
         |       deterministic baseline
         |       -> permitted review bundles built locally
-        |       -> one Jev bundle selection (1-2 error focuses from
-        |          different broad skills; local bypass if one bundle)
+        |       -> one deterministic rules bundle selection (1-2 error
+        |          focuses from different broad skills)
         |       -> aligned KT practice recommendation (0-2 questions,
         |          at most one per selected skill)
         |       -> one Aitta shared student-facing draft (4 sections)
@@ -389,7 +418,7 @@ Checkpoint behavior:
 The optional aligned KT stage is enabled only by the paired
 `--shadow-practice-pool` and `--shadow-target-band` flags: after the 40th
 answer the frozen KT model scores eligible candidates from an explicit
-private practice pool restricted to the Jev-selected review skills. The raw
+private practice pool restricted to the selected review skills. The raw
 recommendation — probabilities, candidate lists, provenance — stays a
 teacher-private record (`checkpoints.end.recommendation`); only validated
 practice status/task descriptions reach Aitta, and sanitized question cards
@@ -417,24 +446,18 @@ descriptive drafts pending educator review, no routing or student use).
 
 ## 6. Provider boundaries
 
-Jev (current `aligned_two_topic` mode):
-
-- makes **one** request selecting one permitted review *bundle*: up to two
-  error focuses drawn from **different broad skills** (one focus when only
-  one error skill exists; an optional consolidation candidate when all
-  answers are correct);
-- receives allow-listed aggregate observed evidence plus the permitted
-  bundles and application-owned planning blocks only — never raw answers,
-  question text, answer keys, session IDs, or KT probabilities;
-- is bypassed locally — no Jev HTTP call — when only one permitted bundle
-  exists (all-correct, a single error candidate, or exactly two candidates
-  in distinct skills);
-- has its validated selection recorded with per-focus `feedback_plans`
-  (`kt_used: false`) before aligned practice or any Aitta call;
-- failure falls back to the deterministic baseline (first permitted bundle)
-  and skips the Aitta stage;
-- legacy `review_mode="legacy_single"` keeps the earlier single-candidate
-  contract for old captures and offline replay.
+Review-bundle selection (current `aligned_two_topic` mode) is
+deterministic rules only: the application builds the permitted review
+bundles locally and selects one — up to two error focuses drawn from
+**different broad skills** (one focus when only one error skill exists;
+an optional consolidation candidate when all answers are correct). No
+selection provider is constructed or called; an explicitly injected
+selector remains a test seam only. The validated selection is recorded
+with per-focus `feedback_plans` (`kt_used: false`) before aligned
+practice or any Aitta call. Legacy `review_mode="legacy_single"` keeps
+the earlier single-candidate contract for old captures and offline
+replay, and standalone historic/evaluation Jev modules remain for
+offline replay only.
 
 Aitta (current `aligned_two_topic` mode):
 
@@ -457,7 +480,7 @@ Aitta (current `aligned_two_topic` mode):
 
 Aligned KT practice (same 40-answer end checkpoint):
 
-- runs only for the Jev-selected review skills: eligibility excludes
+- runs only for the rules-selected review skills: eligibility excludes
   assessed question IDs/normalized prompts, unassessed or error-free
   skills, and any skill not selected in the bundle;
 - picks at most one question per selected skill (0–2 overall) inside the
@@ -493,8 +516,8 @@ no fresh cache root is needed. Reuse is real captured provider output but
 is not a fresh or independent provider trial. The default per-process cap
 is 12 new calls;
 `--unlimited-calls` removes it (mutually exclusive with `--call-budget`).
-Normally at most one Jev call plus one Aitta call run per completed
-scenario — not one per focus. The dashboard distinguishes fresh hosted,
+Normally at most one Aitta call runs per completed scenario — not one
+per focus. The dashboard distinguishes fresh hosted,
 fresh hosted retry, cached hosted, local resolution, deterministic
 fallback, and unverified
 provenance; terminal "Captured" logs show only new calls.
@@ -725,13 +748,14 @@ coordinate the server before a memory-heavy full test run.
 
 - No real student data may be entered.
 - Feedback is not approved for learner delivery.
-- A Jev selection differing from the baseline is not automatically better.
+- Review-bundle selection is deterministic rules; it is a starting-point
+  policy, not evidence of the best focus.
 - Aitta writes a shared draft narrative only; it does not author scores,
   worked solutions, or topic/question selection — it phrases the supplied
   observed-evidence actions. It does not independently choose instructional
   content or establish validated personalised teaching.
 - KT does not control review-focus selection; aligned practice strictly
-  follows the Jev-selected skills and remains experimental — two aligned
+  follows the selected review skills and remains experimental — two aligned
   questions are not a validated learning benefit.
 - Teacher approval/release in this demo is an application workflow, not
   formal educator sign-off or learner-delivery approval.

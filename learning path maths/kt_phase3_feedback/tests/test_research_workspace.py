@@ -225,6 +225,58 @@ class ResearchWorkspaceTests(unittest.TestCase):
         self.assertEqual(view["results"]["identical_pairs"], 4)
         self.assertEqual(view["results"]["preferences"]["tie"], 4)
 
+    def test_delete_removes_only_that_record(self):
+        view = self.start()
+        keeper = self.start()
+        self.workspace.add_judgment(view["id"], judgment(view["task"]))
+        record = self.root / "comparisons" / f"{view['id']}.json"
+        report_bytes = self.report_path.read_bytes()
+        result = self.workspace.delete_comparison(view["id"])
+        self.assertEqual(result, {"id": view["id"], "deleted": True})
+        self.assertFalse(record.exists())
+        ids = [row["id"] for row in
+               self.workspace.comparisons()["comparisons"]]
+        self.assertEqual(ids, [keeper["id"]])
+        for access in (self.workspace.comparison,
+                       self.workspace.export_comparison):
+            with self.assertRaises(FileNotFoundError):
+                access(view["id"])
+        with self.assertRaises(FileNotFoundError):
+            self.workspace.add_judgment(view["id"], judgment(view["task"]))
+        self.assertTrue((self.root / "comparisons" / f"{keeper['id']}.json").is_file())
+        self.assertEqual(self.workspace.comparison(keeper["id"])["completed"], 0)
+        self.assertEqual(self.report_path.read_bytes(), report_bytes)
+
+    def test_delete_completed_review_and_repeat_delete(self):
+        view = self.start()
+        while view["task"]:
+            view = self.workspace.add_judgment(view["id"], judgment(view["task"]))
+        self.assertEqual(view["status"], "complete")
+        self.workspace.delete_comparison(view["id"])
+        self.assertEqual(self.workspace.comparisons()["comparisons"], [])
+        with self.assertRaises(FileNotFoundError):
+            self.workspace.delete_comparison(view["id"])
+
+    def test_delete_rejects_invalid_ids_without_touching_files(self):
+        view = self.start()
+        record = self.root / "comparisons" / f"{view['id']}.json"
+        for bad in ("../report", "", True, "g" * 32, "A" * 32):
+            with self.assertRaises(ValueError):
+                self.workspace.delete_comparison(bad)
+        self.assertTrue(record.is_file())
+        with self.assertRaises(FileNotFoundError):
+            self.workspace.delete_comparison("f" * 32)
+        self.assertTrue(record.is_file())
+
+    def test_delete_works_when_report_unavailable(self):
+        view = self.start()
+        offline = ResearchWorkspace(self.root, self.root / "nonexistent.json")
+        self.assertEqual(offline.library()["status"], "unavailable")
+        self.assertEqual(offline.delete_comparison(view["id"]),
+                         {"id": view["id"], "deleted": True})
+        with self.assertRaises(FileNotFoundError):
+            offline.delete_comparison(view["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

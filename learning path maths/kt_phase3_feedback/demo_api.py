@@ -206,10 +206,13 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
 
     def _create_session(self):
         body = self._json_body()
-        if (set(body) - {"synthetic", "bank_mode"}
+        if (set(body) - {"synthetic", "bank_mode", "feedback_variant"}
                 or body.get("synthetic") is not True):
             raise ValueError("session creation requires attestation")
-        return 201, self.service.create_session(bank_mode=body.get("bank_mode", "demo")), {}
+        return 201, self.service.create_session(
+            bank_mode=body.get("bank_mode", "demo"),
+            feedback_variant=body.get(
+                "feedback_variant", "question_first")), {}
 
     def _available_banks(self):
         return 200, {"banks": self.service.available_banks()}, {}
@@ -288,7 +291,7 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
                 return 200, research.comparisons(), {}
             return 201, research.create_comparison(self._json_body()), {}
         comparison = re.fullmatch(
-            COMPARISON_ROOT + r"/([a-f0-9]{32})(?:/(reviews|export))?", path)
+            COMPARISON_ROOT + r"/([a-f0-9]{32})(?:/(reviews|export|delete))?", path)
         if comparison:
             return self._comparison_instance_route(
                 method, comparison, research)
@@ -300,6 +303,10 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             return 200, research.comparison(cid), {}
         if method == "POST" and action == "reviews":
             return 201, research.add_judgment(cid, self._json_body()), {}
+        if method == "POST" and action == "delete":
+            if self._json_body() != {}:
+                raise ValueError("delete expects an empty object")
+            return 200, research.delete_comparison(cid), {}
         if method == "GET" and action == "export":
             return 200, research.export_comparison(cid), {
                 "Content-Disposition": f'attachment; filename="comparison_{cid}.json"'}
@@ -527,7 +534,10 @@ def main(argv=None):
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--providers", choices=("rules", "hosted"),
                         default="rules")
-    parser.add_argument("--jev-env-file", type=Path)
+    parser.add_argument("--jev-env-file", type=Path,
+                        help="Deprecated and ignored: review selection is "
+                             "deterministic; hosted mode configures only "
+                             "the Aitta feedback generator.")
     budget = parser.add_mutually_exclusive_group()
     budget.add_argument("--call-budget", type=int, default=12)
     budget.add_argument("--unlimited-calls", action="store_true")

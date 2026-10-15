@@ -394,6 +394,12 @@ class ResearchWorkspace:
             self._save(record)
             return self._view(record)
 
+    def delete_comparison(self, comparison_id):
+        with self.lock:
+            self._read(comparison_id)
+            self._path(comparison_id).unlink()
+            return {"id": comparison_id, "deleted": True}
+
     def export_comparison(self, comparison_id):
         with self.lock:
             record = self._read(comparison_id)

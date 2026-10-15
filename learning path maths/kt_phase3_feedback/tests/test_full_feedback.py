@@ -1,6 +1,7 @@
 import copy
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -16,9 +17,12 @@ from full_feedback import (
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_MAX_CHARS,
     FULL_FEEDBACK_SECTION_TITLES, FullFeedbackAittaGenerator,
     MULTI_FEEDBACK_GUARDRAILS_VERSION,
+    PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION,
+    _provider_full_sections,
     MULTI_FULL_FEEDBACK_INSTRUCTIONS,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
     build_full_input, build_multi_full_input, full_message_sections,
+    full_reply_rejection_code, FULL_FEEDBACK_REJECTION_CODES,
     guarded_multi_message, validate_full_input, validate_full_reply)
 from replay_provider_scenarios import CaptureCache
 import feedback_practice
@@ -590,6 +594,325 @@ class FullFeedbackTests(unittest.TestCase):
             run_feedback(self.evidence, "student", "midpoint",
                          practice_context=self._practice_ctx(pool))
 
+    def _reject_code(self, reply, code):
+        opener = RecordingOpener(reply)
+        generator = self._generator(opener)
+        with self.assertRaises(AittaGenerationError) as caught:
+            generator.generate(self.full_input)
+        self.assertEqual(str(caught.exception), "Aitta request failed")
+        meta = generator.last_metadata
+        self.assertEqual(meta["status"], "failed")
+        self.assertEqual(meta["rejection_code"], code)
+        self.assertEqual(meta["transport"]["stage"], "body_received")
+        self.assertEqual(
+            meta["failure_stage"],
+            "response_contract_or_full_feedback_validation")
+        return generator
+
+    def test_rejection_codes_envelope_and_choices(self):
+        sid = self.selected_id
+        for data, code in (
+                (None, "invalid_choices"),
+                ({}, "invalid_choices"),
+                (dict(wire_reply(candidate_id=sid), choices=[]),
+                 "invalid_choices"),
+                (dict(wire_reply(candidate_id=sid),
+                      choices=[{"finish_reason": "stop"}, {}]),
+                 "invalid_choices"),
+                (dict(wire_reply(candidate_id=sid), choices=[5]),
+                 "invalid_choice"),
+                (wire_reply(candidate_id=sid, finish_reason="length"),
+                 "completion_truncated"),
+                (wire_reply(candidate_id=sid, finish_reason="stop_words"),
+                 "completion_not_stopped"),
+                (wire_reply(candidate_id=sid, finish_reason=None),
+                 "completion_not_stopped"),
+                (wire_reply(candidate_id=sid, content="{not json"),
+                 "invalid_content_json")):
+            with self.subTest(code=code):
+                self._reject_code(data, code)
+        for mutate in (
+                lambda d: d["choices"][0].pop("message"),
+                lambda d: d["choices"][0].update(message=None),
+                lambda d: d["choices"][0].update(message={"content": 42}),
+                lambda d: d["choices"][0]["message"].pop("content")):
+            data = wire_reply(candidate_id=sid)
+            mutate(data)
+            with self.subTest(mutate=mutate):
+                self._reject_code(data, "invalid_message_content")
+        bad_reply = json.dumps({"candidate_id": sid})
+        self._reject_code(
+            wire_reply(content=bad_reply), "invalid_reply_fields")
+        extra_reply = json.dumps(
+            {"candidate_id": sid, "sections": dict(VALID_SECTIONS),
+             "confidence": "high"})
+        self._reject_code(
+            wire_reply(content=extra_reply), "invalid_reply_fields")
+        self._reject_code(
+            wire_reply(candidate_id="someone_else"),
+            "candidate_id_mismatch")
+        missing = dict(VALID_SECTIONS)
+        missing.pop("next_steps")
+        self._reject_code(
+            wire_reply(sections=missing, candidate_id=sid),
+            "invalid_section_fields")
+
+    def test_rejection_codes_per_section(self):
+        room = FULL_FEEDBACK_SECTION_MAX_CHARS
+        bad_values = (
+            (None, "invalid_section_type"),
+            (42, "invalid_section_type"),
+            ("   ", "empty_section"),
+            ("x" * (room + 1), "section_too_long"),
+            ("Invalid control\x01character.", "control_character"),
+            ("Result \u0663 shown.", "numeric_character"),
+            ("Use <b>this</b> tip.", "markup"),
+            ("Continue one step at a time.", "number_word"),
+            ("This follows the plan.", "internal_process_language"))
+        for key in FULL_FEEDBACK_SECTION_KEYS:
+            for value, reason in bad_values:
+                sections = dict(VALID_SECTIONS)
+                sections[key] = value
+                with self.subTest(key=key, reason=reason):
+                    self._reject_code(
+                        wire_reply(sections=sections,
+                                   candidate_id=self.selected_id),
+                        f"{reason}_in_{key}")
+
+    def test_review_focus_scope_overflow_code(self):
+        room = FULL_FEEDBACK_SECTION_MAX_CHARS - len("\n\n" + SCOPE)
+        sections = dict(VALID_SECTIONS)
+        sections["review_focus"] = "x" * room
+        opener = RecordingOpener(
+            wire_reply(sections=sections, candidate_id=self.selected_id))
+        reply = self._generator(opener).generate(self.full_input)
+        self.assertEqual(reply["candidate_id"], self.selected_id)
+        sections["review_focus"] = "x" * (room + 1)
+        self._reject_code(
+            wire_reply(sections=sections, candidate_id=self.selected_id),
+            "review_focus_scope_too_long")
+
+    def test_secret_rejection_codes(self):
+        sid = self.selected_id
+        self._reject_code(
+            wire_reply(candidate_id=sid, model=f"leak-{API_KEY}"),
+            "secret_in_model_metadata")
+        for bad_model in ("", "bad model", 5, "m" * 121):
+            with self.subTest(model=bad_model):
+                self._reject_code(
+                    wire_reply(candidate_id=sid, model=bad_model),
+                    "invalid_model_metadata")
+        key = "syntheticfakesecretkeyvalue"
+        sections = dict(VALID_SECTIONS)
+        sections["observed_strengths"] = f"Please note {key} for review."
+        opener = RecordingOpener(
+            wire_reply(sections=sections, candidate_id=sid))
+        inner = AittaGenerator(key, BASE_URL, model=MODEL, opener=opener)
+        generator = FullFeedbackAittaGenerator(inner)
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(self.full_input)
+        self.assertEqual(generator.last_metadata["rejection_code"],
+                         "secret_in_sections")
+
+    def test_usage_rejection_codes(self):
+        sid = self.selected_id
+        for mutate in (
+                lambda d: d.pop("usage"),
+                lambda d: d.update(usage={}),
+                lambda d: d.update(usage={"prompt_tokens": True,
+                                          "completion_tokens": 20,
+                                          "total_tokens": 30}),
+                lambda d: d.update(usage={"prompt_tokens": -1,
+                                          "completion_tokens": 20,
+                                          "total_tokens": 30}),
+                lambda d: d.update(usage={"prompt_tokens": 10,
+                                          "completion_tokens": 20})):
+            data = wire_reply(candidate_id=sid)
+            mutate(data)
+            with self.subTest(mutate=mutate):
+                self._reject_code(data, "invalid_usage_metadata")
+        data = wire_reply(candidate_id=sid)
+        data["usage"] = {"prompt_tokens": 10, "completion_tokens": 20,
+                         "total_tokens": 99}
+        self._reject_code(data, "usage_total_mismatch")
+
+    def test_decode_and_transport_failure_codes(self):
+        generator = self._generator(BytesOpener(b"\xff\xfe{not utf8"))
+        with self.assertRaises(AittaGenerationError) as caught:
+            generator.generate(self.full_input)
+        self.assertEqual(str(caught.exception), "Aitta request failed")
+        meta = generator.last_metadata
+        self.assertEqual(meta["rejection_code"],
+                         "response_decode_or_size")
+        self.assertEqual(
+            meta["failure_stage"],
+            "response_contract_or_full_feedback_validation")
+        generator = self._generator(
+            RecordingOpener(error=TimeoutError("dial timed out")))
+        with self.assertRaises(AittaGenerationError) as caught:
+            generator.generate(self.full_input)
+        self.assertEqual(str(caught.exception), "Aitta request failed")
+        meta = generator.last_metadata
+        self.assertEqual(meta["rejection_code"], "transport_failure")
+        self.assertEqual(meta["failure_stage"], "open_failed")
+        self.assertNotIn("dial timed out", json.dumps(meta))
+
+    def test_rejection_metadata_never_leaks_sentinels(self):
+        sentinel = "SENTINELSECRETVALUE"
+        cases = [
+            RecordingOpener(wire_reply(
+                candidate_id=self.selected_id,
+                content=json.dumps({"candidate_id": self.selected_id,
+                                    "sections": dict(VALID_SECTIONS),
+                                    sentinel: sentinel}))),
+            RecordingOpener(wire_reply(
+                candidate_id=self.selected_id,
+                content=f"{{broken {sentinel}")),
+            RecordingOpener(error=RuntimeError(
+                f"provider said {sentinel}"))]
+        fixed = {"status", "model_version", "usage", "prompt_version",
+                 "role", "transport", "failure_stage", "rejection_code"}
+        for opener in cases:
+            with self.subTest(opener=opener):
+                generator = self._generator(opener)
+                with self.assertRaises(AittaGenerationError) as caught:
+                    generator.generate(self.full_input)
+                self.assertEqual(str(caught.exception),
+                                 "Aitta request failed")
+                self.assertNotIn(sentinel, str(caught.exception))
+                meta = generator.last_metadata
+                self.assertEqual(set(meta), fixed)
+                self.assertIn(meta["rejection_code"],
+                              FULL_FEEDBACK_REJECTION_CODES)
+                self.assertNotIn(sentinel, json.dumps(meta))
+
+    def test_success_after_failure_clears_rejection_code(self):
+        opener = RecordingOpener(
+            wire_reply(candidate_id="someone_else"))
+        generator = self._generator(opener)
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(self.full_input)
+        self.assertEqual(generator.last_metadata["rejection_code"],
+                         "candidate_id_mismatch")
+        opener.payload = wire_reply(candidate_id=self.selected_id)
+        reply = generator.generate(self.full_input)
+        self.assertEqual(reply["candidate_id"], self.selected_id)
+        meta = generator.last_metadata
+        self.assertEqual(meta["status"], "completed")
+        self.assertNotIn("rejection_code", meta)
+
+    def test_rejection_code_parity_with_validator(self):
+        sid = self.selected_id
+        replies = [
+            None, [], "x", {}, {"candidate_id": sid},
+            {"candidate_id": "other",
+             "sections": dict(VALID_SECTIONS)},
+            {"candidate_id": sid, "sections": None},
+            {"candidate_id": sid,
+             "sections": dict(VALID_SECTIONS, extra="x")},
+            {"candidate_id": sid, "sections": dict(VALID_SECTIONS)},
+        ]
+        for key in FULL_FEEDBACK_SECTION_KEYS:
+            for bad in (None, 5, "   ", "x" * 2001, "bad\x01char",
+                        "value \u0663", "<b>x</b>", "One thing.",
+                        "follows the plan.", "plain valid prose."):
+                sections = dict(VALID_SECTIONS)
+                sections[key] = bad
+                replies.append({"candidate_id": sid,
+                                "sections": sections})
+        room = FULL_FEEDBACK_SECTION_MAX_CHARS - len("\n\n" + SCOPE)
+        for length in (room, room + 1):
+            sections = dict(VALID_SECTIONS)
+            sections["review_focus"] = "x" * length
+            replies.append({"candidate_id": sid,
+                            "sections": sections})
+        for reply in replies:
+            with self.subTest(reply=reply):
+                self.assertEqual(
+                    full_reply_rejection_code(reply, sid) is None,
+                    validate_full_reply(reply, sid) is not None)
+
+    def test_failed_capture_retains_rejection_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), 4)
+            bad = dict(VALID_SECTIONS)
+            bad["next_steps"] = "One quick step."
+            opener = RecordingOpener(
+                wire_reply(sections=bad,
+                           candidate_id=self.selected_id))
+            native = self._generator(opener)
+            cached = CachedFullFeedbackGenerator(
+                native, cache, MODEL, "endpointhash" * 8)
+            with self.assertRaises(RuntimeError):
+                cached.generate(self.full_input)
+            self.assertFalse(cached.execution["reused"])
+            path = next(Path(tmp).glob("aitta_full_*.json"))
+            record = json.loads(path.read_text())
+            self.assertIsNone(record["reply"])
+            self.assertEqual(record["metadata"]["rejection_code"],
+                             "number_word_in_next_steps")
+            self.assertEqual(
+                cached.execution["metadata"]["rejection_code"],
+                "number_word_in_next_steps")
+            with self.assertRaises(RuntimeError):
+                cached.generate(copy.deepcopy(self.full_input))
+            self.assertTrue(cached.execution["reused"])
+            self.assertEqual(
+                cached.execution["metadata"]["rejection_code"],
+                "number_word_in_next_steps")
+            self.assertEqual(len(opener.calls), 1)
+            self.assertEqual(
+                len(list(Path(tmp).glob("aitta_full_*.json"))), 1)
+            record["metadata"].pop("rejection_code")
+            path.write_text(json.dumps(record))
+            with self.assertRaises(RuntimeError):
+                cached.generate(copy.deepcopy(self.full_input))
+            self.assertTrue(cached.execution["reused"])
+            self.assertNotIn("rejection_code",
+                             cached.execution["metadata"])
+
+    def test_thread_local_rejection_codes(self):
+        generator = self._generator(RecordingOpener(
+            wire_reply(candidate_id=self.selected_id)))
+        bad_choices = dict(wire_reply(candidate_id=self.selected_id),
+                           choices=[])
+        truncated = wire_reply(candidate_id=self.selected_id,
+                               finish_reason="length")
+        barrier = threading.Barrier(2)
+        codes = {}
+
+        def worker(name, data):
+            barrier.wait(timeout=10)
+            with self.assertRaises(AittaGenerationError):
+                generator._parse(data, self.selected_id)
+            codes[name] = generator.last_metadata["rejection_code"]
+
+        threads = [threading.Thread(
+            target=worker, args=(name, data))
+            for name, data in (("a", bad_choices), ("b", truncated))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(codes["a"], "invalid_choices")
+        self.assertEqual(codes["b"], "completion_truncated")
+
+
+class BytesResponse(FakeResponse):
+    def __init__(self, raw):
+        self._payload = raw
+        self.closed = False
+
+
+class BytesOpener:
+    def __init__(self, raw):
+        self.raw = raw
+        self.calls = []
+
+    def open(self, request, timeout=None):
+        self.calls.append(request)
+        return BytesResponse(self.raw)
+
 
 class MultiFullFeedbackTests(unittest.TestCase):
     def setUp(self):
@@ -856,6 +1179,69 @@ class MultiFullFeedbackTests(unittest.TestCase):
         self.assertNotIn("separate practice", texts["next_steps"])
         self.assertEqual(
             message["text"].count(SCOPE), 1)
+
+    def test_provider_full_narrative_accepts_only_valid_bundle(self):
+        from evidence_feedback import validate_evidence
+        safe = validate_evidence(self.evidence)
+        originals = self.bundle["review_candidates"]
+
+        def narrative(**overrides):
+            texts = {key: f"Draft {key} narrative for educator review."
+                     for key in FULL_FEEDBACK_SECTION_KEYS}
+            texts.update(overrides)
+            return [{"kind": key, "title": title, "text": texts[key]}
+                    for key, title in zip(FULL_FEEDBACK_SECTION_KEYS,
+                                          FULL_FEEDBACK_SECTION_TITLES)]
+
+        valid = narrative()
+        checked = _provider_full_sections(valid)
+        self.assertEqual(
+            set(checked), set(FULL_FEEDBACK_SECTION_KEYS))
+        message = guarded_multi_message(
+            safe, originals, practice_contexts=self.slots,
+            generated_sections=valid, provider_full_narrative=True)
+        self.assertEqual(message["guardrails_version"],
+                         PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION)
+        self.assertTrue(all(
+            source == "provider"
+            for source in message["section_sources"].values()))
+        texts = {s["kind"]: s["text"] for s in message["sections"]}
+        self.assertEqual(message["text"].count(SCOPE), 1)
+        self.assertTrue(texts["review_focus"].endswith(SCOPE))
+        self.assertNotIn("separate practice", texts["next_steps"])
+
+        partial = valid[:-1]
+        out_of_order = list(reversed(valid))
+        duplicated = copy.deepcopy(valid)
+        duplicated[1] = dict(duplicated[0])
+        wrong_kind = narrative()
+        wrong_kind[0]["kind"] = "forged"
+        bad_text = narrative(
+            review_focus="Review 3 incorrect answers now")
+        missing_title = narrative()
+        del missing_title[2]["title"]
+        # A provider-supplied scope notice is stripped and the canonical
+        # application scope is appended exactly once instead.
+        scoped = narrative(
+            observed_strengths="Strengths.\n\n" + SCOPE)
+        scoped_message = guarded_multi_message(
+            safe, originals, practice_contexts=self.slots,
+            generated_sections=scoped, provider_full_narrative=True)
+        self.assertEqual(scoped_message["guardrails_version"],
+                         PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION)
+        self.assertEqual(scoped_message["text"].count(SCOPE), 1)
+        for bad in (None, "text", [], partial, out_of_order, duplicated,
+                    wrong_kind, bad_text, missing_title):
+            self.assertIsNone(_provider_full_sections(bad), repr(bad))
+            fallback = guarded_multi_message(
+                safe, originals, practice_contexts=self.slots,
+                generated_sections=bad, provider_full_narrative=True)
+            self.assertEqual(fallback["guardrails_version"],
+                             MULTI_FEEDBACK_GUARDRAILS_VERSION, repr(bad))
+            self.assertTrue(all(
+                source == "application"
+                for source in fallback["section_sources"].values()),
+                repr(bad))
 
     def test_guarded_grounded_unavailable_examples(self):
         from evidence_feedback import validate_evidence

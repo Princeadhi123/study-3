@@ -394,6 +394,106 @@ _SOLUTION_HANDLERS = {
     "percent_find_rate": _percent_rate_solution}
 
 
+GENERIC_SOCRATIC_PROMPT = (
+    "How did you approach this question? Explain the steps you tried to your teacher.")
+
+PRE_REVEAL_SCAFFOLDS = {
+    "percentage_amount": (
+        "What is the whole amount, and what does the stated percentage mean? How would you use those ideas to find the requested amount?",
+        "Identify the whole amount and the stated percentage.",
+        "Percent means out of one hundred. How could you write the percentage as a fraction and apply it to the whole?"),
+    "combine_like_terms": (
+        "What do the terms have in common, and how would you use that to simplify the expression?",
+        "Look separately at the number multiplying each variable and at the variable part.",
+        "Only matching variable parts can be collected. How would you combine their signed coefficients while keeping the variable part?"),
+    "retain_unlike_terms": (
+        "How would you decide whether these terms can be combined?",
+        "Compare the variable parts of the terms; a constant has no variable part.",
+        "Compare both the letters and any powers on the letters. What would have to be true for the terms to represent the same kind of quantity?"),
+    "divisibility": (
+        "How would you check whether an offered number divides the given whole number exactly?",
+        "Consider each offered number as a possible divisor.",
+        "Use division or multiplication to check for a whole-number multiple with no remainder."),
+    "prime_recognition": (
+        "What makes a number prime, and how would you check the offered numbers?",
+        "Think about the positive divisors of each offered number.",
+        "A prime number is greater than one and has exactly two positive divisors. Which divisor checks would help you decide?"),
+    "fraction_of_quantity": (
+        "What is the whole quantity, and how does the requested fraction describe a part of it?",
+        "Identify the whole quantity and the fraction requested by the wording.",
+        "Connect the fraction to equal parts of the whole. Which calculation would give the requested number of those parts?"),
+    "fraction_product": (
+        "How would you use the numerators and denominators to work out this product?",
+        "Identify the numerator and denominator of each fraction.",
+        "Consider what happens to the numerator and denominator when fractions are multiplied, then check whether the result can be simplified."),
+    "fraction_times_integer": (
+        "How could you represent the whole number so that you can multiply it by the fraction?",
+        "Identify the fraction and the whole-number multiplier.",
+        "Represent the whole number as a fraction with denominator one. How does that help you use fraction multiplication?"),
+    "fractions_divide_whole": (
+        "What does dividing this fraction by the whole number mean, and how could you represent the calculation?",
+        "Identify the fraction being divided and the whole-number divisor.",
+        "Think about multiplication by the reciprocal of the divisor. How could you check your result by multiplication?"),
+    "fractions_add_same_denominator": (
+        "What does the shared denominator tell you about the parts being added?",
+        "Compare the denominators and identify the size of the parts.",
+        "When the part sizes match, think about how to combine the number of parts without changing their size."),
+    "fractions_add_different_denominators": (
+        "How could you express these fractions using parts of the same size before adding them?",
+        "Compare the denominators and look for a common denominator.",
+        "Rewrite each fraction as an equivalent fraction with that denominator, then think about combining the numerators."),
+    "fractions_compare": (
+        "How could you compare the sizes of these fractions rather than just their numerators?",
+        "Think about a number line or a common denominator.",
+        "Express the fractions with equal-sized parts, then compare how many of those parts each fraction contains."),
+    "arithmetic_order_of_operations": (
+        "Which operation would you carry out first, and what rule supports that choice?",
+        "Look for brackets and identify the operations in the expression.",
+        "Consider brackets first, then multiplication and division from left to right, then addition and subtraction from left to right."),
+    "arithmetic_division_by_ten": (
+        "How would dividing by ten affect the place value of each digit?",
+        "Identify each digit's place value before calculating.",
+        "Use a place-value table to track the change, then consider how multiplying back by ten could check your result."),
+    "price_subtraction": (
+        "How would you arrange these prices before finding their difference?",
+        "Check that the prices use the same currency unit.",
+        "Align the decimal places and subtract corresponding place values. How could addition check the difference?"),
+    "price_unit_price": (
+        "What quantity does the total price cover, and how would you find the price of a single unit?",
+        "Identify the total price and the quantity it pays for.",
+        "Think about dividing the total price by the quantity. What unit should your result have?"),
+    "price_proportional_cost": (
+        "How could you use the price of a single unit to find the cost of the requested quantity?",
+        "Identify the quantity and cost that are already given.",
+        "Find the price of a single unit, then consider how to scale it to the requested quantity."),
+    "percent_find_whole": (
+        "Which quantity is the part, and which whole amount are you trying to find?",
+        "Identify the known part and the percentage it represents.",
+        "Express the percentage as a decimal and think about reversing the multiplication that would produce the part."),
+    "percent_as_multiplier": (
+        "How could you represent the percentage as a multiplier?",
+        "Recall what percent means in relation to one hundred.",
+        "Consider dividing the percentage by one hundred to express the same proportion as a decimal."),
+    "percent_find_rate": (
+        "Which numbers are the part and the whole, and how would you express their relationship as a percentage?",
+        "Identify the part and the whole before choosing an operation.",
+        "Form the part-to-whole ratio, then consider how to express that ratio out of one hundred."),
+}
+PRE_REVEAL_ALIASES = {
+    "percent_of_number": "percentage_amount",
+    "fractions_multiply": "fraction_product",
+    "fractions_multiply_whole": "fraction_times_integer",
+}
+
+
+def pre_reveal_scaffold(subtopic_id):
+    key = PRE_REVEAL_ALIASES.get(subtopic_id, subtopic_id)
+    wording = PRE_REVEAL_SCAFFOLDS.get(key)
+    if wording is None:
+        return {"socratic_prompt": GENERIC_SOCRATIC_PROMPT, "progressive_hints": []}
+    return {"socratic_prompt": wording[0], "progressive_hints": list(wording[1:])}
+
+
 def solution(question, subtopic_id):
     stem = normalize(question["text"])
     correct = question["options"][question["answer_index"]]

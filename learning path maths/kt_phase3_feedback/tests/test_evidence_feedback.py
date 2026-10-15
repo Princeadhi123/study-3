@@ -9,10 +9,12 @@ import json
 import unittest
 
 import evidence_feedback
+import feedback_practice
 import research_content_catalog as catalog
 from evidence_feedback import (
     EVIDENCE_SCHEMA, build_evidence, compose_midpoint_message,
-    run_feedback, selection_payload, validate_evidence)
+    run_feedback, run_multi_feedback, select_review_bundle,
+    selection_payload, validate_evidence)
 from evidence_feedback_policy import (
     GENERATION_SCHEMA, MIDPOINT_TEXT, POLICY_VERSION, PRACTICE_ACTIONS,
     REVIEW_STATUS, SELECTION_PROMPT_VERSION, SELECTION_SCHEMA)
@@ -862,8 +864,9 @@ class MidpointMessageTests(unittest.TestCase):
             self.assertNotIn(name, message["text"])
 
     def test_rejects_end_and_invalid_evidence(self):
+        end = end_evidence()
         with self.assertRaises(ValueError):
-            compose_midpoint_message(end_evidence())
+            compose_midpoint_message(end)
         with self.assertRaises(ValueError):
             compose_midpoint_message({})
         mutated = mid_evidence()
@@ -1382,6 +1385,124 @@ class MultiBundleTests(unittest.TestCase):
                          "You completed this assessment.")
         self.assertNotEqual(texts["review_focus"],
                             "Areas are offered for review.")
+
+
+class _ExitSelector:
+    def __init__(self):
+        self.calls = 0
+
+    def select(self, payload):
+        self.calls += 1
+        raise SystemExit(
+            "new-call budget exhausted; captures retained for resume")
+
+
+class _InterruptSelector:
+    def select(self, payload):
+        raise KeyboardInterrupt
+
+
+class _ExitGenerator:
+    supports_full_feedback = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, payload):
+        self.calls += 1
+        raise SystemExit("new-call budget exhausted")
+
+
+class _InterruptGenerator:
+    supports_full_feedback = True
+
+    def generate(self, payload):
+        raise KeyboardInterrupt
+
+
+class SystemExitBoundaryTests(unittest.TestCase):
+    """Budget-exhaustion SystemExit is a recorded fallback; other
+    BaseExceptions (KeyboardInterrupt) propagate unchanged."""
+
+    def _multi_evidence(self):
+        # Errors across three subtopics in two skills keep more than one
+        # permitted bundle so the selector seam is actually invoked.
+        bank = make_bank()
+        sA = [q["question_id"] for q in bank["questions"]
+              if q["skill_id"] == "sA"]
+        sB = [q["question_id"] for q in bank["questions"]
+              if q["skill_id"] == "sB"]
+        taxonomy = split_taxonomy(bank, sA[:5])
+        pos = {q["question_id"]: i
+               for i, q in enumerate(bank["questions"])}
+        return end_evidence({pos[sA[0]], pos[sA[5]], pos[sB[0]]},
+                            bank, taxonomy)
+
+    def _multi_slots(self, evidence):
+        from evidence_feedback_policy import build_review_bundles
+        focused = [c for c in build_review_bundles(evidence)[0]
+                   ["review_candidates"] if c["focus"] is not None]
+        return [feedback_practice.empty_context("abstained")
+                for _ in focused]
+
+    def test_selector_system_exit_records_fallback_and_skips_generator(
+            self):
+        evidence = self._multi_evidence()
+        pristine = copy.deepcopy(evidence)
+        selector = _ExitSelector()
+        selection = select_review_bundle(evidence, selector)
+        self.assertEqual(selector.calls, 1)
+        self.assertEqual(selection["trace"]["fallback_reason"],
+                         "demo_call_budget_exhausted")
+        self.assertTrue(selection["trace"]["selector_failed"])
+        generator = RecordingGenerator()
+        review = run_multi_feedback(
+            evidence, selector=selector, generator=generator,
+            practice_contexts=self._multi_slots(evidence))
+        self.assertEqual(generator.payloads, [])
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "demo_call_budget_exhausted")
+        self.assertEqual(review["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertNotIn("budget exhausted",
+                         json.dumps(review["message"]))
+        self.assertEqual(evidence, pristine)
+
+    def test_generator_system_exit_records_deterministic_fallback(self):
+        evidence = self._multi_evidence()
+        pristine = copy.deepcopy(evidence)
+        review = run_feedback(evidence, "student", "end",
+                              generator=_ExitGenerator())
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "generator_error")
+        self.assertEqual(review["trace"]["phrasing_source"],
+                         "deterministic")
+        self.assertNotIn("budget exhausted", json.dumps(review))
+        multi = run_multi_feedback(
+            evidence, generator=_ExitGenerator(),
+            practice_contexts=self._multi_slots(evidence))
+        self.assertEqual(multi["trace"]["fallback_reason"],
+                         "generator_error")
+        self.assertEqual(multi["message"], multi["template_baseline"])
+        self.assertNotIn("budget exhausted",
+                         json.dumps(multi["message"]))
+        self.assertEqual(evidence, pristine)
+
+    def test_keyboard_interrupt_propagates_from_all_callback_seams(self):
+        evidence = self._multi_evidence()
+        slots = self._multi_slots(evidence)
+        selector = _InterruptSelector()
+        single_generator = _InterruptGenerator()
+        multi_generator = _InterruptGenerator()
+        with self.assertRaises(KeyboardInterrupt):
+            select_review_bundle(evidence, selector)
+        with self.assertRaises(KeyboardInterrupt):
+            run_feedback(evidence, "student", "end",
+                         generator=single_generator)
+        with self.assertRaises(KeyboardInterrupt):
+            run_multi_feedback(evidence,
+                               generator=multi_generator,
+                               practice_contexts=slots)
 
 
 if __name__ == "__main__":

@@ -737,7 +737,9 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
                 ("POST", "/api/teacher/comparisons", {}),
                 ("GET", "/api/teacher/comparisons/" + "a" * 32, None),
                 ("GET", "/api/teacher/comparisons/" + "a" * 32 + "/export", None),
-                ("POST", "/api/teacher/comparisons/" + "a" * 32 + "/reviews", {})):
+                ("GET", "/api/teacher/comparisons/" + "a" * 32 + "/delete", None),
+                ("POST", "/api/teacher/comparisons/" + "a" * 32 + "/reviews", {}),
+                ("POST", "/api/teacher/comparisons/" + "a" * 32 + "/delete", {})):
             status, _, _ = self.request(method, path, body,
                                         headers={"X-Phase3-Role": "researcher"})
             self.assertEqual(status, 403, path)
@@ -764,6 +766,8 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
                 ("POST", f"/api/teacher/scenarios/{sid}", {}),
                 ("POST", f"/api/teacher/comparisons/{sid}", {}),
                 ("GET", f"/api/teacher/comparisons/{sid}/reviews", None),
+                ("GET", f"/api/teacher/comparisons/{sid}/delete", None),
+                ("POST", f"/api/teacher/comparisons/{sid}/export", {}),
                 ("POST", f"/api/teacher/sessions/{sid}/export", {}),
                 ("GET", f"/api/teacher/sessions/{sid}/reviews", None)):
             status, _, _ = self.request(method, path, body,
@@ -807,6 +811,62 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
         self.assertNotIn(cookie, json.dumps(exported))
         status, _, _ = self.request("GET", "/comparisons/" + view["id"] + ".json")
         self.assertEqual(status, 404)
+
+    def test_comparison_delete_over_http(self):
+        _, _, meta = self.unlock()
+        cookie = self.cookie_from(meta)
+        headers = {"Cookie": f"demo_teacher={cookie}"}
+
+        def start(label):
+            status, view, _ = self.request(
+                "POST", "/api/teacher/comparisons",
+                {"reviewer_label": label, "audience": "student",
+                 "prior_exposure": False}, headers)
+            self.assertEqual(status, 201)
+            return view
+
+        target, keeper = start("delete-me"), start("keeper")
+        path = "/api/teacher/comparisons/" + target["id"]
+        status, _, _ = self.request(
+            "POST", path + "/reviews", judgment(target["task"]), headers)
+        self.assertEqual(status, 201)
+        status, _, _ = self.request("GET", path + "/delete", headers=headers)
+        self.assertEqual(status, 404)
+        for body in ({"id": target["id"]}, ["not", "an", "object"], "text"):
+            status, _, _ = self.request("POST", path + "/delete", body, headers)
+            self.assertEqual(status, 400, body)
+        status, view, _ = self.teacher_get(path, cookie)
+        self.assertEqual(status, 200)
+        status, _, _ = self.request(
+            "POST", path + "/delete", {},
+            {**headers, "Origin": "http://foreign.example"})
+        self.assertEqual(status, 403)
+        status, view, _ = self.teacher_get(path, cookie)
+        self.assertEqual(status, 200)
+        status, result, meta = self.request(
+            "POST", path + "/delete", {}, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"id": target["id"], "deleted": True})
+        self.assertEqual(meta["Cache-Control"], "no-store")
+        status, listing, _ = self.teacher_get("/api/teacher/comparisons", cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual([row["id"] for row in listing["comparisons"]],
+                         [keeper["id"]])
+        status, _, _ = self.teacher_get(path, cookie)
+        self.assertEqual(status, 404)
+        status, _, _ = self.teacher_get(path + "/export", cookie)
+        self.assertEqual(status, 404)
+        status, _, _ = self.request("POST", path + "/delete", {}, headers)
+        self.assertEqual(status, 404)
+        for malformed in ("not-hex", "a" * 31):
+            status, _, _ = self.request(
+                "POST", f"/api/teacher/comparisons/{malformed}/delete",
+                {}, headers)
+            self.assertEqual(status, 404, malformed)
+        status, view, _ = self.teacher_get(
+            "/api/teacher/comparisons/" + keeper["id"], cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(view["completed"], 0)
 
     def test_replay_api_submission_export_and_archived_detail(self):
         source, report, _ = replay_fixture(Path(self.tmp.name), self.bank, self.service.taxonomy)
@@ -1044,7 +1104,7 @@ class MultiModeAPITests(ApiClientMixin, unittest.TestCase):
         self.assertEqual(delivery["review_mode"], "aligned_two_topic")
         preview = delivery["preview"]
         self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v8")
+                         "phase3_student_feedback_template_v9")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(

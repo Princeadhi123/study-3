@@ -17,9 +17,28 @@ from demo_service import DemoService
 from research_runtime import load_research_bank
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace
 from tests.helpers import make_bank, make_taxonomy, responses
-from tests.test_demo_service import fake_diagnostics, wait_for
+from tests.test_assessment_worked_review import (
+    make_grounded_bank, make_grounded_taxonomy)
+from tests.test_demo_service import (
+    GatedDiagnostics, fake_diagnostics, wait_for)
+from tests.test_feedback_variant import (
+    WORKED_SECTIONS, FullStubGenerator)
+from tests.test_research_workspace import judgment
 from tests.test_scenario_replays import replay_fixture
 from warm_scenarios import write_capture
+
+
+class GatedFullStubGenerator(FullStubGenerator):
+    """FullStubGenerator whose generate() parks on an Event so tests can
+    hold the provider job in a non-terminal state deterministically."""
+
+    def __init__(self, gate, **kwargs):
+        super().__init__(**kwargs)
+        self.gate = gate
+
+    def generate(self, payload):
+        self.gate.wait(timeout=30)
+        return super().generate(payload)
 
 
 class Browser:
@@ -418,6 +437,104 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('your teacher is reviewing your feedback')"))
         self.assertFalse(b.js("document.querySelector('#end-summary').textContent.includes('Observed result')"))
+        self.assertEqual(b.errors, [])
+
+    def test_saved_comparison_delete_confirmation_flow(self):
+        research = self.service.research
+        target = research.create_comparison({
+            "reviewer_label": "Reviewer 1", "audience": "student",
+            "prior_exposure": False})
+        keeper = research.create_comparison({
+            "reviewer_label": "keeper", "audience": "student",
+            "prior_exposure": False})
+        research.add_judgment(target["id"], judgment(target["task"]))
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=comparison]').click()")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 2")
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.saved-comparison button'))"))
+        delete_button = (
+            "[...document.querySelectorAll('.saved-comparison-row')]"
+            ".find((r) => r.textContent.includes('Reviewer 1'))"
+            ".querySelector('.delete-comparison')")
+        self.assertEqual(
+            b.js(f"{delete_button}.getAttribute('aria-label')"),
+            "Delete saved review for Reviewer 1")
+        b.js(f"{delete_button}.click()")
+        b.wait("document.querySelector('.delete-comparison-dialog[open]')")
+        dialog = "document.querySelector('.delete-comparison-dialog')"
+        self.assertFalse(b.js("Boolean(document.querySelector('.judgment-form'))"))
+        self.assertTrue(b.js(
+            f"{dialog}.textContent.includes('Delete saved review?')"))
+        self.assertTrue(b.js(
+            f"{dialog}.textContent.includes('Reviewer 1 · student drafts · 1/4')"))
+        self.assertTrue(b.js(
+            f"{dialog}.textContent.includes('permanently deletes this blind review')"))
+        self.assertEqual(b.js("document.activeElement.textContent"), "Cancel")
+        b.screenshot("delete-comparison-dialog.png")
+        b.js(f"{dialog}.querySelector('.replay-toolbar .ghost').click()")
+        b.wait("!document.querySelector('.delete-comparison-dialog[open]')")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 2")
+        b.js(f"{delete_button}.click()")
+        b.wait("document.querySelector('.delete-comparison-dialog[open]')")
+        for kind in ("keyDown", "keyUp"):
+            b.command("Input.dispatchKeyEvent", {
+                "type": kind, "key": "Escape", "code": "Escape",
+                "windowsVirtualKeyCode": 27})
+        b.wait("!document.querySelector('.delete-comparison-dialog[open]')")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 2")
+        b.js("window.__savedFetch = window.fetch; window.fetch = (url, init) => "
+             "String(url).includes('/delete') ? Promise.resolve(new Response("
+             "'{\"error\":\"stub\"}', {status: 500, headers: "
+             "{'Content-Type': 'application/json'}})) : "
+             "window.__savedFetch(url, init)")
+        b.js(f"{delete_button}.click()")
+        b.wait("document.querySelector('.delete-comparison-dialog[open]')")
+        b.js(f"{dialog}.querySelector('.danger').click()")
+        b.wait(f"Boolean({dialog}.querySelector('[role=alert]')"
+               " && !document.querySelector('.delete-comparison-dialog "
+               "[role=alert]').hidden)")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 2")
+        self.assertEqual(research.comparison(target["id"])["completed"], 1)
+        b.js("window.fetch = window.__savedFetch")
+        b.js(f"{dialog}.querySelector('.danger').click()")
+        b.wait("!document.querySelector('.delete-comparison-dialog[open]')")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 1")
+        b.wait("document.querySelector('#comparison-pane [role=status]')"
+               ".textContent.includes('Deleted saved review for Reviewer 1')")
+        self.assertFalse(b.js(
+            "Boolean([...document.querySelectorAll('.saved-comparison')]"
+            ".some((n) => n.textContent.includes('Reviewer 1')))"))
+        self.assertTrue(b.js(
+            "document.querySelector('#comparison-pane')"
+            ".textContent.includes('keeper')"))
+        with self.assertRaises(FileNotFoundError):
+            research.comparison(target["id"])
+        b.js("document.querySelector('.saved-comparison').click()")
+        b.wait("document.querySelector('.judgment-form')")
+        b.js("[...document.querySelectorAll('#comparison-pane button')]"
+             ".find((n) => n.textContent === 'All reviews').click()")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 1")
+        self.navigate("/teacher")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=comparison]').click()")
+        b.wait("document.querySelectorAll('.saved-comparison').length === 1")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.screenshot("saved-reviews-mobile.png")
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('.delete-comparison').click()")
+        b.wait("document.querySelector('.delete-comparison-dialog[open]')")
+        b.js("document.querySelector('.delete-comparison-dialog "
+             ".danger').click()")
+        b.wait("!document.querySelector('.delete-comparison-dialog[open]')")
+        b.wait("document.querySelector('#comparison-pane')"
+               ".textContent.includes('No reviews yet')")
+        self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
     def test_student_midpoint_checkin_pause_and_continue(self):
@@ -2032,6 +2149,405 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertIn("pending formal educator review", b.js("document.querySelector('#tab-graph').textContent"))
         self.assertNotIn("conformal", b.js("document.body.textContent").lower())
         self.assert_no_overflow()
+        self.assertEqual(b.errors, [])
+
+    def test_replay_feedback_variant_flow(self):
+        # Aligned mode is required for the worked-first variant; rules
+        # mode keeps the whole flow local with no provider calls.
+        self.service.close(wait=True)
+        bank = make_bank()
+        self.service = DemoService(
+            root=self.root / "aligned_data", bank=bank,
+            taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+
+        def replay_case(variant, hosted=False):
+            known = {r["id"] for r in self.service.replays.list()["runs"]}
+            b.js("document.querySelector('.scenario-row').click()")
+            b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+            b.js("document.querySelector('#replay-selected').click()")
+            b.wait("document.querySelector('dialog[open]')")
+            b.js(f"document.querySelector('#replay-feedback-variant').value={json.dumps(variant)}")
+            if variant == "worked_first":
+                b.js("document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+                self.assertIn("educator review is required",
+                              b.js("document.querySelector('.replay-dialog').textContent"))
+            if hosted:
+                b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+                     "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));"
+                     "document.querySelector('#replay-hosted-consent').click()")
+            b.js("document.querySelector('#confirm-replay').click()")
+            b.wait("!document.querySelector('dialog[open]')")
+            self.assertTrue(wait_for(
+                lambda: any(r["id"] not in known
+                            and r["feedback_variant"] == variant
+                            for r in self.service.replays.list()["runs"])),
+                "new replay run was not admitted")
+            run = next(r for r in self.service.replays.list()["runs"]
+                       if r["id"] not in known)
+            self.assertTrue(wait_for(
+                lambda: self.service.replays.get(run["id"])["status"]
+                == "complete"),
+                f"replay run {run['id']} did not complete")
+            run = self.service.replays.get(run["id"])
+            b.wait(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] > summary')"
+                   ".textContent.includes('Complete')")
+            return run
+
+        first = replay_case("worked_first")
+        self.assertEqual(first["feedback_variant"], "worked_first")
+        sid_w = first["cases"][0]["session_id"]
+        self.assertEqual(
+            self.service._load_meta(sid_w)["feedback_variant"],
+            "worked_first")
+        b.wait("[...document.querySelectorAll('#scenario-version option')].some((o) => o.textContent.includes('Worked-first'))")
+        self.assertIn("Worked-first", b.js(
+            f"document.querySelector('.run-record[data-run-id=\"{first['id']}\"] > summary').textContent"))
+        view = self.service.replays.result(
+            first["id"], first["cases"][0]["scenario_id"])
+        self.assertEqual(view["feedback_variant"], "worked_first")
+        self.assertEqual(
+            view["feedback_delivery"]["preview"]["template_version"],
+            "phase3_student_feedback_worked_first_full_v1")
+        # Rules-only worked-first records deterministic wording; the UI
+        # must not imply an Aitta narrative ran.
+        b.js(f"document.querySelector('#scenario-version').value={json.dumps(first['id'])};"
+             "document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        detail_text = b.js(
+            "document.querySelector('#scenario-ws-detail').textContent")
+        self.assertIn("Worked-first", detail_text)
+        self.assertNotIn("shape-checked, not fact-verified", detail_text)
+
+        second = replay_case("question_first")
+        self.assertEqual(second["feedback_variant"], "question_first")
+        sid_q = second["cases"][0]["session_id"]
+        self.assertNotEqual(sid_q, sid_w)
+        self.assertEqual(
+            self.service._load_meta(sid_q)["feedback_variant"],
+            "question_first")
+        b.wait("[...document.querySelectorAll('#scenario-version option')].some((o) => o.textContent.includes('Question-first'))")
+        self.assert_no_overflow()
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        self.assertEqual(b.errors, [])
+
+    def test_replay_dialog_disables_worked_first_in_legacy(self):
+        # The default setUp service runs legacy_single mode; the
+        # worked-first variant is aligned-only and must not be offered.
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        self.assertTrue(b.js(
+            "document.querySelector('#replay-feedback-variant')"
+            ".options[1].disabled"))
+        self.assertEqual(
+            "question_first",
+            b.js("document.querySelector('#replay-feedback-variant')"
+                 ".value"))
+        b.js("document.querySelector('dialog[open]').close()")
+        self.assertEqual(b.errors, [])
+
+    def test_replay_worked_first_stub_narrative_flow(self):
+        # Hosted mode with an injected full-feedback stub exercises the
+        # four-section provider narrative path with no network calls.
+        self.service.close(wait=True)
+        fixture_root = self.root / "grounded_fixture"
+        fixture_root.mkdir()
+        bank = make_grounded_bank()
+        source, report, _ = replay_fixture(
+            fixture_root, bank, make_grounded_taxonomy(bank), count=4)
+        generator = FullStubGenerator()
+        self.service = DemoService(
+            root=self.root / "hosted_data", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            diagnostics=fake_diagnostics(bank),
+            replay_report=report, replay_source=source,
+            provider_mode="hosted", generator=generator)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+
+        # Scenario index 1 is all-incorrect, producing ready worked cards.
+        known = {r["id"] for r in self.service.replays.list()["runs"]}
+        b.js("document.querySelectorAll('.scenario-row')[1].click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.screenshot("replay_dialog_desktop.png")
+        b.viewport(390, 844)
+        b.screenshot("replay_dialog_mobile.png")
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+             "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+        b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+             "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+        b.js("document.querySelector('#replay-hosted-consent').click()")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        self.assertTrue(wait_for(
+            lambda: any(r["id"] not in known
+                        for r in self.service.replays.list()["runs"])),
+            "new replay run was not admitted")
+        run = next(r for r in self.service.replays.list()["runs"]
+                   if r["id"] not in known)
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run["id"])["status"]
+            == "complete"),
+            f"replay run {run['id']} did not complete")
+        run = self.service.replays.get(run["id"])
+        self.assertEqual(run["feedback_variant"], "worked_first")
+        self.assertGreaterEqual(generator.calls, 1)
+        b.wait(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] > summary')"
+               ".textContent.includes('Complete')")
+
+        case = run["cases"][0]
+        view = self.service.replays.result(run["id"], case["scenario_id"])
+        preview = view["feedback_delivery"]["preview"]
+        texts = {s["kind"]: s["text"] for s in preview["sections"]}
+        for kind, text in WORKED_SECTIONS.items():
+            if kind == "review_focus":
+                self.assertTrue(texts[kind].startswith(text))
+            else:
+                self.assertEqual(texts[kind], text)
+        cards = preview["review_examples"]
+        self.assertTrue(cards)
+        self.assertTrue(all(c["status"] == "ready" for c in cards))
+        self.assertTrue(all(c["steps"] for c in cards))
+        before_steps = [c["steps"] for c in cards]
+        before_correct = [c["correct_answer"] for c in cards]
+
+        b.js(f"document.querySelector('#scenario-version').value={json.dumps(run['id'])};"
+             "document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.wait(f"document.querySelector('#scenario-ws-detail').textContent.includes({json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+        detail_text = b.js(
+            "document.querySelector('#scenario-ws-detail').textContent")
+        for text in WORKED_SECTIONS.values():
+            self.assertIn(text.split("\n")[0][:60], detail_text)
+        self.assertIn("shape-checked, not fact-verified", detail_text)
+        for steps in before_steps:
+            self.assertIn(steps[0][:40], detail_text)
+        b.screenshot("worked_first_result_desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.screenshot("worked_first_result_mobile.png")
+        b.viewport(1440, 1100)
+
+        # Application-owned facts stay immutable across release.
+        sid = case["session_id"]
+        released = self.service.release_feedback(
+            sid, {"message_sha256":
+                  view["feedback_delivery"]["preview_sha256"]})
+        self.assertTrue(released["released"])
+        after = self.service.teacher_session(sid)
+        released_preview = after["feedback_delivery"]["released_feedback"]
+        self.assertEqual([c["steps"] for c in
+                          released_preview["review_examples"]],
+                         before_steps)
+        self.assertEqual([c["correct_answer"] for c in
+                          released_preview["review_examples"]],
+                         before_correct)
+        self.assertEqual(released_preview["total"], preview["total"])
+        self.assertEqual({s["kind"]: s["text"] for s in
+                          released_preview["sections"]}, texts)
+
+        # Question-first on the same answers stays summary-only.
+        known = {r["id"] for r in self.service.replays.list()["runs"]}
+        b.js("document.querySelectorAll('.scenario-row')[1].click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+             "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+        b.js("document.querySelector('#replay-hosted-consent').click()")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        self.assertTrue(wait_for(
+            lambda: any(r["id"] not in known
+                        for r in self.service.replays.list()["runs"])),
+            "new replay run was not admitted")
+        run_q = next(r for r in self.service.replays.list()["runs"]
+                     if r["id"] not in known)
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run_q["id"])["status"]
+            == "complete"),
+            f"replay run {run_q['id']} did not complete")
+        view_q = self.service.replays.result(
+            run_q["id"], case["scenario_id"])
+        preview_q = view_q["feedback_delivery"]["preview"]
+        self.assertEqual(preview_q["review_presentation_version"],
+                         "question_first_worked_review_v1")
+        qtexts = {s["kind"]: s["text"] for s in preview_q["sections"]}
+        self.assertNotEqual(qtexts["observed_strengths"],
+                            WORKED_SECTIONS["observed_strengths"])
+        review_q = view_q["checkpoints"]["end"]["student_review"]
+        self.assertEqual(
+            review_q["message"]["section_sources"],
+            {"assessment_summary": "provider",
+             "observed_strengths": "application",
+             "review_focus": "application",
+             "next_steps": "application"})
+        self.assertEqual([c["steps"] for c in
+                          preview_q["review_examples"]], before_steps)
+        self.assert_no_overflow()
+        self.assertEqual(b.errors, [])
+
+    def test_replay_progress_refresh_and_stage_notice(self):
+        # A provider-ready replay whose end diagnostics are still
+        # running must show an explicit stage notice, keep refreshing
+        # while the run record itself is unchanged, and transition to
+        # complete automatically once diagnostics finish.
+        self.service.close(wait=True)
+        fixture_root = self.root / "gated_fixture"
+        fixture_root.mkdir()
+        bank = make_grounded_bank()
+        source, report, _ = replay_fixture(
+            fixture_root, bank, make_grounded_taxonomy(bank), count=4)
+        diag_gate = threading.Event()
+        gen_gate = threading.Event()
+        generator = GatedFullStubGenerator(gen_gate)
+        self.service = DemoService(
+            root=self.root / "gated_data", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            diagnostics=GatedDiagnostics(bank, diag_gate),
+            replay_report=report, replay_source=source,
+            provider_mode="hosted", generator=generator)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+
+        def start_worked_first(hosted=True):
+            known = {r["id"] for r in self.service.replays.list()["runs"]}
+            b.js("document.querySelectorAll('.scenario-row')[1].click()")
+            b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+            b.js("document.querySelector('#replay-selected').click()")
+            b.wait("document.querySelector('dialog[open]')")
+            b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+                 "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+            if hosted:
+                b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+                     "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+                b.js("document.querySelector('#replay-hosted-consent').click()")
+            b.js("document.querySelector('#confirm-replay').click()")
+            b.wait("!document.querySelector('dialog[open]')")
+            self.assertTrue(wait_for(
+                lambda: any(r["id"] not in known
+                            for r in self.service.replays.list()["runs"])),
+                "new replay run was not admitted")
+            run = next(r for r in self.service.replays.list()["runs"]
+                       if r["id"] not in known)
+            b.wait(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] .run-case')")
+            return run
+
+        def provider_status(run):
+            sid = run["cases"][0]["session_id"]
+            if not sid:
+                return None
+            try:
+                return self.service._load_meta(sid)["provider_job"]["status"]
+            except FileNotFoundError:
+                return None
+
+        detail = "document.querySelector('#scenario-ws-detail')"
+        notice = ("document.querySelector("
+                  "'#scenario-detail > p[role=\"status\"]')")
+
+        # --- Part A: provider finishes while end diagnostics blocked ---
+        gen_gate.set()
+        run_a = start_worked_first()
+        self.assertTrue(wait_for(
+            lambda: provider_status(run_a) == "ready"),
+            "provider job did not reach ready")
+        self.assertEqual(
+            self.service.replays.get(run_a["id"])["status"], "running")
+        b.js(f"document.querySelector('.run-record[data-run-id=\"{run_a['id']}\"] .run-case').click()")
+        b.wait(f"{detail}.textContent.includes("
+               f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+        b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
+               "diagnostics are still pending. This replay is not complete.')")
+        b.screenshot("worked_first_pending_diagnostics_desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.screenshot("worked_first_pending_diagnostics_mobile.png")
+        b.viewport(1440, 1100)
+
+        # Diagnostics release: the already-selected view must reach the
+        # complete state through normal polling, no re-selection.
+        diag_gate.set()
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run_a["id"])["status"]
+            == "complete"),
+            f"replay run {run_a['id']} did not complete")
+        b.wait(f"{notice}.textContent.includes('Replay is complete')")
+        self.assertTrue(b.js(f"{detail}.textContent.includes("
+                             f"{json.dumps(WORKED_SECTIONS['next_steps'][:60])})"))
+
+        # --- Part B: delayed generator under unchanged run JSON ---
+        gen_gate.clear()
+        diag_gate.clear()
+        run_b = start_worked_first()
+        self.assertTrue(wait_for(lambda: provider_status(run_b) is not None))
+        b.js(f"document.querySelector('.run-record[data-run-id=\"{run_b['id']}\"] .run-case').click()")
+        b.wait(f"{notice}.textContent.includes('Feedback is still being "
+               "prepared; this replay is not complete.')")
+        # No final preview and no stale worked narrative while pending.
+        detail_text = b.js(f"{detail}.textContent")
+        self.assertNotIn(WORKED_SECTIONS["observed_strengths"], detail_text)
+        self.assertNotIn("shape-checked, not fact-verified", detail_text)
+
+        gen_gate.set()
+        # End diagnostics remain blocked, so the run record JSON cannot
+        # change; the running-row refresh path must still pull the new
+        # provider-ready detail automatically.
+        self.assertTrue(wait_for(
+            lambda: provider_status(run_b) == "ready"),
+            "provider job did not reach ready")
+        self.assertEqual(
+            self.service.replays.get(run_b["id"])["status"], "running")
+        b.wait(f"{detail}.textContent.includes("
+               f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
+        b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
+               "diagnostics are still pending. This replay is not complete.')")
+        diag_gate.set()
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run_b["id"])["status"]
+            == "complete"),
+            f"replay run {run_b['id']} did not complete")
+        b.wait(f"{notice}.textContent.includes('Replay is complete')")
+        self.assert_no_overflow()
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.viewport(1440, 1100)
         self.assertEqual(b.errors, [])
 
 

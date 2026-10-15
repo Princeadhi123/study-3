@@ -292,14 +292,15 @@ def compose_midpoint_message(evidence):
             focus = ("In this first set, you had more incorrect "
                      "answers in " + names
                      + " than in the other topics.")
-    sections.append({"kind": "strengths", "title": "What is going well",
-                     "text": strengths})
-    sections.append({"kind": "focus", "title": focus_title,
-                     "text": focus})
-    sections.append({"kind": "next_step", "title": "Before you continue",
-                     "text": "There are 20 questions left. Take a short "
-                             "break if you want, then continue one "
-                             "question at a time."})
+    sections.extend([
+        {"kind": "strengths", "title": "What is going well",
+         "text": strengths},
+        {"kind": "focus", "title": focus_title,
+         "text": focus},
+        {"kind": "next_step", "title": "Before you continue",
+         "text": "There are 20 questions left. Take a short "
+                 "break if you want, then continue one "
+                 "question at a time."}])
     return {"sections": sections,
             "text": "\n\n".join(section["text"] for section in sections),
             "total": {"correct": normalized["total"]["correct"],
@@ -370,7 +371,10 @@ def select_review_bundle(evidence, selector=None):
         callback_payload = copy.deepcopy(payload)
         try:
             reply = selector.select(callback_payload)
-        except SystemExit:
+        # CaptureCache.obtain raises SystemExit when the new-call budget
+        # is exhausted; keep it a recorded fallback. KeyboardInterrupt is
+        # deliberately not caught.
+        except SystemExit:  # NOSONAR python:S5754 - budget-exhaustion boundary
             fallback_reason = "demo_call_budget_exhausted"
             selector_failed = True
         except Exception:
@@ -436,6 +440,14 @@ def _end_message(safe, audience, checkpoint, selected, opening,
     import feedback_practice
     return feedback_practice.contextual_message(
         safe, audience, selected, practice_context, opening)
+
+
+def _feedback_validation_label(full_message, opening):
+    if full_message is not None:
+        return "shape_and_numeric_guardrails_not_semantic_verification"
+    if opening:
+        return "shape_and_heuristic_opening_checks_only"
+    return "deterministic_evidence_and_draft_actions"
 
 
 def run_feedback(evidence, audience, checkpoint, selector=None,
@@ -508,7 +520,10 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
         callback_payload = copy.deepcopy(full_input)
         try:
             reply = generator.generate(callback_payload)
-        except (Exception, SystemExit):
+        # CaptureCache.obtain raises SystemExit when the new-call budget
+        # is exhausted; keep it a recorded generator fallback.
+        # KeyboardInterrupt is deliberately not caught.
+        except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
             fallback_reason = "generator_error"
         else:
             checked = validate_full_reply(reply, selected["candidate_id"])
@@ -542,6 +557,7 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
             else:
                 opening = checked
                 phrasing_source = "injected_generator_opening_only"
+    validation = _feedback_validation_label(full_message, opening)
     return {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
         "audience": audience, "checkpoint": checkpoint,
@@ -565,11 +581,7 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
             "selection_matches_baseline":
                 baseline["candidate_id"] == selected["candidate_id"],
             "generation_prompt_version": generation_prompt_version,
-            "validation": (
-                "shape_and_numeric_guardrails_not_semantic_verification"
-                if full_message is not None
-                else "shape_and_heuristic_opening_checks_only"
-                if opening else "deterministic_evidence_and_draft_actions"),
+            "validation": validation,
             "provider_advantage_demonstrated": False}}
 
 
@@ -590,7 +602,10 @@ def _multi_generated_message(safe, selected, generator,
     callback_payload = copy.deepcopy(full_input)
     try:
         reply = generator.generate(callback_payload)
-    except (Exception, SystemExit):
+    # CaptureCache.obtain raises SystemExit when the new-call budget is
+    # exhausted; keep it a recorded generator fallback. KeyboardInterrupt
+    # is deliberately not caught.
+    except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
         return None, "generator_error", "deterministic", prompt_version
     checked = validate_full_reply(reply, selected["candidate_id"])
     if callback_payload != full_input or checked is None:
@@ -604,7 +619,7 @@ def _multi_generated_message(safe, selected, generator,
 
 def _guarded_review_message(safe, originals, examples,
                             assessment_context, practice_contexts,
-                            full_message):
+                            full_message, provider_full_narrative=False):
     from full_feedback import guarded_multi_message
     return guarded_multi_message(
         safe, originals,
@@ -612,12 +627,26 @@ def _guarded_review_message(safe, originals, examples,
                          if assessment_context is not None else None),
         practice_contexts=practice_contexts,
         generated_sections=(full_message["sections"]
-                            if full_message is not None else None))
+                            if full_message is not None else None),
+        provider_full_narrative=provider_full_narrative)
+
+
+def _multi_feedback_validation_label(message, full_message):
+    from full_feedback import PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION
+    if (message["guardrails_version"]
+            == PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION):
+        return ("provider_full_narrative_shape_checks_only_requires_"
+                "educator_review")
+    if full_message is not None:
+        return ("application_owned_facts_and_actions_provider_summary_"
+                "shape_checked")
+    return "deterministic_evidence_and_draft_actions"
 
 
 def run_multi_feedback(evidence, selection=None, selector=None,
                        generator=None, practice_contexts=None,
-                       assessment_context=None):
+                       assessment_context=None,
+                       provider_full_narrative=False):
     from full_feedback import guarded_multi_message
     from assessment_worked_review import (
         ASSESSMENT_WORKED_REVIEW_VERSION,
@@ -636,7 +665,6 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         safe, originals, assessment_context)
     plans = [copy.deepcopy(build_feedback_plan(c)) for c in originals]
     sel_trace = selection["trace"]
-    fallback_reason = sel_trace["fallback_reason"]
     full_message, fallback_reason, phrasing_source, \
         generation_prompt_version = _multi_generated_message(
             safe, selected, generator, sel_trace,
@@ -654,7 +682,8 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         template_baseline = deterministic(bundles[0]["review_candidates"])
     message = _guarded_review_message(
         safe, originals, examples, assessment_context,
-        practice_contexts, full_message)
+        practice_contexts, full_message,
+        provider_full_narrative=provider_full_narrative)
     review = {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
         "audience": "student", "checkpoint": "end",
@@ -680,11 +709,8 @@ def run_multi_feedback(evidence, selection=None, selector=None,
             "selection_matches_baseline":
                 bundles[0]["candidate_id"] == selected["candidate_id"],
             "generation_prompt_version": generation_prompt_version,
-            "validation": (
-                "application_owned_facts_and_actions_provider_"
-                "summary_shape_checked"
-                if full_message is not None
-                else "deterministic_evidence_and_draft_actions"),
+            "validation": _multi_feedback_validation_label(
+                message, full_message),
             "provider_advantage_demonstrated": False}}
     if assessment_context is not None:
         review["review_examples"] = copy.deepcopy(examples)

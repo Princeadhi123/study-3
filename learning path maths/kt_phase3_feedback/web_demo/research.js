@@ -42,6 +42,40 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     return "Configured providers · capture reuse";
   }
 
+  function feedbackVariantLabel(variant) {
+    if (variant === "question_first") return "Question-first";
+    if (variant === "worked_first") return "Worked-first";
+    return "Historical / unspecified";
+  }
+
+  function replayCaseNotice(run, row, response) {
+    const base = `Replay result · ${feedbackVariantLabel(run?.feedback_variant)} · ${statusLabel(row?.status)}. Original results remain unchanged.`;
+    if (!row || (row.status !== "queued" && row.status !== "running")) {
+      if (row?.status === "complete") {
+        return `${base} Replay is complete.`;
+      }
+      return base;
+    }
+    const provider = response?.provider_job?.status || "not_requested";
+    const diagnostics = Object.values(response?.checkpoints || {})
+      .map((checkpoint) => checkpoint?.diagnostics_job?.status)
+      .filter(Boolean);
+    const providerReady = provider === "ready" || provider === "fallback";
+    const diagnosticsPending = diagnostics.some((s) => s === "pending");
+    if (!providerReady) {
+      return `${base} Feedback is still being prepared; this replay is not complete.`;
+    }
+    if (diagnosticsPending) {
+      let message = `${base} Feedback is ready; model diagnostics are still pending. This replay is not complete.`;
+      const generator = response?.provider_job?.executions?.student?.generator;
+      if (generator?.reused === true && generator?.metadata?.status === "completed") {
+        message += " The Aitta response was reused from a successful saved capture.";
+      }
+      return message;
+    }
+    return `${base} Feedback and diagnostics are ready; saving the replay result.`;
+  }
+
   function failure(container, retry) {
     container.replaceChildren(heading("CONNECTION", "This view could not be loaded.",
       "Check the local server. If your access expired, reload and unlock the workspace."),
@@ -265,7 +299,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     versionPicker.append(original);
     runs.filter((run) => run.cases.some((c) => c.scenario_id === chosen)).forEach((run) => {
       const row = run.cases.find((c) => c.scenario_id === chosen);
-      const option = el("option", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)} · ${statusLabel(row.status)}`);
+      const option = el("option", `${new Date(run.created_at).toLocaleString()} · ${feedbackVariantLabel(run.feedback_variant)} · ${replayProviderLabel(run)} · ${statusLabel(row.status)}`);
       option.value = run.id; versionPicker.append(option);
     });
     if (![...versionPicker.options].some((o) => o.value === selectedRun)) selectedRun = "";
@@ -282,7 +316,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     if (displayedVersion !== `${id}|${version}`) viewHost.hidden = true;
     const run = runs.find((r) => r.id === version);
     const row = run?.cases.find((c) => c.scenario_id === id);
-    caseNotice.textContent = version ? `Replay result · ${statusLabel(row?.status)}. Original results remain unchanged.` : "Retained original — read-only. Select a replay result to inspect current behavior and save review notes.";
+    caseNotice.textContent = version ? `Replay result · ${feedbackVariantLabel(run?.feedback_variant)} · ${statusLabel(row?.status)}. Original results remain unchanged.` : "Retained original — read-only. Select a replay result to inspect current behavior and save review notes.";
     if (version && !row?.session_id) {
       viewHost.hidden = true;
       return;
@@ -294,6 +328,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       exposed = true;
       try { sessionStorage.setItem("replay-exposure", "yes"); } catch (err) {}
       scenarioView.update(view);
+      if (version) caseNotice.textContent = replayCaseNotice(run, row, response);
       displayedVersion = `${id}|${version}`;
       viewHost.hidden = false;
     } catch (err) {
@@ -324,6 +359,12 @@ function initResearchWorkspace({mountDetail, getConfig}) {
         renderRuns(payload);
         updateVersions();
         if (chosen && selectedRun) await loadCase(chosen);
+      } else if (chosen && selectedRun) {
+        const row = runs.find((r) => r.id === selectedRun)
+          ?.cases.find((c) => c.scenario_id === chosen);
+        if (row && (row.status === "queued" || row.status === "running")) {
+          await loadCase(chosen);
+        }
       }
     } catch (err) {
       const node = $("#replay-history");
@@ -355,7 +396,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       const activeCount = run.cases.filter((c) => c.status === "running").length;
       const parallelNote = (run.max_parallel && run.max_parallel > 1) ? ` · ${run.max_parallel}x parallel` : "";
       const activeNote = activeCount > 0 ? ` (${activeCount} active)` : "";
-      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${replayProviderLabel(run)}${parallelNote} · ${statusLabel(run.status)}${activeNote} · ${run.completed}/${run.total}`));
+      section.append(el("summary", `${new Date(run.created_at).toLocaleString()} · ${feedbackVariantLabel(run.feedback_variant)} · ${replayProviderLabel(run)}${parallelNote} · ${statusLabel(run.status)}${activeNote} · ${run.completed}/${run.total}`));
       const progress = el("progress"); progress.max = run.total;
       progress.value = run.cases.filter((c) => !["running", "queued"].includes(c.status)).length;
       progress.setAttribute("aria-label", "Replay cases processed");
@@ -413,6 +454,28 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const mode = select([["rules", "Rules only — no hosted calls"], ["hosted", "Use configured hosted providers"]]);
     mode.id = "replay-provider-mode";
     mode.options[1].disabled = getConfig().provider_mode !== "hosted";
+    const variant = select([
+      ["question_first", "Question-first / current version"],
+      ["worked_first", "Worked-first / full Aitta narrative"]]);
+    variant.id = "replay-feedback-variant";
+    variant.options[1].disabled =
+      getConfig().review_mode !== "aligned_two_topic";
+    const variantNote = notice("", "meta small");
+    variantNote.hidden = true;
+    const updateVariantNote = () => {
+      if (variant.value !== "worked_first") {
+        variantNote.hidden = true;
+        return;
+      }
+      variantNote.textContent = "Aitta narrative is shape-checked, " +
+        "not fact-verified; educator review is required." +
+        (mode.value === "rules"
+          ? " Rules only records the worked-first presentation with " +
+            "deterministic wording; no provider narrative runs."
+          : "");
+      variantNote.hidden = false;
+    };
+    variant.addEventListener("change", updateVariantNote);
     const parallel = select([
       ["8", "8 scenarios at a time (parallel)"],
       ["6", "6 scenarios at a time (parallel)"],
@@ -440,13 +503,15 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       const hosted = mode.value === "hosted";
       approval.hidden = !hosted; consent.required = hosted;
       retryApproval.hidden = !hosted; retryNote.hidden = !hosted;
+      updateVariantNote();
     });
     const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit ?? "unlimited"}.`);
     const error = el("p", "", "error"); error.hidden = true; error.setAttribute("role", "alert");
     const start = el("button", "Start replay", "primary"); start.type = "submit"; start.id = "confirm-replay";
     const cancel = button("Cancel", () => closeReplayDialog(dialog));
     const actions = el("div", null, "replay-toolbar"); actions.append(start, cancel);
-    form.append(title, explanation, field("Feedback execution", mode), parallelField, approval, retryApproval, retryNote,
+    form.append(title, explanation, field("Feedback execution", mode),
+      field("Feedback variant", variant), variantNote, parallelField, approval, retryApproval, retryNote,
       notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the active wave finishes.", "meta small"), error, actions);
     dialog.append(form); document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
@@ -457,6 +522,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       try {
         const body = {request_id: requestId,
           report_sha256: library.report_sha256, scenario_ids: selectedIds, provider_mode: mode.value,
+          feedback_variant: variant.value,
           allow_provider_calls: mode.value === "hosted" && consent.checked,
           retry_failed_provider_calls: mode.value === "hosted" && retry.checked,
           max_parallel: Number(parallel.value)};
@@ -473,7 +539,56 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     dialog.showModal();
   }
 
-  async function loadComparisons() {
+  function confirmDeleteComparison(row) {
+    document.querySelectorAll(".delete-comparison-dialog").forEach((old) => {
+      if (!old.open) old.remove();
+    });
+    const dialog = el("dialog", null, "delete-comparison-dialog");
+    const form = el("form", null, "review-form");
+    const title = el("h2", "Delete saved review?");
+    title.id = "delete-comparison-title"; dialog.setAttribute("aria-labelledby", title.id);
+    const error = el("p", "", "error"); error.hidden = true; error.setAttribute("role", "alert");
+    const confirmDelete = el("button", "Delete review", "danger"); confirmDelete.type = "submit";
+    const cancel = button("Cancel", () => { if (dialog.open) dialog.close(); });
+    const actions = el("div", null, "replay-toolbar"); actions.append(confirmDelete, cancel);
+    form.append(title,
+      el("p", `${row.reviewer_label} · ${row.audience} drafts · ${row.completed}/${row.total} judgments saved.`),
+      notice("This permanently deletes this blind review and all its saved judgments. It cannot be undone. Scenarios, replay results, and teacher releases are not affected."),
+      error, actions);
+    dialog.append(form); document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove());
+    const request = comparisonRequest;
+    let pending = false;
+    dialog.addEventListener("cancel", (event) => {
+      if (pending) event.preventDefault();
+    });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault(); if (confirmDelete.disabled) return;
+      confirmDelete.disabled = true; cancel.disabled = true; pending = true;
+      error.hidden = true;
+      try {
+        await api(`/api/teacher/comparisons/${row.id}/delete`, {body: {}});
+        if (dialog.open) dialog.close();
+        if (request === comparisonRequest && currentStudy === null) {
+          await loadComparisons(`Deleted saved review for ${row.reviewer_label}.`);
+        }
+      } catch (err) {
+        if (err.status === 404) {
+          if (dialog.open) dialog.close();
+          if (request === comparisonRequest && currentStudy === null) {
+            await loadComparisons(`Saved review for ${row.reviewer_label} was already deleted.`);
+          }
+          return;
+        }
+        error.textContent = "Deletion could not be confirmed. Retry or refresh the list to check its status.";
+        error.hidden = false;
+      } finally { confirmDelete.disabled = false; cancel.disabled = false; pending = false; }
+    });
+    dialog.showModal();
+    cancel.focus();
+  }
+
+  async function loadComparisons(deletedNote) {
     currentStudy = null;
     const request = ++comparisonRequest;
     comparisonPane.replaceChildren(notice("Loading comparison records…"));
@@ -517,10 +632,22 @@ function initResearchWorkspace({mountDetail, getConfig}) {
         const entry = button("", () => loadComparison(row.id), "saved-comparison");
         entry.append(el("strong", row.reviewer_label), el("span", `${row.completed}/${row.total} · ${row.audience} · ${row.status.replaceAll("_", " ")}`, "meta"),
           el("span", new Date(row.created_at).toLocaleString(), "meta small"));
-        ledger.append(entry);
+        const remove = button("×", () => confirmDeleteComparison(row), "delete-comparison");
+        remove.setAttribute("aria-label", `Delete saved review for ${row.reviewer_label}`);
+        remove.title = `Delete saved review for ${row.reviewer_label}`;
+        const wrapper = el("div", null, "saved-comparison-row");
+        wrapper.append(entry, remove);
+        ledger.append(wrapper);
       });
       layout.append(form, ledger); comparisonPane.append(layout);
-    } catch (err) { if (request === comparisonRequest) failure(comparisonPane, loadComparisons); }
+      if (deletedNote) {
+        const status = notice(deletedNote);
+        status.setAttribute("role", "status");
+        status.tabIndex = -1;
+        comparisonPane.append(status);
+        status.focus();
+      }
+    } catch (err) { if (request === comparisonRequest) failure(comparisonPane, () => loadComparisons()); }
   }
 
   async function loadComparison(id) {
@@ -539,7 +666,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const top = el("div", null, "ws-head");
     top.append(heading("SOURCE-MASKED REVIEW", `${view.reviewer_label} / ${view.audience} drafts`,
       `${view.completed} of ${view.total} judgments saved. ${view.prior_exposure ? "Prior exposure declared." : "No prior exposure declared."}`),
-      button("All reviews", loadComparisons));
+      button("All reviews", () => loadComparisons()));
     comparisonPane.append(top);
     const progress = el("progress", null, "review-progress");
     progress.max = view.total; progress.value = view.completed;

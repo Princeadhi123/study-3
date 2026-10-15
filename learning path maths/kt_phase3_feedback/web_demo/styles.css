@@ -153,6 +153,12 @@ body[data-page="student"] #q-text { font-size: 1.5rem; margin-bottom: 1.5rem; li
 details.raw { margin: .8rem 0; min-width: 0; }
 details.raw summary, .evidence-details summary { cursor: pointer; color: var(--verdigris); font-size: .8rem; padding: .4rem 0; }
 details.raw pre { background: #f3f6f7; border: 1px solid var(--line); border-radius: 8px; padding: 1rem; max-height: 32rem; overflow: auto; font-size: .72rem; }
+.think-first, .option-contrast { background: var(--wash); border: 1px solid var(--line); border-radius: 8px; padding: .7rem .9rem; margin: .7rem 0; min-width: 0; }
+.think-first h4, .option-contrast h4 { margin: 0 0 .3rem; font-size: .72rem; color: var(--verdigris); letter-spacing: .04em; text-transform: uppercase; }
+.think-first .sec, .option-contrast .sec { margin: 0; }
+details.worked-hint { margin: .3rem 0 .3rem .6rem; }
+details.worked-solution { border: 1px solid var(--line); border-radius: 8px; padding: 0 .9rem .6rem; margin-top: .9rem; min-width: 0; }
+details.worked-solution > summary { font-weight: 600; }
 table.grid { border-collapse: collapse; margin: 1rem 0; width: 100%; display: block; overflow-x: auto; }
 table.grid caption { text-align: left; font-size: .8rem; font-weight: 600; margin-bottom: .6rem; }
 table.grid th, table.grid td { border-bottom: 1px solid var(--line); padding: .6rem .65rem; font-size: .78rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
@@ -205,8 +211,8 @@ table.grid th { background: #f0f5f5; font-weight: 600; }
 .run-record { border-top: 1px solid var(--line); margin-top: .6rem; padding: .5rem 0; }
 .run-cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: .5rem; max-height: 20rem; overflow: auto; }
 .run-case { display: grid; gap: .15rem; text-align: left; background: #f7fafa; font-size: .78rem; }
-.replay-dialog { width: min(580px, calc(100% - 2rem)); max-height: calc(100% - 2rem); overflow: auto; border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem; color: var(--ink); box-shadow: 0 20px 80px #192d3740; }
-.replay-dialog::backdrop { background: #192d3780; }
+.replay-dialog, .delete-comparison-dialog { width: min(580px, calc(100% - 2rem)); max-height: calc(100% - 2rem); overflow: auto; border: 1px solid var(--line); border-radius: 12px; padding: 1.5rem; color: var(--ink); box-shadow: 0 20px 80px #192d3740; }
+.replay-dialog::backdrop, .delete-comparison-dialog::backdrop { background: #192d3780; }
 .replay-dialog .attestation { margin: .5rem 0; }
 .evidence-block { background: #f6f9f9; border: 1px solid var(--line); border-radius: 9px; padding: 1rem 1.2rem; margin: 1.3rem 0; }
 .evidence-block h3 { margin-top: 0; }
@@ -221,7 +227,12 @@ table.grid th { background: #f0f5f5; font-weight: 600; }
 .comparison-setup { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; }
 .comparison-setup .card { margin-top: 0; }
 .comparison-setup .review-form { gap: 1rem; }
+.saved-comparison-row { display: flex; gap: .5rem; align-items: stretch; margin: .7rem 0; }
 .saved-comparison { display: grid; gap: .3rem; background: #f8fafa; border-color: var(--line); text-align: left; width: 100%; margin: .7rem 0; overflow-wrap: anywhere; }
+.saved-comparison-row .saved-comparison { flex: 1 1 auto; min-width: 0; margin: 0; }
+.delete-comparison { flex: 0 0 auto; align-self: center; min-width: 40px; min-height: 40px; padding: .35rem .6rem; color: var(--rust); font-size: 1rem; line-height: 1; }
+button.danger { background: var(--rust); border-color: var(--rust); color: #fff; }
+button.danger:hover:not(:disabled) { background: #82311c; }
 .review-progress { height: 5px; }
 .blind-pair .draft-card { padding: 1.5rem; border-top: 3px solid #739c94; }
 .judgment-form { margin-top: 1.5rem; }

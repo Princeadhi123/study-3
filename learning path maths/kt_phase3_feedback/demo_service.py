@@ -29,7 +29,8 @@ import worked_review_math
 from aitta_generator import AittaGenerator
 from assessment_worked_review import (
     ASSESSMENT_WORKED_REVIEW_VERSION, GROUNDED_TEMPLATE_VERSION,
-    concise_student_preview)
+    QUESTION_FIRST_VERSION, concise_student_preview,
+    question_first_preview)
 from active_payload import active_payload
 from evidence_feedback import (
     MIDPOINT_MESSAGE_VERSION, build_evidence, build_research_evidence,
@@ -39,7 +40,6 @@ from evidence_feedback_policy import (
     MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
     MULTI_SELECTION_PROMPT_VERSION,
     POLICY_VERSION, SELECTION_INSTRUCTIONS, SELECTION_PROMPT_VERSION)
-from evidence_providers import EvidenceJevSelector
 from feedback_practice import (
     FEEDBACK_BUNDLE_VERSION, INTEGRATED_TEMPLATE_VERSION,
     MULTI_INTEGRATED_TEMPLATE_VERSION, PRACTICE_STATUS_MESSAGES,
@@ -52,8 +52,6 @@ from full_feedback import (
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_TITLES,
     MULTI_FULL_FEEDBACK_INSTRUCTIONS,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, structured_sections)
-from integrated_synthetic_pipeline import CachedReviewSelector
-from jev_selector import _read_env_file
 from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
 from replay_provider_scenarios import CaptureCache
@@ -81,6 +79,10 @@ SIMULATION_PROFILES = (
 PUBLIC_QUESTION_KEYS = (
     "skill_id", "text", "options")
 TEMPLATE_VERSION = "phase3_student_feedback_template_v1"
+FEEDBACK_VARIANTS = ("question_first", "worked_first")
+WORKED_FIRST_VERSION = "worked_first_full_feedback_v1"
+WORKED_FIRST_TEMPLATE_VERSION = (
+    "phase3_student_feedback_worked_first_full_v1")
 
 EDIT_CONTENT_KEYS = {"section_titles", "skill_labels",
                      "review_examples", "practice_activities",
@@ -88,7 +90,8 @@ EDIT_CONTENT_KEYS = {"section_titles", "skill_labels",
 EDIT_REVIEW_FIELDS = {"title", "for_subtopic_name", "prompt",
                       "options", "selected_answer", "correct_answer",
                       "steps", "explanation", "reasoning_question",
-                      "notice"}
+                      "notice", "socratic_prompt", "option_contrast",
+                      "progressive_hints"}
 EDIT_PRACTICE_FIELDS = {"topic_label", "message", "notice",
                         "instruction", "question", "relationship"}
 EDIT_QUESTION_FIELDS = {"skill_name", "concept_name", "text",
@@ -304,12 +307,15 @@ class DemoService:
                  "research_pending_review": mode != "demo"}
                 for mode, label in BANK_LABELS.items()]
 
-    def _hosted_adapters(self, jev_env_file, call_budget, timeout):
-        """Construct real providers once for the single provider worker."""
-        if jev_env_file is None:
-            raise ValueError("hosted mode requires an external Jev key file")
-        native_selector = EvidenceJevSelector(
-            _read_env_file(Path(jev_env_file)), timeout=timeout)
+    def _hosted_adapters(self, jev_env_file=None, call_budget=None,
+                         timeout=None):
+        """Construct the hosted narrative provider once for the worker.
+
+        Review-focus selection is deterministic rules for every demo
+        mode; hosted wiring covers only the Aitta draft generator. The
+        deprecated ``jev_env_file`` argument is accepted for backward
+        compatibility and ignored.
+        """
         inner = AittaGenerator.from_env()
         inner._timeout = timeout
         native_generator = FullFeedbackAittaGenerator(inner)
@@ -318,9 +324,8 @@ class DemoService:
         self.cache = CaptureCache(captures, call_budget)
         endpoint_hash = hashlib.sha256(
             inner._endpoint.encode("utf-8")).hexdigest()
-        return (CachedReviewSelector(native_selector, self.cache),
-                CachedFullFeedbackGenerator(native_generator, self.cache,
-                                            inner._model, endpoint_hash))
+        return (None, CachedFullFeedbackGenerator(
+            native_generator, self.cache, inner._model, endpoint_hash))
 
     def _recover_interrupted(self):
         """Mark jobs orphaned by a prior process; never rerun providers."""
@@ -482,7 +487,8 @@ class DemoService:
 
     # ---------------- sessions ----------------
 
-    def _new_meta(self, session_id, token, label=None, simulated=None, bank_mode="demo"):
+    def _new_meta(self, session_id, token, label=None, simulated=None,
+                  bank_mode="demo", feedback_variant="question_first"):
         context = self._bank_context(bank_mode)
         meta = {
             "session_id": session_id,
@@ -518,16 +524,28 @@ class DemoService:
             "reviews": [],
             "feedback_release": None,
             "feedback_edit": None,
-            "feedback_bundle_version": FEEDBACK_BUNDLE_VERSION}
+            "feedback_bundle_version": FEEDBACK_BUNDLE_VERSION,
+            "feedback_variant": feedback_variant}
         if self.review_mode == "aligned_two_topic":
             meta["feedback_selection_version"] = (
                 MULTI_REVIEW_POLICY_VERSION)
             meta["worked_review_version"] = (
                 ASSESSMENT_WORKED_REVIEW_VERSION)
+            meta["review_presentation_version"] = (
+                WORKED_FIRST_VERSION
+                if feedback_variant == "worked_first"
+                else QUESTION_FIRST_VERSION)
         return meta
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
-                       bank_mode="demo"):
+                       bank_mode="demo", feedback_variant="question_first"):
+        if (not isinstance(feedback_variant, str)
+                or feedback_variant not in FEEDBACK_VARIANTS):
+            raise ValueError("unknown feedback variant")
+        if (feedback_variant == "worked_first"
+                and self.review_mode != "aligned_two_topic"):
+            raise ValueError(
+                "worked-first feedback requires aligned_two_topic")
         if provider_mode not in (None, "rules", self.provider_mode):
             raise ValueError("provider mode is not configured")
         token = secrets.token_urlsafe(32)
@@ -538,7 +556,8 @@ class DemoService:
             started = context["mcqs"].start_session()
             session_id = started["session_id"]
             meta = self._new_meta(
-                session_id, token, label=label, simulated=simulated, bank_mode=bank_mode)
+                session_id, token, label=label, simulated=simulated,
+                bank_mode=bank_mode, feedback_variant=feedback_variant)
             session = context["mcqs"].private_record(session_id)
             session["bank_mode"] = bank_mode
             session["bank_provenance"] = copy.deepcopy(context["provenance"])
@@ -760,7 +779,19 @@ class DemoService:
                     "message": PRACTICE_STATUS_MESSAGES["unavailable"],
                     "notice": None, "question": None}
         if grounded:
-            return concise_student_preview(preview, originals)
+            if meta.get("feedback_variant") == "worked_first":
+                preview["template_version"] = WORKED_FIRST_TEMPLATE_VERSION
+                preview["review_presentation_version"] = (
+                    WORKED_FIRST_VERSION)
+                preview["feedback_variant"] = "worked_first"
+                return preview
+            if "feedback_variant" in meta:
+                preview["feedback_variant"] = meta["feedback_variant"]
+            preview = concise_student_preview(preview, originals)
+            if meta.get("review_presentation_version") \
+                    == QUESTION_FIRST_VERSION:
+                return question_first_preview(preview)
+            return preview
         return preview
 
     @staticmethod
@@ -1321,6 +1352,8 @@ class DemoService:
                     executions["selector"] = (
                         {"status": "local_single_candidate"}
                         if len(review["candidates"]) == 1
+                        else {"status": "deterministic_rules"}
+                        if self.selector is None
                         else {"status": "no_execution_record"})
                 if executions["generator"] is None:
                     if (review["trace"]["fallback_reason"]
@@ -1531,6 +1564,8 @@ class DemoService:
                         == "rules_single_candidate"
                         else {"status": "rules_mode_no_providers"}
                         if mode == "rules"
+                        else {"status": "deterministic_rules"}
+                        if self.selector is None
                         else {"status": "no_execution_record"})
             except Exception:
                 selection = selector_exec = None
@@ -1587,6 +1622,11 @@ class DemoService:
                                "finished_at": utc_now()}
                 else:
                     with self.lock:
+                        try:
+                            meta = self._load_meta(session_id)
+                        except FileNotFoundError:
+                            return
+                        end = meta["checkpoints"]["end"]
                         if self._pending_diag >= self.max_pending_jobs:
                             rec_result = {
                                 "status": "unavailable",
@@ -1643,6 +1683,8 @@ class DemoService:
                     if (self.generator is not None
                             and hasattr(self.generator, "execution")):
                         self.generator.execution = None
+                    full_narrative = (
+                        meta.get("feedback_variant") == "worked_first")
                     try:
                         if self._is_grounded(meta) and assessment_ctx is None:
                             review = self._grounded_unavailable(
@@ -1661,7 +1703,8 @@ class DemoService:
                                     else None),
                                 practice_contexts=[
                                     c["context"] for c in contexts],
-                                assessment_context=assessment_ctx)
+                                assessment_context=assessment_ctx,
+                                provider_full_narrative=full_narrative)
                     except (Exception, SystemExit):
                         review = run_multi_feedback(
                             evidence, selection=selection,
@@ -1861,6 +1904,11 @@ class DemoService:
             "policy_version": POLICY_VERSION,
             "review_selection_policy_version": (
                 MULTI_REVIEW_POLICY_VERSION if multi else POLICY_VERSION),
+            "review_selection_execution": (
+                "deterministic_rules" if self.selector is None
+                else "injected_selector_test_seam"),
+            "selection_instructions_status": (
+                "archived_reference_not_executed"),
             "selection_instructions": (
                 MULTI_SELECTION_INSTRUCTIONS if multi
                 else SELECTION_INSTRUCTIONS),
@@ -1991,6 +2039,8 @@ class DemoService:
             if end.get("teacher_review") is not None:
                 review_hashes["teacher"] = self._message_sha(
                     end["teacher_review"])
+            review_trace = ((end.get("student_review") or {}).get("trace")
+                            or {})
             provenance = {
                 **copy.deepcopy(context["provenance"]),
                 "bank_sha256": meta["bank_sha256"],
@@ -1999,12 +2049,14 @@ class DemoService:
                 "review_selection_policy_version": (
                     MULTI_REVIEW_POLICY_VERSION
                     if self._is_multi(meta) else POLICY_VERSION),
+                "review_selection_execution": (
+                    review_trace.get("selection_source")
+                    or "not_recorded"),
+                "feedback_variant": meta.get("feedback_variant"),
                 "selection_prompt_version": (
                     MULTI_SELECTION_PROMPT_VERSION
                     if self._is_multi(meta) else SELECTION_PROMPT_VERSION),
                 "generation_prompt_version": PROMPT_VERSION}
-            review_trace = ((end.get("student_review") or {}).get("trace")
-                            or {})
             if review_trace.get("generation_prompt_version"):
                 provenance["generation_prompt_version"] = review_trace[
                     "generation_prompt_version"]
@@ -2018,6 +2070,7 @@ class DemoService:
                 "status": self._delivery_status(session, meta),
                 "integrated": (meta.get("feedback_bundle_version")
                                == FEEDBACK_BUNDLE_VERSION),
+                "feedback_variant": meta.get("feedback_variant"),
                 "review_mode": ("aligned_two_topic" if self._is_multi(meta)
                                 else "legacy_single"),
                 "practice_status": None,
@@ -2072,6 +2125,7 @@ class DemoService:
                 "created_at": meta["created_at"],
                 "replay": copy.deepcopy(meta.get("replay")),
                 "simulated": meta["simulated"],
+                "feedback_variant": meta.get("feedback_variant"),
                 "status": session["status"],
                 "answered_count": len(session["responses"]),
                 "observed_total": {
@@ -2330,7 +2384,7 @@ class DemoService:
                 raise ValueError(f"{name} is not present in the card")
             if key in ("title", "for_subtopic_name", "prompt",
                        "selected_answer", "correct_answer",
-                       "reasoning_question"):
+                       "reasoning_question", "socratic_prompt"):
                 card[key] = cls._edit_text(value, name)
             elif key == "options":
                 card[key] = cls._edit_text_list(
@@ -2341,6 +2395,10 @@ class DemoService:
                     minimum=1 if card.get("status") == "ready" else 0)
                 if "explanation" not in patch and "explanation" in card:
                     card["explanation"] = "\n".join(card[key])
+            elif key == "progressive_hints":
+                card[key] = cls._edit_text_list(
+                    value, name,
+                    count=len(card["progressive_hints"]))
             else:
                 card[key] = cls._edit_text(value, name, nonempty=False)
 

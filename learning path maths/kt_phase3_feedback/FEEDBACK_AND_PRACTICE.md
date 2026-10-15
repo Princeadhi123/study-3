@@ -16,7 +16,7 @@ holds the consolidated handoff and dated change history.
 ```text
 Completed answers (40) -> deterministic scoring + descriptive graph
   -> observed evidence -> permitted review bundles (built locally)
-  -> one Jev bundle selection (or local bypass when one bundle exists)
+  -> one deterministic rules bundle selection
   -> aligned KT practice recommendation (0-2 questions, one per selected skill)
   -> one Aitta shared four-section student draft
   -> application adds fixed scores, assessment-grounded worked review
@@ -33,13 +33,13 @@ Key contracts:
   error focus when all answers are correct. The serialized bundle
   `candidate_id` is an enum bundle ID, not a single focus — do not equate
   the optional consolidation candidate count with the error-focus count.
-- **Jev** makes at most one call per completed scenario, choosing among the
-  permitted bundle IDs (enum choice). A single permitted bundle is selected
-  locally with no HTTP request (all-correct, one error candidate, or exactly
-  two candidates in distinct skills). Selection payload schema
-  `phase3_review_bundle_selection_v1`, prompt
-  `jev_distinct_skill_review_bundles_v1`.
-- **Aligned KT practice** predicts candidates only for the Jev-selected
+- **Review-bundle selection** is deterministic rules: the application
+  builds the permitted bundles and selects one with no provider call.
+  The selection-payload schema (`phase3_review_bundle_selection_v1`) and
+  archived prompt (`jev_distinct_skill_review_bundles_v1`) are retained
+  for audit and injected-selector test seams; no live Jev selection runs
+  in the demo service.
+- **Aligned KT practice** predicts candidates only for the rules-selected
   review skills — never an unrelated skill and never a second question for
   the same skill — policy `one_in_band_question_per_selected_skill_v1`.
   Each slot ends `selected`, `abstained` (nothing eligible/in-band),
@@ -129,6 +129,24 @@ Key contracts:
   to serve the grounded pipeline; scenario replays already enforce the
   code-hash restart guard, which now also covers
   `assessment_worked_review.py` and `worked_review_math.py`.
+- **Feedback variant**: aligned sessions record an explicit
+  `feedback_variant` at creation (`question_first` default, or
+  `worked_first`; legacy mode rejects `worked_first`). Question-first
+  keeps the concise/question-first preview overlay
+  (`question_first_worked_review_v1`) and accepts only the Aitta
+  completion wording. Worked-first
+  (`worked_first_full_feedback_v1`, template
+  `phase3_student_feedback_worked_first_full_v1`) bypasses both
+  rewriting passes, keeps the standard four-section titles and exact
+  checked cards, and — only when a validated Aitta reply exists — lets
+  the provider supply all four narrative sections under guardrails
+  `provider_full_narrative_shape_checked_v1` (shape-checked draft
+  requiring educator review; counts, selections, keys, checked maths and
+  practice cards stay application-owned; deterministic fallback keeps
+  the authored practice follow-up). Scenario replays record the variant
+  per run; separate runs of the same answers under each variant are
+  saved independently, and historical records without the field display
+  as "Historical / unspecified" and are never regenerated.
 - **Failure and restart**: a completed selector execution (fresh or cached)
   is preserved even when the aligned practice or generation stage fails;
   a generator that ran and failed is recorded as failed, one never started
@@ -138,7 +156,7 @@ Key contracts:
 
 `--review-mode legacy_single` keeps the earlier live pathway: one review
 focus, one independently selected practice question (the independent
-practice recommendation is computed before Jev selection), the full
+practice recommendation is computed before review selection), the full
 four-section Aitta draft through `FullFeedbackAittaGenerator` (prompt
 `aitta_feedback_with_practice_v3`, schema
 `phase3_full_feedback_generation_v2`), the same narrative-edit/preview-hash/
@@ -462,9 +480,11 @@ original demo library. Warm source/report hashes are checked against the
 warm bank, and replay history is listed separately per bank mode;
 `--replay-report` and `--replay-source` still override the per-mode
 defaults. The warm report is a rules baseline plus frozen KT traces — no
-hosted provider calls were made, so it is not Jev quality evidence. Jev
-keeps its existing constrained observed-evidence selection role, and no KT,
-graph internals or private bank data enter provider inputs.
+hosted provider calls were made, so it is not provider quality evidence.
+Live review selection is deterministic rules; the Jev modules remain only
+for historic offline replay. The optional wording provider receives only
+the selected grounded review cards and aggregate counts — no KT, graph
+internals or unselected bank data enter provider inputs.
 
 ### Feedback planning (policy v3, historical single-focus record)
 

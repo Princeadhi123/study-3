@@ -332,6 +332,16 @@ function captureProvenanceKind(execution, failed = false) {
   return "hosted response (reuse status unavailable)";
 }
 
+function feedbackVariantLabel(variant) {
+  if (variant === "question_first") {
+    return "Question-first / current version";
+  }
+  if (variant === "worked_first") {
+    return "Worked-first / full Aitta narrative";
+  }
+  return "Historical / unspecified";
+}
+
 function selectionProvenance(review, job, selExec) {
   if (!review) {
     return (job && job.status === "pending")
@@ -342,10 +352,11 @@ function selectionProvenance(review, job, selExec) {
   const trace = review.trace || {};
   const source = trace.selection_source;
   if (source === "rules_single_candidate") {
-    return "Local policy - only one permitted option; Jev not called";
+    return "Local policy - only one permitted option; " +
+      "deterministic rules, no provider selection";
   }
   if (source === "rules") {
-    let text = "Deterministic policy (not a Jev selection)";
+    let text = "Deterministic rules selection";
     if (trace.fallback_reason) text += ` - ${trace.fallback_reason}`;
     return text;
   }
@@ -375,6 +386,16 @@ function aittaProvenance(review, genExec) {
       .filter(Boolean).join(", ");
     return `Aitta - ${captureProvenanceKind(exec, true)}` +
       `${detail ? ` (${detail})` : ""} - deterministic feedback used`;
+  }
+  if (trace.guardrails_version
+      === "provider_full_narrative_shape_checked_v1") {
+    const label = " (four narrative sections; shape-checked draft, " +
+      "educator review required)";
+    if (hostedConfirmed(exec, "aitta_")) {
+      return `Aitta - ${captureProvenanceKind(exec)}` + label;
+    }
+    return "Injected full-feedback generator - hosted provenance " +
+      "unavailable" + label;
   }
   if (trace.phrasing_source === "injected_generator_full_sections") {
     const guarded = trace.guardrails_version
@@ -510,7 +531,7 @@ function renderSelectionDecision(audience, review, baseline,
   card.appendChild(el("p",
     "These are review options for this session, not simulation " +
     "profiles. Counts support offering an option; no validated " +
-    "explanation of Jev's preference is recorded. KT estimates do " +
+    "explanation of a provider's preference is recorded. KT estimates do " +
     "not determine this selection.", "meta"));
 
   const table = el("table", null, "grid decision-table");
@@ -649,7 +670,7 @@ function renderMultiSelectionDecision(audience, review, baseline,
   card.appendChild(el("p",
     "These are review options for this session, not simulation " +
     "profiles. Counts support offering an option; no validated " +
-    "explanation of Jev's preference is recorded. KT estimates do " +
+    "explanation of a provider's preference is recorded. KT estimates do " +
     "not determine this selection. Practice follows selected " +
     "review topics.", "meta"));
 
@@ -738,15 +759,31 @@ function teacherOriginalDetails(card, key) {
   if (original.reasoning_question) {
     put(`Explain your reasoning: ${original.reasoning_question}`);
   }
+  if (original.socratic_prompt) {
+    put(`Think first: ${original.socratic_prompt}`);
+  }
+  if (original.option_contrast) {
+    put(`Point to consider: ${original.option_contrast}`);
+  }
+  if (Array.isArray(original.progressive_hints)
+      && original.progressive_hints.length) {
+    const hints = el("ul", null, "practice-options");
+    original.progressive_hints.forEach((hint) => {
+      hints.appendChild(el("li", hint));
+    });
+    details.appendChild(hints);
+  }
   put(original.instruction);
   put(original.explanation);
   put(original.notice, "meta");
   return details;
 }
 
+const QUESTION_FIRST_VERSION = "question_first_worked_review_v1";
 const EDIT_REVIEW_FIELDS = ["title", "for_subtopic_name", "prompt",
   "options", "selected_answer", "correct_answer", "steps",
-  "explanation", "reasoning_question", "notice"];
+  "explanation", "reasoning_question", "notice", "socratic_prompt",
+  "option_contrast", "progressive_hints"];
 const EDIT_PRACTICE_FIELDS = ["topic_label", "message", "notice",
   "instruction"];
 const EDIT_QUESTION_FIELDS = ["skill_name", "concept_name", "text",
@@ -760,7 +797,10 @@ const EDIT_FIELD_LABELS = {title: "Card title",
   reasoning_question: "Reasoning question",
   notice: "Notice", topic_label: "Topic label", message: "Message",
   instruction: "Instruction", skill_name: "Skill label",
-  concept_name: "Concept label", text: "Practice question"};
+  concept_name: "Concept label", text: "Practice question",
+  socratic_prompt: "Before-reveal reasoning question",
+  option_contrast: "Option observation (optional)",
+  progressive_hints: "Progressive hints (one hint per line)"};
 
 function contentProjection() {
   return {};
@@ -831,6 +871,16 @@ function buildContentPayload(preview, content) {
                   ? src.steps[j] : (card.steps || [])[j] || "")
             : String(src.steps || "").split(/\r?\n/)
                 .map((s) => s.trim()).filter(Boolean);
+        } else if (field === "progressive_hints") {
+          patch.progressive_hints =
+            Array.isArray(src.progressive_hints)
+              ? src.progressive_hints.map((hint, j) =>
+                  src.progressive_hints[j] !== undefined
+                    ? src.progressive_hints[j]
+                    : (card.progressive_hints || [])[j] || "")
+              : String(src.progressive_hints || "")
+                  .split(/\r?\n/)
+                  .map((s) => s.trim()).filter(Boolean);
         } else {
           patch[field] = src[field];
         }
@@ -927,7 +977,10 @@ function renderStructuredFeedback(container, payload) {
           : "Teacher-edited worked review",
         "warn"));
     }
+    let solutionHost = null;
     if (example.source === "incorrect_assessment_response") {
+      const questionFirst = example.presentation_version
+        === QUESTION_FIRST_VERSION;
       const displayPrompt = changed("prompt")
         ? normalizeDisplayText(example.prompt)
         : englishQuestionText({text: example.prompt});
@@ -949,25 +1002,80 @@ function renderStructuredFeedback(container, payload) {
       box.appendChild(el("p",
         `Your selected answer: ${selectedText(
           example.selected_answer)}`, "sec"));
-      box.appendChild(el("p",
-        `Correct answer: ${correctText(
-          example.correct_answer)}`, "sec"));
-      if (Array.isArray(example.steps) && example.steps.length) {
-        const steps = el("ol", null, "worked-steps");
-        example.steps.forEach((step) => {
-          steps.appendChild(el("li", step));
+      const solutionContent = (target) => {
+        target.appendChild(el("p",
+          `Correct answer: ${correctText(
+            example.correct_answer)}`, "sec"));
+        if (Array.isArray(example.steps) && example.steps.length) {
+          const steps = el("ol", null, "worked-steps");
+          example.steps.forEach((step) => {
+            steps.appendChild(el("li", step));
+          });
+          target.appendChild(steps);
+        }
+        if (example.reasoning_question) {
+          target.appendChild(el("p",
+            `Explain your reasoning: ${example.reasoning_question}`,
+            "sec"));
+        }
+        if (example.explanation
+            && example.explanation
+               !== (example.steps || []).join("\n")) {
+          target.appendChild(el("p", example.explanation, "sec"));
+        }
+      };
+      if (questionFirst) {
+        const cardKey = JSON.stringify({
+          qid: example.question_id,
+          version: example.presentation_version,
+          prompt: example.prompt,
+          options: example.options,
+          selected: example.selected_answer,
+          correct: example.correct_answer,
+          steps: example.steps,
+          socratic: example.socratic_prompt,
+          contrast: example.option_contrast,
+          hints: example.progressive_hints,
+          explanation: example.explanation});
+        const think = el("div", null, "think-first");
+        think.appendChild(el("h4", "Think first"));
+        think.appendChild(el("p",
+          example.socratic_prompt || "", "sec"));
+        box.appendChild(think);
+        if (example.option_contrast) {
+          const contrast = el("div", null, "option-contrast");
+          contrast.appendChild(el("h4", "Point to consider"));
+          contrast.appendChild(el("p", example.option_contrast,
+            "sec"));
+          box.appendChild(contrast);
+        }
+        const hints = Array.isArray(example.progressive_hints)
+          ? example.progressive_hints : [];
+        let hintHost = box;
+        hints.forEach((hint, hintIndex) => {
+          const hintDetails = el("details", null,
+            "raw worked-hint");
+          hintDetails.dataset.disclosureKey =
+            `worked-hint:${hintIndex}:${cardKey}`;
+          hintDetails.appendChild(el("summary",
+            `Show hint ${hintIndex + 1}`));
+          hintDetails.appendChild(el("p", hint, "sec"));
+          hintHost.appendChild(hintDetails);
+          hintHost = hintDetails;
         });
-        box.appendChild(steps);
-      }
-      if (example.reasoning_question) {
-        box.appendChild(el("p",
-          `Explain your reasoning: ${example.reasoning_question}`,
-          "sec"));
-      }
-      if (example.explanation
-          && example.explanation
-             !== (example.steps || []).join("\n")) {
-        box.appendChild(el("p", example.explanation, "sec"));
+        const solution = el("details", null, "raw worked-solution");
+        solution.dataset.disclosureKey = `worked-solution:${cardKey}`;
+        solution.appendChild(el("summary",
+          example.status === "ready"
+            ? (example.teacher_edited
+               ? "Reveal answer and worked steps"
+               : "Reveal checked worked steps")
+            : "Reveal recorded correct answer"));
+        solutionContent(solution);
+        box.appendChild(solution);
+        solutionHost = solution;
+      } else {
+        solutionContent(box);
       }
       if (displayPrompt !== rawPrompt
           || displayOptions.join("\n") !== rawOptions.join("\n")) {
@@ -991,7 +1099,9 @@ function renderStructuredFeedback(container, payload) {
     }
     const originalCard = teacherOriginalDetails(
       example, `worked-review-original-content:${exampleIndex}`);
-    if (originalCard) box.appendChild(originalCard);
+    if (originalCard) {
+      (solutionHost || box).appendChild(originalCard);
+    }
     if (example.notice
         && exampleNoticeCounts.get(example.notice) === 1) {
       box.appendChild(el("p", example.notice, "meta"));
@@ -2177,6 +2287,8 @@ function createDetailView(root, options = {}) {
     const selReview = end.student_review || end.baseline_student;
     const strip = el("div", null, "release-status");
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
+    strip.appendChild(kv("Feedback variant",
+      feedbackVariantLabel(detail.feedback_variant)));
     const activities = preview && preview.practice_activities;
     if (activities && activities.length) {
       activities.forEach((activity, i) => {
@@ -2223,8 +2335,22 @@ function createDetailView(root, options = {}) {
       if ((selReview.trace || {}).guardrails_version
           && delivery.preview_source !== "teacher_edited") {
         strip.appendChild(kv("Feedback safeguards",
-          "Strengths, review focus and next steps are application-owned."));
+          (selReview.trace || {}).guardrails_version
+            === "provider_full_narrative_shape_checked_v1"
+            ? "All four narrative sections are provider-drafted and " +
+              "shape-checked, not fact-verified. Counts, selected " +
+              "topics, answer keys, checked maths and practice cards " +
+              "remain application-owned."
+            : "Strengths, review focus and next steps are " +
+              "application-owned."));
       }
+    }
+    if (detail.feedback_variant === "worked_first" && preview
+        && (selReview && (selReview.trace || {}).guardrails_version)
+           === "provider_full_narrative_shape_checked_v1") {
+      strip.appendChild(el("p",
+        "Aitta narrative is shape-checked, not fact-verified; " +
+        "educator review is required.", "warn"));
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;
@@ -2241,12 +2367,28 @@ function createDetailView(root, options = {}) {
         "uses the deterministic baseline unless you have saved " +
         "teacher edits.", "warn"));
     }
+    const diagnosticsPending = Object.values(detail.checkpoints || {})
+      .some((checkpoint) =>
+        checkpoint && checkpoint.diagnostics_job
+        && checkpoint.diagnostics_job.status === "pending");
+    if ((job.status === "ready" || job.status === "fallback")
+        && diagnosticsPending) {
+      strip.appendChild(kv("Model diagnostics", "Still running"));
+      strip.appendChild(el("p",
+        "Feedback is ready; independent model diagnostics are still " +
+        "running.", "boundary-note"));
+    }
     card.appendChild(strip);
     if (!preview) {
+      const waiting = ["not_requested", "pending",
+                       "waiting_for_practice"].includes(job.status);
       card.appendChild(el("p",
         delivery.practice_status_message ||
-        "No final feedback preview yet. A preview appears once the " +
-        "assessment is complete."));
+        (waiting
+          ? "Feedback is still being prepared on the server; " +
+            "no preview is available yet."
+          : "No final feedback preview yet. A preview appears once " +
+            "the assessment is complete.")));
       pane.appendChild(card);
       return;
     }
@@ -2376,6 +2518,26 @@ function createDetailView(root, options = {}) {
         contentField(cardBox, `review_examples.${i}.reasoning_question`,
           EDIT_FIELD_LABELS.reasoning_question,
           reviewCard.reasoning_question);
+      }
+      if (Object.hasOwn(reviewCard, "socratic_prompt")) {
+        contentField(cardBox,
+          `review_examples.${i}.socratic_prompt`,
+          EDIT_FIELD_LABELS.socratic_prompt,
+          reviewCard.socratic_prompt);
+      }
+      if (Object.hasOwn(reviewCard, "option_contrast")) {
+        contentField(cardBox,
+          `review_examples.${i}.option_contrast`,
+          EDIT_FIELD_LABELS.option_contrast,
+          reviewCard.option_contrast || "", 2);
+      }
+      if (Array.isArray(reviewCard.progressive_hints)
+          && reviewCard.progressive_hints.length) {
+        contentField(cardBox,
+          `review_examples.${i}.progressive_hints`,
+          EDIT_FIELD_LABELS.progressive_hints,
+          reviewCard.progressive_hints.join("\n"),
+          reviewCard.progressive_hints.length);
       }
       if (Object.hasOwn(reviewCard, "prompt")) {
         const displayPrompt = reviewCard.source
