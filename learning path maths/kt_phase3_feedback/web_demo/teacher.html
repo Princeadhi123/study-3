@@ -70,7 +70,7 @@
         <ul id="session-list" class="session-list"></ul>
       </aside>
       <section class="workspace">
-        <div id="ws-empty" class="card empty-state"><span class="eyebrow">YOUR EVIDENCE WORKBENCH</span><h2>Start with a session.</h2><p>Select a saved session or run a synthetic example to inspect its evidence, diagnostics, and feedback.</p><div class="workflow-steps"><span><b>01</b> Observe counts</span><span><b>02</b> Inspect drafts</span><span><b>03</b> Record a review</span></div><p class="meta small">Looking for retained experiments? Open the Scenario Library. To reduce prior-exposure bias, complete Blind Comparison before browsing drafts.</p></div>
+        <div id="ws-empty" class="card empty-state"><span class="eyebrow">YOUR EVIDENCE WORKBENCH</span><h2>Start with a session.</h2><p>Select a saved session or run a synthetic example to inspect its evidence, diagnostics, and feedback.</p><div class="workflow-steps"><span><b>01</b> Observe counts</span><span><b>02</b> Inspect drafts</span><span><b>03</b> Compare drafts</span></div><p class="meta small">Looking for retained experiments? Open the Scenario Library. To reduce prior-exposure bias, complete Blind Comparison before browsing drafts.</p></div>
         <div id="ws-detail" hidden>
           <div class="ws-head"><h2 id="ws-title"></h2><div class="ws-actions"><span id="ws-student-link"></span><a id="ws-export" class="ghost small" download>Export JSON</a></div></div>
           <nav class="tabs" id="ws-tabs" aria-label="Session views">
@@ -79,14 +79,12 @@
             <button data-tab="graph" class="tab" aria-pressed="false">Skill map</button>
             <button data-tab="research" class="tab" aria-pressed="false">Model diagnostics</button>
             <button data-tab="feedback" class="tab" aria-pressed="false">Feedback drafts</button>
-            <button data-tab="review" class="tab" aria-pressed="false">Educator review</button>
           </nav>
           <div id="tab-overview" class="tabpane"></div>
           <div id="tab-evidence" class="tabpane" hidden></div>
           <div id="tab-graph" class="tabpane" hidden></div>
           <div id="tab-research" class="tabpane" hidden></div>
           <div id="tab-feedback" class="tabpane" hidden></div>
-          <div id="tab-review" class="tabpane" hidden></div>
         </div>
       </section>
     </div>

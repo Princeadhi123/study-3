@@ -284,7 +284,8 @@ def question_first_preview(preview):
             continue
         ready = card.get("status") == "ready" and bool(card.get("steps"))
         scaffold = (worked_review_math.pre_reveal_scaffold(card.get("subtopic_id"))
-                    if ready else {"socratic_prompt": GENERIC_SOCRATIC_PROMPT, "progressive_hints": []})
+                    if ready and card.get("solution_version")
+                    else {"socratic_prompt": GENERIC_SOCRATIC_PROMPT, "progressive_hints": []})
         card.update(scaffold)
         card["presentation_version"] = QUESTION_FIRST_VERSION
         card["scaffold_source"] = "application_authored_method_prompt_v1"
@@ -301,6 +302,10 @@ def question_first_preview(preview):
         next_steps = next((s for s in result.get("sections", []) if s.get("kind") == "next_steps"), None)
         if next_steps is not None:
             text = QUESTION_FIRST_NEXT_STEPS
+            if any(c.get("explanation_source") == "provider"
+                   for c in examples):
+                text = text.replace("the checked worked steps",
+                                    "the worked explanations")
             if any(c.get("status") == "unavailable" for c in examples):
                 text += " For any question without a checked worked solution, ask your teacher for help."
             practices = result.get("practice_activities") or ([result["practice"]] if result.get("practice") else [])

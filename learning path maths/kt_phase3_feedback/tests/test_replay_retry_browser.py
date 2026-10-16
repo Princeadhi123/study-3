@@ -41,7 +41,8 @@ class ReplayRetryBrowserTests(unittest.TestCase):
             self.root, self.bank, self.taxonomy, count=4)
         self.opener = SuccessOpener()
         (self.root / "captures").mkdir()
-        self.cache = CaptureCache(self.root / "captures", None)
+        self.cache = CaptureCache(self.root / "captures", None,
+                                  reuse_captures=False)
         native = FullFeedbackAittaGenerator(
             AittaGenerator("fake-key-not-real-000000000000",
                            "https://aitta.example.test", model=MODEL,
@@ -119,7 +120,7 @@ class ReplayRetryBrowserTests(unittest.TestCase):
         runs = self.service.replays.list()["runs"]
         return self.service.replays.get(runs[0]["id"])
 
-    def test_hosted_retry_checkbox_flow(self):
+    def test_hosted_fresh_calls_flow(self):
         self.opener.failures = 1
         b = self.browser
         b.command("Page.navigate", {"url": f"{self.url}/teacher"})
@@ -133,11 +134,18 @@ class ReplayRetryBrowserTests(unittest.TestCase):
         b.js("document.querySelector('[data-workspace=library]').click()")
         b.wait("document.querySelector('.scenario-row')")
         self._open_replay_dialog()
-        self.assertTrue(b.js(
-            "document.querySelector('#replay-retry-failed').checked"))
+        # The manual retry option is gone entirely.
+        self.assertIsNone(b.js(
+            "document.querySelector('#replay-retry-failed')"))
+        dialog_text = ("document.querySelector('dialog[open]')"
+                       ".textContent")
         self.assertFalse(b.js(
-            "document.querySelector('#replay-retry-failed')"
-            ".closest('label').hidden"))
+            f"{dialog_text}.includes('Retry failed provider calls')"))
+        self.assertTrue(b.js(
+            f"{dialog_text}.includes('fresh hosted request')"))
+        self.assertTrue(b.js(
+            f"{dialog_text}.includes('no saved provider results are"
+            " reused')"))
         self.assertFalse(b.js(
             "document.querySelector('#replay-hosted-consent').checked"))
         b.js("document.querySelector('#confirm-replay').click()")
@@ -145,40 +153,49 @@ class ReplayRetryBrowserTests(unittest.TestCase):
             "Boolean(document.querySelector('dialog[open]'))"))
         b.js("document.querySelector('#replay-hosted-consent')"
              ".checked=true")
+        # The request payload no longer carries a retry flag.
+        b.js("const f=window.fetch; window.fetch=(u,o)=>{"
+             "if(String(u).includes('/api/teacher/replays') && o && o.body)"
+             "window.__posted=JSON.parse(o.body); return f(u,o);}")
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("!document.querySelector('dialog[open]')")
+        sent = b.js("window.__posted")
+        self.assertIsNotNone(sent)
+        self.assertNotIn("retry_failed_provider_calls", sent)
         first = self._wait_run(1)
         self.assertEqual(first["cases"][0]["provider_status"], "fallback")
         self.assertEqual(len(self.opener.calls), 1)
         captures = self.root / "captures"
-        base_files = [p for p in captures.glob("aitta_full_*.json")
-                      if "_attempt_" not in p.name]
-        self.assertEqual(len(base_files), 1)
-        base_bytes = base_files[0].read_bytes()
-        self.assertFalse(json.loads(base_bytes)["ok"])
-        self.assertTrue(first["retry_failed_provider_calls"])
+        fresh_files = list(captures.glob("aitta_full_*_call_*.json"))
+        self.assertEqual(len(fresh_files), 1)
+        self.assertFalse(json.loads(
+            fresh_files[0].read_text(encoding="utf-8"))["ok"])
+        self.assertNotIn("retry_failed_provider_calls", first)
+        self.assertEqual(first["provider_execution"],
+                         "fresh_hosted_calls")
         b.js(f"document.querySelector('#scenario-version').value="
              f"{json.dumps(first['id'])}; document.querySelector("
              "'#scenario-version').dispatchEvent(new Event('change'))")
         b.wait("document.querySelector('#scenario-ws-detail')"
                ".textContent.includes('fresh hosted call failed')",
                timeout=30)
+        # A second run re-asks for consent and makes a fresh call
+        # instead of reusing the saved failure.
         self._open_replay_dialog()
-        self.assertTrue(b.js(
-            "document.querySelector('#replay-retry-failed').checked"))
-        b.js("document.querySelector('#replay-retry-failed')"
-             ".checked=false")
+        self.assertIsNone(b.js(
+            "document.querySelector('#replay-retry-failed')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#replay-hosted-consent').checked"))
         b.js("document.querySelector('#replay-hosted-consent')"
              ".checked=true")
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("!document.querySelector('dialog[open]')")
         second = self._wait_run(2)
-        self.assertEqual(second["cases"][0]["provider_status"], "fallback")
-        self.assertFalse(second["retry_failed_provider_calls"])
-        self.assertEqual(len(self.opener.calls), 1)
-        self.assertEqual(list(captures.glob("*_attempt_*.json")), [])
+        self.assertEqual(second["cases"][0]["provider_status"], "ready")
+        self.assertEqual(len(self.opener.calls), 2)
         b.wait("document.querySelector('.run-history')"
-               ".textContent.includes('capture reuse')")
+               ".textContent.includes('fresh hosted calls')")
+        # A third run does not reuse the saved success either.
         self._open_replay_dialog()
         b.js("document.querySelector('#replay-hosted-consent')"
              ".checked=true")
@@ -186,14 +203,10 @@ class ReplayRetryBrowserTests(unittest.TestCase):
         b.wait("!document.querySelector('dialog[open]')")
         third = self._wait_run(3)
         self.assertEqual(third["cases"][0]["provider_status"], "ready")
-        self.assertTrue(third["retry_failed_provider_calls"])
-        self.assertEqual(len(self.opener.calls), 2)
-        attempt_files = list(
-            captures.glob("aitta_full_*_attempt_*.json"))
-        self.assertEqual(len(attempt_files), 1)
-        self.assertEqual(base_files[0].read_bytes(), base_bytes)
-        b.wait("document.querySelector('.run-history')"
-               ".textContent.includes('retry failed calls enabled')")
+        self.assertEqual(len(self.opener.calls), 3)
+        self.assertEqual(
+            len(list(captures.glob("aitta_full_*_call_*.json"))), 3)
+        self.assertEqual(list(captures.glob("*_attempt_*.json")), [])
         b.js(f"document.querySelector('#scenario-version').value="
              f"{json.dumps(third['id'])}; document.querySelector("
              "'#scenario-version').dispatchEvent(new Event('change'))")
@@ -201,7 +214,7 @@ class ReplayRetryBrowserTests(unittest.TestCase):
                ".textContent.includes('Aitta provenance')", timeout=30)
         detail = b.js("document.querySelector('#scenario-ws-detail')"
                       ".textContent")
-        self.assertIn("fresh hosted retry", detail)
+        self.assertIn("fresh hosted response", detail)
         self.assertEqual(b.errors, [])
 
 

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import random
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -144,9 +145,11 @@ def _automatic_retryable(execution):
 
 
 class CaptureCache:
-    def __init__(self, root, budget, automatic_retries=False):
+    def __init__(self, root, budget, automatic_retries=False,
+                 reuse_captures=True):
         self.root, self.budget, self.new_calls = root, budget, 0
         self._automatic_retries = bool(automatic_retries)
+        self._reuse_captures = bool(reuse_captures)
         self._stop_retries = threading.Event()
         self._lock = threading.RLock()
         self._key_locks = {}
@@ -222,7 +225,13 @@ class CaptureCache:
     def _obtain_once(self, provider, base, request, callback, adapter):
         """The original single-attempt capture/reuse semantics."""
         with self._lock:
-            path, record, number = self._latest_record(provider, request)
+            if self._reuse_captures:
+                path, record, number = self._latest_record(
+                    provider, request)
+            else:
+                record, number = None, 1
+                path = base.with_name(
+                    f"{base.stem}_call_{secrets.token_hex(16)}.json")
             previous = path.name
             reused = record is not None and (
                 record["ok"] or not self._retry_failed.get())

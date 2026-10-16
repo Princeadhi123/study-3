@@ -506,6 +506,11 @@ class MidpointServiceTests(unittest.TestCase):
                          "not_requested")
         self.assertIsNone(block["provider_draft"])
         self.assertEqual(opener.calls, [])
+        # Rules sessions show the deterministic check-in immediately.
+        base = compose_midpoint_message(self.evidence)
+        snap_mid = service.snapshot(sid, token)["feedback"]["midpoint"]
+        self.assertEqual(snap_mid["sections"], base["sections"])
+        self.assertNotEqual(snap_mid.get("status"), "pending")
 
     def test_no_midpoint_adapter_skips(self):
         service = self._service(midpoint=False)
@@ -514,6 +519,10 @@ class MidpointServiceTests(unittest.TestCase):
         self.assertEqual(block["phrasing_job"]["status"],
                          "not_requested")
         self.assertIsNone(block["provider_draft"])
+        base = compose_midpoint_message(self.evidence)
+        snap_mid = service.snapshot(sid, token)["feedback"]["midpoint"]
+        self.assertEqual(snap_mid["sections"], base["sections"])
+        self.assertNotEqual(snap_mid.get("status"), "pending")
 
     def test_provider_error_fallback_student_unchanged(self):
         opener = RecordingOpener(error=RuntimeError("boom"))
@@ -587,12 +596,18 @@ class MidpointServiceTests(unittest.TestCase):
         sid, token = created["session_id"], created["student_token"]
         for row in self.rows20:
             snap = service.submit_response(sid, token, row)
-        # The 20th answer returns the deterministic check-in while the
-        # provider call is still gated.
+        # The 20th answer returns a pending notice while the provider
+        # call is still gated; the deterministic check-in is not sent.
         self.assertEqual(snap["answered_count"], 20)
+        pending_mid = snap["feedback"]["midpoint"]
+        self.assertEqual(pending_mid["status"], "pending")
+        self.assertEqual(pending_mid["sections"], [])
+        self.assertIn("preparing your midpoint check-in",
+                      pending_mid["text"])
+        self.assertNotIn("total", pending_mid)
+        self.assertNotIn("skills", pending_mid)
         base = compose_midpoint_message(self.evidence)
-        self.assertEqual(snap["feedback"]["midpoint"]["sections"],
-                         base["sections"])
+        self.assertNotIn(base["text"], json.dumps(pending_mid))
         gate.set()
         self.assertTrue(wait_for(
             lambda: service._load_meta(sid)["checkpoints"]["midpoint"]
@@ -651,18 +666,19 @@ class MidpointServiceTests(unittest.TestCase):
         for row in self.rows20:
             service.submit_response(sid2, token2, row)
         service._run_midpoint_phrasing(
-            sid2, copy.deepcopy(self.evidence), retry_failed=False)
+            sid2, copy.deepcopy(self.evidence))
         self.assertEqual(len(opener.calls), 1)
         job2 = service._load_meta(sid2)["checkpoints"]["midpoint"][
             "phrasing_job"]
         self.assertEqual(job2["status"], "fallback")
         self.assertTrue(job2["execution"]["reused"])
-        # The explicit replay retry flag allows exactly one fresh call;
-        # the original capture file is preserved.
+        # An explicit offline retry scope still allows exactly one
+        # fresh call; the original capture file is preserved.
         opener.payload = wire_reply(candidate_id=CANDIDATE_ID,
                                     sections=AUTHORED)
-        service._run_midpoint_phrasing(
-            sid2, copy.deepcopy(self.evidence), retry_failed=True)
+        with cache.retry_failed_scope(True):
+            service._run_midpoint_phrasing(
+                sid2, copy.deepcopy(self.evidence))
         self.assertEqual(len(opener.calls), 2)
         job3 = service._load_meta(sid2)["checkpoints"]["midpoint"][
             "phrasing_job"]
@@ -717,8 +733,71 @@ class MidpointServiceTests(unittest.TestCase):
         self.assertEqual(block["student_message"]["sections"],
                          base["sections"])
 
+    def test_pending_then_terminal_fallback_shows_deterministic(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        class GatedOpener(RecordingOpener):
+            def open(self, request, timeout=None):
+                gate.wait(timeout=10)
+                return super().open(request, timeout)
+
+        opener = GatedOpener(error=RuntimeError("boom"))
+        service = self._service(opener)
+        sid, token = self._submit_midpoint(service)
+        # While the failing call is gated the student sees only the
+        # pending notice — no baseline text, no job internals.
+        pending_mid = service.snapshot(
+            sid, token)["feedback"]["midpoint"]
+        self.assertEqual(pending_mid["status"], "pending")
+        self.assertEqual(pending_mid["sections"], [])
+        base = compose_midpoint_message(self.evidence)
+        self.assertNotIn(base["sections"][0]["text"],
+                         json.dumps(pending_mid))
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["checkpoints"]["midpoint"]
+            .get("phrasing_job", {}).get("status") == "fallback"))
+        snap_mid = service.snapshot(sid, token)["feedback"]["midpoint"]
+        self.assertEqual(snap_mid["sections"], base["sections"])
+        self.assertNotEqual(snap_mid.get("status"), "pending")
+        self.assertNotIn("boom", json.dumps(snap_mid))
+
+    def test_pending_never_publishes_stale_draft(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+
+        class GatedOpener(RecordingOpener):
+            def open(self, request, timeout=None):
+                gate.wait(timeout=10)
+                return super().open(request, timeout)
+
+        opener = GatedOpener(
+            wire_reply(candidate_id=CANDIDATE_ID, sections=AUTHORED))
+        service = self._service(opener)
+        sid, token = self._submit_midpoint(service)
+        # A stale stored draft is never published while the job is
+        # still pending.
+        with service.lock:
+            meta = service._load_meta(sid)
+            meta["checkpoints"]["midpoint"]["provider_draft"] = {
+                "sections": [{"kind": "assessment_summary",
+                              "text": SENTINEL}],
+                "text": SENTINEL}
+            service._save_meta(meta)
+        pending_mid = service.snapshot(
+            sid, token)["feedback"]["midpoint"]
+        self.assertEqual(pending_mid["status"], "pending")
+        self.assertNotIn(SENTINEL,
+                         json.dumps(service.snapshot(sid, token)))
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["checkpoints"]["midpoint"]
+            .get("phrasing_job", {}).get("status") == "ready"))
+
     def test_frozen_first20_wire_while_gated_until_40(self):
         gate = threading.Event()
+        self.addCleanup(gate.set)
 
         class GatedOpener(RecordingOpener):
             def open(self, request, timeout=None):
@@ -734,12 +813,22 @@ class MidpointServiceTests(unittest.TestCase):
         sid, token = created["session_id"], created["student_token"]
         for row in self.rows20:
             snap = service.submit_response(sid, token, row)
-        # Answer 20 returns the deterministic check-in while the
-        # provider call is still gated.
+        # Answer 20 returns the pending notice while the provider call
+        # is still gated; the deterministic baseline is not published
+        # and no teacher-only internals leak into the student payload.
         self.assertEqual(snap["answered_count"], 20)
         base = compose_midpoint_message(self.evidence)
-        self.assertEqual(snap["feedback"]["midpoint"]["sections"],
-                         base["sections"])
+        pending_mid = snap["feedback"]["midpoint"]
+        self.assertEqual(pending_mid, {
+            "status": "pending", "sections": [],
+            "text": "Aitta is preparing your midpoint check-in. "
+                    "You can continue with the assessment while "
+                    "it finishes."})
+        self.assertNotIn(base["sections"][0]["text"],
+                         json.dumps(snap))
+        self.assertNotIn("phrasing_job", json.dumps(snap))
+        self.assertNotIn("provider_draft", json.dumps(snap))
+        self.assertNotIn("execution", json.dumps(pending_mid))
         # Finish the assessment while the midpoint call is still gated;
         # the frozen first-20 evidence is what reaches the wire.
         for row in responses(self.bank, count=40)[20:]:
@@ -973,17 +1062,34 @@ class MidpointBrowserTests(unittest.TestCase):
         deterministic_text = base["sections"][0]["text"]
         b = self.browser
         # While the provider call is still gated the pause screen shows
-        # the deterministic check-in.
+        # the pending waiting notice, not the deterministic check-in.
         b.command("Page.navigate",
                   {"url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("!document.querySelector('#pause-panel').hidden")
         student_text = b.js(
             "document.querySelector('#pause-panel').textContent")
-        self.assertIn(deterministic_text, student_text)
+        self.assertIn("preparing your midpoint check-in", student_text)
+        self.assertNotIn(deterministic_text, student_text)
         for expected in AUTHORED.values():
             self.assertNotIn(expected, student_text)
+        waiting = ("document.querySelector('#pause-message "
+                   ".midpoint-feedback-waiting')")
+        self.assertTrue(b.js(f"Boolean({waiting})"))
+        self.assertEqual(b.js(f"{waiting}.getAttribute('role')"),
+                         "status")
+        self.assertEqual(b.js(f"{waiting}.getAttribute('aria-live')"),
+                         "polite")
+        self.assertEqual(b.js(
+            "document.querySelector('#pause-message')"
+            ".getAttribute('aria-busy')"), "true")
+        # The waiting pause fits a 390px viewport without overflow.
+        b.viewport(390, 844)
+        self.assertLessEqual(b.js(
+            "document.documentElement.scrollWidth - "
+            "document.documentElement.clientWidth"), 0)
+        b.viewport(1440, 1100)
         # Let the provider call through: the paused page's existing poll
-        # refreshes the check-in to the Aitta wording without a reload
+        # refreshes the notice to the Aitta wording without a reload
         # or resuming, and Continue stays available.
         self.gate.set()
         self.assertTrue(wait_for(
@@ -995,6 +1101,9 @@ class MidpointBrowserTests(unittest.TestCase):
         student_text = b.js(
             "document.querySelector('#pause-panel').textContent")
         self.assertNotIn(deterministic_text, student_text)
+        self.assertIsNone(b.js(
+            "document.querySelector('#pause-message')"
+            ".getAttribute('aria-busy')"))
         self.assertFalse(b.js(
             "document.querySelector('#continue-button') === null"))
         # Focus must stay on Continue across further poll cycles; the
@@ -1148,8 +1257,9 @@ class MidpointBrowserTests(unittest.TestCase):
         if os.environ.get("BROWSER_SCREENSHOTS"):
             b.screenshot("midpoint_draft_mobile.png")
         b.viewport(1440, 1100)
-        # Pending job wording: the deterministic main stays and the
-        # comparison disclosure is absent.
+        # Pending job: the teacher poll swaps the main message for a
+        # waiting notice without a reload; the deterministic baseline
+        # stays available only inside the collapsed comparison.
         with self.service.lock:
             meta = self.service._load_meta(sid)
             block = meta["checkpoints"]["midpoint"]
@@ -1162,39 +1272,100 @@ class MidpointBrowserTests(unittest.TestCase):
             block["phrasing_job"] = {"status": "pending",
                                      "queued_at": queued}
             self.service._save_meta(meta)
-        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
-        b.wait("document.readyState === 'complete' && "
-               "typeof api === 'function'")
-        b.js("if (document.querySelector('#pin-input')) {"
-             f"document.querySelector('#pin-input').value="
-             f"{json.dumps(self.pin)};"
-             "document.querySelector('#unlock-form').requestSubmit() }")
-        b.wait("!document.querySelector('#teacher-app').hidden")
-        b.wait("document.querySelector('.session-row')")
-        b.js("document.querySelector('.session-row').click()")
-        b.wait("!document.querySelector('#ws-detail').hidden")
-        b.js("document.querySelector('[data-tab=feedback]').click()")
-        b.wait("document.querySelector('.midpoint-provider-draft')")
+        b.wait("document.querySelector('.midpoint-feedback-card "
+               "> .midpoint-feedback-waiting')")
+        waiting_el = ("document.querySelector('.midpoint-feedback-card "
+                      "> .midpoint-feedback-waiting')")
+        self.assertEqual(b.js(f"{waiting_el}.getAttribute('role')"),
+                         "status")
+        self.assertEqual(b.js(f"{waiting_el}.getAttribute('aria-live')"),
+                         "polite")
+        self.assertEqual(b.js(f"{waiting_el}.getAttribute('aria-busy')"),
+                         "true")
         card_text = b.js(
             "document.querySelector('.midpoint-feedback-card')"
             ".textContent")
-        self.assertIn(deterministic_text, card_text)
-        self.assertIn("Deterministic fallback", card_text)
+        self.assertIn("preparing the midpoint check-in", card_text)
+        self.assertIn("Generation status", card_text)
+        self.assertIn("Processing", card_text)
+        # No wording is presented as current while pending: no main
+        # message, no wording-source label of any kind.
         self.assertIsNone(b.js(
-            "document.querySelector("
-            "'.midpoint-deterministic-comparison')"))
+            "document.querySelector('.midpoint-feedback-card "
+            "> .midpoint-feedback-message')"))
+        self.assertNotIn("Wording source", card_text)
+        self.assertNotIn("Deterministic fallback", card_text)
+        # The collapsed deterministic comparison still carries the
+        # baseline and its template version.
+        comparison_sel = ("document.querySelector('.midpoint-"
+                          "deterministic-comparison')")
+        self.assertTrue(b.js(f"Boolean({comparison_sel})"))
+        b.js(f"{comparison_sel}.open = true")
+        comparison = b.js(f"{comparison_sel}.textContent")
+        self.assertIn(deterministic_text, comparison)
+        self.assertIn("Deterministic template version", comparison)
+        self.assertIn(STUDENT_MESSAGE_VERSION, comparison)
+        b.js(f"{comparison_sel}.open = false")
+        # The waiting card fits a 390px viewport without overflow.
+        b.viewport(390, 844)
+        b.js("document.querySelector('.midpoint-feedback-card')"
+             ".scrollIntoView({block:'center'})")
+        self.assertLessEqual(b.js(
+            "document.documentElement.scrollWidth - "
+            "document.documentElement.clientWidth"), 0)
+        b.viewport(1440, 1100)
+        # Generation details report the pending job; with nothing
+        # selected no template version is claimed as live, and no
+        # prompt version is invented without a saved record.
         b.js("document.querySelector('.midpoint-provider-draft')"
              ".open = true")
         pending_text = b.js(
             "document.querySelector('.midpoint-provider-draft')"
             ".textContent")
         self.assertIn("queued or in progress", pending_text)
+        self.assertIn("waiting notice", pending_text)
         self.assertNotIn("No Aitta draft was produced", pending_text)
-        # Pending jobs show only the recorded baseline template
-        # version; no prompt version is invented without a saved record.
-        self.assertIn("Template version", pending_text)
-        self.assertIn(STUDENT_MESSAGE_VERSION, pending_text)
+        self.assertNotIn("Template version", pending_text)
         self.assertNotIn("Prompt version", pending_text)
+        # Restoring the ready record lets the same poll replace the
+        # waiting notice with the Aitta wording — still no reload.
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            block = meta["checkpoints"]["midpoint"]
+            block["provider_draft"] = saved_draft
+            block["provider_draft_version"] = saved_draft_version
+            block["phrasing_job"] = saved_job
+            self.service._save_meta(meta)
+        b.wait("document.querySelector('.midpoint-feedback-card "
+               "> .midpoint-feedback-message')")
+        self.assertIsNone(b.js(
+            "document.querySelector('.midpoint-feedback-card "
+            "> .midpoint-feedback-waiting')"))
+        ready_text = b.js(
+            "document.querySelector('.midpoint-feedback-card')"
+            ".textContent")
+        for expected in AUTHORED.values():
+            self.assertIn(expected, ready_text)
+        # A terminal fallback transitions the card back to the
+        # deterministic main wording through the same poll.
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            block = meta["checkpoints"]["midpoint"]
+            block["provider_draft"] = None
+            block["provider_draft_version"] = None
+            block["phrasing_job"] = {"status": "fallback",
+                                     "reason": "provider_error"}
+            self.service._save_meta(meta)
+        b.wait("document.querySelector('.midpoint-feedback-card')"
+               ".textContent.includes('Deterministic fallback')")
+        fallback_text = b.js(
+            "document.querySelector('.midpoint-feedback-card')"
+            ".textContent")
+        self.assertIn(deterministic_text, fallback_text)
+        self.assertIn("Deterministic fallback", fallback_text)
+        self.assertIsNone(b.js(
+            "document.querySelector("
+            "'.midpoint-deterministic-comparison')"))
         # A reused ready capture reports 'Reused saved response' without
         # implying a fresh provider call.
         with self.service.lock:
@@ -1331,6 +1502,45 @@ class MidpointBrowserTests(unittest.TestCase):
         snap = json.dumps(self.service.snapshot(sid, token))
         self.assertNotIn("rejected_draft", snap)
         self.assertNotIn(rejected_markup, snap)
+        # A second session walks pending -> terminal fallback on the
+        # student pause: the poll swaps the notice for the deterministic
+        # check-in, and Continue resumes at question 21.
+        created2 = self.service.create_session()
+        sid2, token2 = (created2["session_id"],
+                        created2["student_token"])
+        for row in midpoint_rows(self.bank, wrong_positions=(0, 5)):
+            self.service.submit_response(sid2, token2, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid2)["checkpoints"]
+            ["midpoint"].get("phrasing_job", {}).get("status")
+            == "ready"))
+        with self.service.lock:
+            meta2 = self.service._load_meta(sid2)
+            block2 = meta2["checkpoints"]["midpoint"]
+            block2["provider_draft"] = None
+            block2["provider_draft_version"] = None
+            block2["phrasing_job"] = {"status": "pending"}
+            self.service._save_meta(meta2)
+        b.command("Page.navigate",
+                  {"url": f"{self.url}/?session={sid2}#token={token2}"})
+        b.wait("document.querySelector('#pause-panel .midpoint-"
+               "feedback-waiting')")
+        with self.service.lock:
+            meta2 = self.service._load_meta(sid2)
+            meta2["checkpoints"]["midpoint"]["phrasing_job"] = {
+                "status": "fallback", "reason": "provider_error"}
+            self.service._save_meta(meta2)
+        b.wait("document.querySelector('#pause-panel').textContent"
+               f".includes({json.dumps(deterministic_text)})")
+        self.assertIsNone(b.js(
+            "document.querySelector('#pause-message "
+            ".midpoint-feedback-waiting')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#continue-button') === null"))
+        b.js("document.querySelector('#continue-button').click()")
+        b.wait("!document.querySelector('#question-panel').hidden")
+        self.assertEqual(b.js(
+            "document.querySelector('#q-pos').textContent"), "21")
         self.assertEqual(b.errors, [])
 
 

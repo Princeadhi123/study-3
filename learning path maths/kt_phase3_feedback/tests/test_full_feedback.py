@@ -21,6 +21,7 @@ from full_feedback import (
     _provider_full_sections,
     MULTI_FULL_FEEDBACK_INSTRUCTIONS,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
+    UNGROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS,
     build_full_input, build_multi_full_input, full_message_sections,
     full_reply_rejection_code, FULL_FEEDBACK_REJECTION_CODES,
     guarded_multi_message, validate_full_input, validate_full_reply)
@@ -255,11 +256,25 @@ class FullFeedbackTests(unittest.TestCase):
                        "routing details", "the system prompt",
                        "Jev routing", "the Aitta system",
                        "according to this plan", "based on our plan",
-                       "guided by its plan"):
+                       "guided by its plan", "The review plan highlights",
+                       "the review plans", "a REVIEW PLAN",
+                       "the practice context", "practice contexts",
+                       "PRACTICE CONTEXTS"):
             sections = dict(VALID_SECTIONS)
             sections["next_steps"] = f"A note about {phrase}."
             self._reject(wire_reply(sections=sections,
                                     candidate_id=self.selected_id))
+        for accepted in ("Plan your calculation before answering.",
+                         "Review these topics with your teacher.",
+                         "Try the selected practice activities below."):
+            sections = dict(VALID_SECTIONS)
+            sections["next_steps"] = accepted
+            opener = RecordingOpener(
+                wire_reply(sections=sections,
+                           candidate_id=self.selected_id))
+            reply = self._generator(opener).generate(self.full_input)
+            self.assertEqual(
+                reply["sections"]["next_steps"], accepted)
         sections = dict(VALID_SECTIONS)
         sections["next_steps"] = (
             "Plan your calculation before answering.")
@@ -1014,10 +1029,10 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
-    def test_v6_prompt_wording_contract(self):
+    def test_v8_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v6")
+            "aitta_assessment_grounded_two_topic_feedback_v8")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1025,12 +1040,15 @@ class MultiFullFeedbackTests(unittest.TestCase):
                          set(FULL_FEEDBACK_SECTION_KEYS))
         body = opener.calls[0]["body"]
         system = body["messages"][0]["content"]
-        self.assertEqual(system, MULTI_FULL_FEEDBACK_INSTRUCTIONS)
+        # Ungrounded multi requests append the legacy two-field output
+        # contract; grounded requests use the worked-review contract.
+        self.assertEqual(system,
+                         MULTI_FULL_FEEDBACK_INSTRUCTIONS
+                         + UNGROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS)
         for needle in (
                 "write 'On this assessment, ...'",
                 "separate topic names clearly",
                 "Give this teacher-review instruction once",
-                "Only for an example whose status is unavailable",
                 "Call these 'separate practice activities', not "
                 "'similar practice tasks'",
                 "shown on each practice card",
@@ -1044,13 +1062,15 @@ class MultiFullFeedbackTests(unittest.TestCase):
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v6")
+            "aitta_assessment_grounded_two_topic_feedback_v8")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
                 "aitta_assessment_grounded_two_topic_feedback_v3",
                 "aitta_assessment_grounded_two_topic_feedback_v4",
-                "aitta_assessment_grounded_two_topic_feedback_v5"):
+                "aitta_assessment_grounded_two_topic_feedback_v5",
+                "aitta_assessment_grounded_two_topic_feedback_v6",
+                "aitta_assessment_grounded_two_topic_feedback_v7"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1634,8 +1654,9 @@ class WorkedFirstWireTests(unittest.TestCase):
         return FullFeedbackAittaGenerator(inner)
 
     def _wf_reply(self):
-        ready = [e for e in self.full_input["review_examples"]
-                 if e["status"] == "ready"]
+        from full_feedback import worked_review_examples_for_reply
+        expected = worked_review_examples_for_reply(
+            self.full_input) or []
         return wire_reply(
             candidate_id=self.bundle["candidate_id"],
             worked_reviews=[
@@ -1644,7 +1665,7 @@ class WorkedFirstWireTests(unittest.TestCase):
                            "this question."],
                  "reasoning_question":
                      "Why does the checked method work here?"}
-                for e in ready])
+                for e in expected])
 
     def test_worked_first_payload_schema_and_keys(self):
         from worked_first_context import (

@@ -94,7 +94,7 @@ class SequenceWorkedOpener(WorkedReviewOpener):
         body = json.loads(request.data.decode("utf-8"))
         context = json.loads(body["messages"][1]["content"])
         reviews = None
-        if context.get("schema") == WF_SCHEMA:
+        if context.get("review_examples") is not None:
             ready = [e for e in context["review_examples"]
                      if e.get("status") == "ready"]
             reviews = []
@@ -510,6 +510,7 @@ class HostedFactoryRetryTests(unittest.TestCase):
                 provider_mode="hosted")
         self.addCleanup(service.close, wait=True)
         self.assertTrue(service.cache._automatic_retries)
+        self.assertFalse(service.cache._reuse_captures)
         midpoint = service.midpoint_generator
         end = service.generator
         self.assertIsInstance(midpoint, CachedMidpointGenerator)
@@ -520,6 +521,55 @@ class HostedFactoryRetryTests(unittest.TestCase):
         self.assertFalse(service.cache._stop_retries.is_set())
         service.close(wait=True)
         self.assertTrue(service.cache._stop_retries.is_set())
+
+    def test_hosted_generators_call_fresh_on_identical_payloads(self):
+        mid_evidence = build_evidence(
+            self.bank, self.taxonomy,
+            midpoint_rows(self.bank, wrong_positions=(0, 5)))
+        end_evidence = build_evidence(
+            self.bank, self.taxonomy,
+            grounded_rows(self.bank, wrong_positions=(0, 5)))
+        mid_input = build_midpoint_input(mid_evidence)
+        end_input = build_full_input(
+            end_evidence, "student",
+            build_candidates(end_evidence, "end")[1])
+        end_reply = wire_reply(
+            candidate_id=end_input["selected_candidate"][
+                "candidate_id"],
+            sections=dict(VALID_SECTIONS))
+        opener = SequenceOpener([_midpoint_reply(), _midpoint_reply(),
+                               end_reply, end_reply])
+        inner = AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                               opener=opener)
+        with mock.patch.object(
+                AittaGenerator, "from_env", return_value=inner):
+            service = DemoService(
+                root=Path(self.tmp.name) / f"svc_{secrets.token_hex(4)}",
+                bank=self.bank, taxonomy=self.taxonomy,
+                diagnostics=fake_diagnostics(self.bank),
+                provider_mode="hosted")
+        self.addCleanup(service.close, wait=True)
+        self.assertFalse(service.cache._reuse_captures)
+        midpoint = service.midpoint_generator
+        midpoint.generate(copy.deepcopy(mid_input))
+        first = copy.deepcopy(midpoint.execution)
+        midpoint.generate(copy.deepcopy(mid_input))
+        second = copy.deepcopy(midpoint.execution)
+        self.assertFalse(first["reused"])
+        self.assertFalse(second["reused"])
+        self.assertNotEqual(first["capture_file"],
+                            second["capture_file"])
+        end = service.generator
+        end.generate(copy.deepcopy(end_input))
+        third = copy.deepcopy(end.execution)
+        end.generate(copy.deepcopy(end_input))
+        fourth = copy.deepcopy(end.execution)
+        self.assertFalse(third["reused"])
+        self.assertFalse(fourth["reused"])
+        self.assertNotEqual(third["capture_file"],
+                            fourth["capture_file"])
+        self.assertEqual(len(opener.calls), 4)
+        self.assertEqual(service.cache.new_calls, 4)
 
 
 if __name__ == "__main__":

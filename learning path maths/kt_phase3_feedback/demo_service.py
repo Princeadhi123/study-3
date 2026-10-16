@@ -401,7 +401,8 @@ class DemoService:
         captures = self.root / "provider_captures"
         captures.mkdir(exist_ok=True)
         self.cache = CaptureCache(captures, call_budget,
-                                  automatic_retries=True)
+                                  automatic_retries=True,
+                                  reuse_captures=False)
         endpoint_hash = hashlib.sha256(
             inner._endpoint.encode("utf-8")).hexdigest()
         self.midpoint_generator = CachedMidpointGenerator(
@@ -713,8 +714,17 @@ class DemoService:
     def _student_feedback(self, session_id, meta, checkpoint):
         """Return the student-visible draft message for a checkpoint."""
         block = meta["checkpoints"][checkpoint]
-        message = block.get("student_message")
         job = block.get("phrasing_job") or {}
+        if checkpoint == "midpoint" and job.get("status") == "pending":
+            # The hosted call is queued, in flight, or between automatic
+            # retries: publish a safe waiting notice instead of the
+            # deterministic baseline so the student view matches the
+            # teacher view. The truthy payload keeps the normal pause.
+            return {"status": "pending", "sections": [],
+                    "text": "Aitta is preparing your midpoint check-in. "
+                            "You can continue with the assessment while "
+                            "it finishes."}
+        message = block.get("student_message")
         if checkpoint == "midpoint" and job.get("status") == "ready":
             draft = block.get("provider_draft")
             if draft is not None:
@@ -1139,7 +1149,7 @@ class DemoService:
                 "queued_at": utc_now()}
             try:
                 self.provider_pool.submit(
-                    self._run_provider_job_with_cache_policy, session_id)
+                    self._run_provider_job_for_session, session_id)
             except RuntimeError:
                 self._pending_provider -= 1
                 meta["provider_job"] = {
@@ -1238,13 +1248,9 @@ class DemoService:
         self._pending_provider += 1
         block["phrasing_job"] = {"status": "pending",
                                  "queued_at": utc_now()}
-        retry = (mode == "hosted"
-                 and (meta.get("replay") or {}).get(
-                     "retry_failed_provider_calls") is True)
         try:
             self.provider_pool.submit(
-                self._run_midpoint_phrasing, session_id, evidence,
-                retry_failed=retry)
+                self._run_midpoint_phrasing, session_id, evidence)
         except RuntimeError:
             self._pending_provider -= 1
             block["phrasing_job"] = {
@@ -1266,14 +1272,9 @@ class DemoService:
             record["rejected_draft"] = draft
         return record
 
-    def _run_midpoint_phrasing(self, session_id, evidence,
-                               retry_failed=False):
+    def _run_midpoint_phrasing(self, session_id, evidence):
         """Worker: one midpoint draft call; stores provider_draft."""
         adapter = self.midpoint_generator
-        cache = getattr(adapter, "cache", None) or self.cache
-        retry_scope = (cache.retry_failed_scope(retry_failed)
-                       if cache is not None else
-                       contextlib.nullcontext())
         draft = None
         try:
             with self._adapter_scope(adapter):
@@ -1281,9 +1282,8 @@ class DemoService:
                     adapter.execution = None
                 self._reset_rejected_draft(adapter)
                 try:
-                    with retry_scope:
-                        reply = adapter.generate(
-                            build_midpoint_input(evidence))
+                    reply = adapter.generate(
+                        build_midpoint_input(evidence))
                     draft = compose_midpoint_draft(evidence, reply)
                     job = {"status": "ready",
                            "prompt_version": MIDPOINT_PROMPT_VERSION,
@@ -1653,20 +1653,12 @@ class DemoService:
                     or self._generator_exec_record("worker_error")}
         return review, executions
 
-    def _run_provider_job_with_cache_policy(self, session_id):
+    def _run_provider_job_for_session(self, session_id):
         with self.lock:
             meta = self._load_meta(session_id)
-            retry = (meta["provider_job"]["provider_mode"] == "hosted"
-                     and (meta.get("replay") or {}).get(
-                         "retry_failed_provider_calls") is True)
             multi = self._is_multi(meta)
-        worker = (self._run_multi_provider_job if multi
-                  else self._run_provider_job)
-        if self.cache is not None:
-            with self.cache.retry_failed_scope(retry):
-                worker(session_id)
-        else:
-            worker(session_id)
+        (self._run_multi_provider_job if multi
+         else self._run_provider_job)(session_id)
 
     def _run_provider_job(self, session_id):
         try:

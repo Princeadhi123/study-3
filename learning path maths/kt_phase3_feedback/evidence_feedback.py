@@ -592,7 +592,7 @@ def _multi_generated_message(safe, selected, generator,
     from full_feedback import (
         MULTI_FULL_FEEDBACK_PROMPT_VERSION, build_multi_full_input,
         full_message_sections, validate_full_reply,
-        validate_worked_reviews)
+        validate_worked_reviews, worked_review_examples_for_reply)
     prompt_version = MULTI_FULL_FEEDBACK_PROMPT_VERSION
     fallback_reason = sel_trace["fallback_reason"]
     if (generator is None or sel_trace["selector_failed"]
@@ -611,22 +611,14 @@ def _multi_generated_message(safe, selected, generator,
     # is deliberately not caught.
     except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
         return None, "generator_error", "deterministic", prompt_version
-    checked = validate_full_reply(reply, selected["candidate_id"])
-    worked_reviews = None
-    if worked_first_context is not None:
-        # Worked-first replies may additionally carry provider-authored
-        # worked_reviews; a legacy two-field reply still supplies the
-        # narrative while the deterministic checked cards are retained.
-        expected = full_input["review_examples"]
-        if checked is None:
-            checked = validate_full_reply(
-                reply, selected["candidate_id"], expected)
-            worked_reviews = (validate_worked_reviews(
-                reply["worked_reviews"], expected)
-                if checked is not None else None)
-        else:
-            worked_reviews = validate_worked_reviews(
-                reply.get("worked_reviews"), expected)
+    # Grounded replies (worked-first or assessment-context multi) must
+    # carry full provider worked_reviews; a legacy two-field reply is a
+    # rejection there, not a silently accepted narrative.
+    expected = worked_review_examples_for_reply(full_input)
+    checked = validate_full_reply(reply, selected["candidate_id"], expected)
+    worked_reviews = (validate_worked_reviews(
+        reply["worked_reviews"], expected)
+        if expected is not None and checked is not None else None)
     if callback_payload != full_input or checked is None:
         return None, "invalid_generation", "deterministic", \
             prompt_version
@@ -659,47 +651,60 @@ def _multi_feedback_validation_label(message, full_message):
         return ("provider_full_narrative_shape_checks_only_requires_"
                 "educator_review")
     if full_message is not None:
+        if full_message.get("worked_reviews"):
+            return ("application_owned_facts_and_actions_provider_"
+                    "summary_and_worked_reviews_shape_checked_"
+                    "requires_educator_review")
         return ("application_owned_facts_and_actions_provider_summary_"
                 "shape_checked")
     return "deterministic_evidence_and_draft_actions"
 
 
 def _overlay_worked_review(card, overlay):
-    """Apply a validated provider explanation to a ready card copy,
-    preserving the deterministic checked wording for audit."""
+    """Apply a validated provider explanation to a selected card copy,
+    preserving the deterministic checked wording (if any) under
+    checked_steps/checked_reasoning_question for audit. The provider
+    wording was generated from the question and recorded answers only;
+    it is shape-checked, not independently verified."""
+    from assessment_worked_review import READY_NOTICE
     card["checked_steps"] = card.get("steps")
     card["checked_reasoning_question"] = card.get("reasoning_question")
     card["steps"] = copy.deepcopy(overlay["steps"])
     card["reasoning_question"] = overlay["reasoning_question"]
     card["explanation"] = "\n".join(overlay["steps"])
+    card["status"] = "ready"
+    card["notice"] = READY_NOTICE
     card["explanation_source"] = "provider"
     card["explanation_validation"] = "shape_only_requires_educator_review"
+    card["explanation_input"] = "question_and_recorded_answers_v1"
 
 
 def _display_worked_review_examples(examples, assessment_context,
-                                    provider_full_narrative,
-                                    worked_first_context, full_message):
+                                    full_message):
     """Build the displayed example list, overlaying validated provider
-    worked_reviews only for worked-first provider-full narratives.
-    Returns (displayed_examples, worked_review_sources); both are None
-    when there is no assessment context, and sources is None unless the
-    worked-first overlay path is active."""
+    worked_reviews by exact question_id onto every selected card —
+    including ones whose deterministic solver was unavailable — for
+    both the question-first and worked-first flows. Returns
+    (displayed_examples, worked_review_sources); both are None when
+    there is no assessment context. Cards without a valid overlay keep
+    their original checked or unavailable wording; ready ones are
+    marked explanation_source 'application'."""
     displayed = (copy.deepcopy(examples)
                  if assessment_context is not None else None)
-    if displayed is None or not (
-            provider_full_narrative
-            and worked_first_context is not None):
+    if displayed is None:
         return displayed, None
-    from full_feedback import validate_worked_reviews
+    from full_feedback import (
+        provider_review_examples, validate_worked_reviews)
     overlays = (validate_worked_reviews(
-        full_message.get("worked_reviews"), examples)
+        full_message.get("worked_reviews"),
+        provider_review_examples(examples))
         if full_message is not None else None)
     by_id = ({entry["question_id"]: entry for entry in overlays}
              if overlays is not None else {})
     sources = {}
     for card in displayed:
         overlay = by_id.get(card.get("question_id"))
-        if overlay is not None and card.get("status") == "ready":
+        if overlay is not None:
             _overlay_worked_review(card, overlay)
             sources[card["question_id"]] = "provider"
         else:
@@ -757,8 +762,7 @@ def run_multi_feedback(evidence, selection=None, selector=None,
         provider_full_narrative=provider_full_narrative)
     displayed_examples, worked_review_sources = \
         _display_worked_review_examples(
-            examples, assessment_context, provider_full_narrative,
-            worked_first_context, full_message)
+            examples, assessment_context, full_message)
     review = {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
         "audience": "student", "checkpoint": "end",

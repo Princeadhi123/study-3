@@ -851,9 +851,10 @@ function endFeedbackSource(review, delivery, execution) {
       label: base
         ? `${base}, then teacher-edited`
         : "Teacher-edited (original source unavailable)",
-      partial};
+      partial,
+      providerAuthored};
   }
-  return {label: base || "Recorded wording", partial};
+  return {label: base || "Recorded wording", partial, providerAuthored};
 }
 
 function renderSelectionDecision(audience, review, baseline,
@@ -1426,8 +1427,13 @@ function renderStructuredFeedback(container, payload) {
         example.teacher_edited
           ? "Teacher-edited AI-drafted explanation — teacher " +
             "wording, review before release."
-          : "AI-drafted explanation based on checked mathematics; " +
-            "teacher review required.",
+          : (example.explanation_input
+             === "question_and_recorded_answers_v1"
+             ? "AI-drafted explanation from the question and " +
+               "recorded answers; not independently verified. " +
+               "Teacher review required."
+             : "AI-drafted explanation; not independently verified. " +
+               "Teacher review required."),
         "meta"));
     }
     let solutionHost = null;
@@ -1519,7 +1525,9 @@ function renderStructuredFeedback(container, payload) {
           example.status === "ready"
             ? (example.teacher_edited
                ? "Reveal answer and worked steps"
-               : "Reveal checked worked steps")
+               : (example.explanation_source === "provider"
+                  ? "Reveal AI-drafted worked explanation"
+                  : "Reveal checked worked steps"))
             : "Reveal recorded correct answer"));
         solutionContent(solution);
         box.appendChild(solution);
@@ -1788,7 +1796,24 @@ function studentPage() {
 
   function renderMessage(container, message) {
     container.replaceChildren();
-    if (!message) return;
+    if (!message) {
+      container.removeAttribute("aria-busy");
+      return;
+    }
+    // While the hosted midpoint call is queued, in flight, or between
+    // automatic retries the snapshot carries a pending notice instead
+    // of the deterministic check-in; nothing else renders until it
+    // resolves.
+    if (message.status === "pending") {
+      const note = el("p", message.text || "",
+        "midpoint-feedback-waiting");
+      note.setAttribute("role", "status");
+      note.setAttribute("aria-live", "polite");
+      container.appendChild(note);
+      container.setAttribute("aria-busy", "true");
+      return;
+    }
+    container.removeAttribute("aria-busy");
     (message.sections || []).forEach((section) => {
       if (section.title) {
         const box = el("section", null, "sec");
@@ -1838,7 +1863,8 @@ function studentPage() {
       // not steal focus back from the Continue button every cycle.
       if (entering) $("#pause-heading").focus({preventScroll: true});
       // Keep polling while paused so a ready Aitta midpoint wording
-      // replaces the deterministic fallback without a reload.
+      // replaces the pending notice (or terminal fallback) without a
+      // reload.
       schedule(POLL_MS);
       return;
     }
@@ -2230,13 +2256,9 @@ function teacherPage() {
 function createDetailView(root, options = {}) {
   const prefix = options.prefix || "";
   const $ = (selector) => root.querySelector(selector.replace(/#([\w-]+)/g, (_, id) => `#${prefix}${id}`));
-  const TABS = ["overview", "evidence", "graph", "research", "feedback", "review"];
-  const STALE_NOTE = "The feedback draft changed. Re-read it before reviewing the new version.";
+  const TABS = ["overview", "evidence", "graph", "research", "feedback"];
   let detail = null, selected = null, tab = "overview", researchCp = "end";
-  let contract = null;
-  const drafts = new Map();   // "sid:audience" -> draft state
   const releaseDrafts = new Map();
-  let reviewRenderKey = null; // rebuild review form only when this changes
   // scopeKey -> Map(disclosureKey -> open). Scope is derived from the
   // pane's last rendered scope so a session/checkpoint switch never
   // transfers another context's expand/collapse choices.
@@ -2366,7 +2388,6 @@ function createDetailView(root, options = {}) {
     renderPane("graph", renderGraphContent);
     renderPane("research", renderResearchContent);
     renderPane("feedback", renderFeedbackContent);
-    renderPane("review", renderReviewContent);
   }
 
   /* ---------- tabs ---------- */
@@ -2488,66 +2509,423 @@ function createDetailView(root, options = {}) {
     return hit ? englishSkillName(hit.skill_name) : skillId;
   }
 
+  /* Focus subtopics of the recorded end review selection. Multi-candidate
+     selections expose selected_candidates; single selections are found
+     through selected_candidate_id. A baseline shown while the provider
+     job is still pending is provisional. */
+  function selectedReviewFocuses() {
+    const end = detail.checkpoints.end || {};
+    const review = end.student_review || end.baseline_student;
+    if (!review) return {focuses: [], provisional: false, review: null};
+    const applied = (review.selected_candidates || []).length
+      ? review.selected_candidates
+      : [(review.candidates || []).find(
+          (c) => c.candidate_id === review.selected_candidate_id)]
+        .filter(Boolean);
+    const focuses = [];
+    applied.forEach((cand) => {
+      (((cand || {}).review_candidates) || [cand]).forEach((inner) => {
+        if (inner && inner.focus) focuses.push(inner.focus);
+      });
+    });
+    return {focuses, review,
+            provisional: !end.student_review
+              && ["not_requested", "pending", "waiting_for_practice",
+                  "waiting_for_diagnostics"].includes(
+                    (detail.provider_job || {}).status)};
+  }
+
+  /* Worked-review example cards as currently displayed: the live preview
+     list when a preview exists (an empty list is honored), otherwise the
+     retained review's recorded cards. A teacher-edited document keeps
+     its own wording; structured linkage back to tasks is unavailable. */
+  function currentWorkedExamples() {
+    const delivery = detail.feedback_delivery || {};
+    const end = detail.checkpoints.end || {};
+    const review = end.student_review || end.baseline_student;
+    const preview = delivery.preview;
+    if (preview) {
+      return {cards: Array.isArray(preview.review_examples)
+                    ? preview.review_examples : [],
+              editedDocument:
+                typeof preview.document_text === "string"
+                || Array.isArray(preview.document_blocks)};
+    }
+    return {cards: (review && review.review_examples) || [],
+            editedDocument: false};
+  }
+
+  function taskTopicName(skillId, fallbackName) {
+    const resolved = skillNameForId(skillId);
+    if (resolved !== skillId) return resolved;
+    return fallbackName ? englishSkillName(fallbackName) : skillId;
+  }
+
   function renderGraphContent() {
     const pane = $("#tab-graph");
     pane.replaceChildren();
-    const context = detail.content_context;
-    if (context && context.exercises) {
-      const content = el("div", null, "card-inner");
-      content.appendChild(el("h3", `${detail.bank_label || "Assessment"} · descriptive content and practice`));
-      content.appendChild(el("p",
-        `Graph v3 · ${context.practice_question_count} practice drafts · pending formal educator review. ` +
-        "Review does not approve learner delivery. These descriptions do not explain incorrect answers.", "warn"));
-      for (const role of ["assessment", "practice"]) {
-        const rows = context.exercises.filter((row) => row.role === role);
-        if (!rows.length) continue;
-        const section = el("details");
-        section.appendChild(el("summary", `${role === "practice" ? "Practice drafts" : "Assessed tasks"} (${rows.length})`));
-        rows.forEach((row) => {
-          const item = el("div", null, "topic");
-          item.appendChild(el("h4", englishQuestionText(row)));
-          const options = el("ol");
-          row.options.forEach((option) => options.appendChild(el("li", englishOptionText(option))));
-          item.appendChild(options);
-          item.appendChild(el("p", `${row.concept_label}: ${row.mathematical_task}`));
-          item.appendChild(el("p", row.interpretation_boundary, "meta small"));
-          section.appendChild(item);
-        });
-        content.appendChild(section);
+    const context = detail.content_context || {};
+    const end = detail.checkpoints.end || {};
+    const job = detail.provider_job || {};
+    const selection = selectedReviewFocuses();
+    const review = selection.review;
+    const focusSubIds = new Set(
+      selection.focuses.map((f) => f.subtopic_id).filter(Boolean));
+    const examples = currentWorkedExamples();
+    const exampleByQid = new Map();
+    examples.cards.forEach((card) => {
+      if (card && card.question_id) {
+        exampleByQid.set(card.question_id, card);
       }
-      pane.appendChild(content);
+    });
+    const responses = detail.question_responses || [];
+    const exByQid = new Map();
+    (context.exercises || []).forEach((ex) => {
+      if (ex.role === "assessment") exByQid.set(ex.question_id, ex);
+    });
+    const practiceRows = (context.exercises || []).filter(
+      (ex) => ex.role === "practice");
+
+    const intro = el("div", null, "card-inner skill-map");
+    intro.appendChild(el("h3",
+      `${detail.bank_label || "Assessment"} · skill map`));
+    intro.appendChild(el("p",
+      "Topic → subtopic → assessed task: each assessed task belongs to " +
+      "one subtopic inside one topic. Subtopics are part-of groupings " +
+      "of the assessed content — they are not prerequisites and do not " +
+      "imply a learning order."));
+    intro.appendChild(el("p",
+      "Topic and subtopic counts below are observed correct/incorrect " +
+      "totals from the recorded answers. They inform the error-based " +
+      "review-focus selection: only the selected focus subtopics become " +
+      "worked reviews. An incorrect answer is an observed error, not " +
+      "evidence of missing mastery or of its cause.", "meta"));
+    if (context.status) {
+      intro.appendChild(el("p",
+        `Graph v3 · ${context.practice_question_count ?? "—"} practice ` +
+        "drafts · pending formal educator review. Review does not " +
+        "approve learner delivery. 'Task requirement' descriptions are " +
+        "teacher context — they describe the assessment and are not " +
+        "separately measured.", "warn"));
+    } else {
+      intro.appendChild(el("p",
+        "Current descriptive content is unavailable for this session; " +
+        "tasks are listed from the recorded answers.", "warn"));
     }
+    const use = el("details", null, "raw");
+    use.dataset.disclosureKey = "skill-map-evidence-use";
+    use.appendChild(el("summary", "How feedback uses this evidence"));
+    use.appendChild(el("p",
+      "Observed counts and topic/subtopic names are used for review " +
+      "planning. When an assessment-grounded worked review is " +
+      "available, the recorded question, options, the selected and " +
+      "correct answers and checked steps form a worked-review example " +
+      "for each selected focus.", "meta"));
+    const variant = detail.feedback_variant
+      || ((detail.feedback_delivery || {}).feedback_variant);
+    if (variant === "worked_first") {
+      use.appendChild(el("p",
+        "This session is configured for the worked-first flow: when a " +
+        "hosted full-generation run succeeds, its request includes all " +
+        "recorded questions, options, selected and correct answers and " +
+        "this descriptive topic/subtopic graph. A configured variant " +
+        "does not prove that call ran — check the wording source on " +
+        "the Feedback drafts tab.", "meta"));
+    } else {
+      use.appendChild(el("p",
+        "The question-first flow is built from all aggregate counts; " +
+        "only the selected worked-review examples are sent as raw " +
+        "records — it does not send all 40 raw answer records.", "meta"));
+    }
+    use.appendChild(el("p",
+      "Task requirement descriptions are teacher context; they are not " +
+      "sent as a 'task requirement' field in the feedback request.", "meta"));
+    if (selection.provisional) {
+      use.appendChild(el("p",
+        "Feedback generation is still processing; the baseline " +
+        "selection shown is provisional.", "meta"));
+    }
+    if (review && (review.trace || {}).fallback_reason) {
+      use.appendChild(el("p",
+        `A provider fallback was recorded ` +
+        `(${String(review.trace.fallback_reason).replaceAll("_", " ")}).`,
+        "meta"));
+    }
+    if (detail.read_only) {
+      use.appendChild(el("p",
+        "Retained original — recorded evidence shown as saved; nothing " +
+        "is recomputed.", "meta"));
+    }
+    intro.appendChild(use);
+    pane.appendChild(intro);
+
     const card = el("div", null, "card-inner");
-    card.appendChild(el("p",
-      "Assessment structure only: subtopics are part-of groupings, " +
-      "not prerequisites.", "meta"));
     const graph = graphFor();
     if (!graph) {
       card.appendChild(el("p",
         "Graph appears once a checkpoint is reached."));
-      pane.appendChild(card);
-      return;
-    }
-    card.appendChild(el("p",
-      `Observed counts at ${graph.checkpoint} checkpoint.`, "meta"));
-    (graph.topics || []).forEach((topic) => {
-      const box = el("div", null, "topic");
-      const heading = topic.out_of === 0
-        ? `${englishSkillName(topic.skill_name)} — not yet assessed`
-        : `${englishSkillName(topic.skill_name)} — ${topic.correct}/${topic.out_of} observed correct`;
-      box.appendChild(el("h4", heading));
-      const list = el("ul");
-      (topic.subtopics || []).forEach((leaf) => {
-        list.appendChild(el("li",
-          leaf.out_of === 0
+    } else {
+      card.appendChild(el("p",
+        `Observed counts at ${graph.checkpoint} checkpoint.`, "meta"));
+      (graph.topics || []).forEach((topic) => {
+        const box = el("div", null, "topic");
+        const heading = topic.out_of === 0
+          ? `${englishSkillName(topic.skill_name)} — not yet assessed`
+          : `${englishSkillName(topic.skill_name)} — ${topic.correct}/${topic.out_of} observed correct`;
+        box.appendChild(el("h4", heading));
+        const list = el("ul");
+        (topic.subtopics || []).forEach((leaf) => {
+          let line = leaf.out_of === 0
             ? `${leaf.subtopic_name}: not yet assessed`
             : `${leaf.subtopic_name}: ${leaf.correct} correct, ` +
-              `${leaf.incorrect} incorrect of ${leaf.out_of}`));
+              `${leaf.incorrect} incorrect of ${leaf.out_of}`;
+          if (focusSubIds.has(leaf.subtopic_id)) {
+            line += selection.provisional
+              ? " · selected review focus (provisional)"
+              : " · selected review focus";
+          }
+          list.appendChild(el("li", line));
+        });
+        box.appendChild(list);
+        card.appendChild(box);
       });
-      box.appendChild(list);
-      card.appendChild(box);
-    });
+    }
     pane.appendChild(card);
+
+    const content = el("div", null, "card-inner skill-map");
+    const seen = new Set();
+    const tasks = [];
+    responses.forEach((row) => {
+      seen.add(row.question_id);
+      tasks.push({row, ex: exByQid.get(row.question_id) || null});
+    });
+    exByQid.forEach((ex, qid) => {
+      if (!seen.has(qid)) tasks.push({row: null, ex});
+    });
+    const noResponseSource = responses.length === 0
+      && Boolean(detail.response_notice);
+
+    function feedbackRole(task) {
+      const qid = task.row ? task.row.question_id
+        : (task.ex && task.ex.question_id);
+      if (!review) {
+        return {text: "Feedback selection pending", badge: null};
+      }
+      // A recorded answer keeps its own historical subtopic id — a null
+      // is never repaired with the current content mapping. The current
+      // content concept is used only for tasks with no record at all,
+      // and only when the response source itself is present.
+      const subId = task.row ? task.row.subtopic_id
+        : (noResponseSource ? null : (task.ex && task.ex.concept_id));
+      const inFocus = focusSubIds.has(subId);
+      const suffix = selection.provisional ? " (provisional)" : "";
+      if (examples.editedDocument) {
+        return inFocus
+          ? {text: "Selected review focus; structured example linkage " +
+                   "into the teacher-edited document is unavailable"
+                   + suffix,
+             badge: "focus"}
+          : {text: "Not selected as a worked-review example",
+             badge: null};
+      }
+      const card = qid ? exampleByQid.get(qid) : null;
+      if (card) {
+        return {text: (card.status === "unavailable"
+                  ? "Selected worked-review example — worked solution " +
+                    "unavailable"
+                  : "Selected worked-review example") + suffix,
+                badge: "example"};
+      }
+      if (inFocus) {
+        const sibling = examples.cards.some((c) =>
+          c && c.question_id && c.question_id !== qid
+          && c.subtopic_id === subId);
+        return {text: (sibling
+                  ? "Selected review focus — a different task in this " +
+                    "subtopic is the worked-review example"
+                  : "Selected review focus; no structured worked-review " +
+                    "example is available for this subtopic") + suffix,
+                badge: "focus"};
+      }
+      return {text: "Not selected as a worked-review example",
+              badge: null};
+    }
+
+    /* Recorded practice selection per pool draft, matched strictly by
+     * question_id. practice_contexts (per-candidate slots) wins over the
+     * legacy flat practice_context when the property exists — including
+     * an empty array, which is a recorded "no slot" state, not a missing
+     * one. Missing identity is "not recorded", never guessed from card
+     * wording. */
+    function practiceSelectionFor(ex) {
+      const pending =
+        (end.recommendation_job || {}).status === "pending"
+        || job.status === "waiting_for_practice";
+      if (pending) return {text: "Selection pending", kind: "muted"};
+      const slots = Object.hasOwn(end, "practice_contexts")
+        ? (end.practice_contexts || [])
+        : (end.practice_context ? [{context: end.practice_context}]
+                                : null);
+      if (!slots || !slots.length) {
+        return {text: "Selection not recorded", kind: "muted"};
+      }
+      const ctxOf = (slot) => ((slot && slot.context) || slot) || {};
+      if (slots.some((slot) => ctxOf(slot).status === "selected"
+              && ctxOf(slot).selected_question_id === ex.question_id)) {
+        return {text: "Selected practice", kind: "selected"};
+      }
+      // A selected slot without a recorded question id cannot mark any
+      // row; missing identity is never a non-selection.
+      if (slots.some((slot) => ctxOf(slot).status === "selected"
+              && !ctxOf(slot).selected_question_id)) {
+        return {text: "Selection not recorded", kind: "muted"};
+      }
+      const statuses = slots.map((slot) => ctxOf(slot).status);
+      if (statuses.every((s) => s === "disabled")) {
+        return {text: "Selection disabled", kind: "muted"};
+      }
+      if (statuses.every((s) => s === "unavailable")) {
+        return {text: "Selection unavailable", kind: "muted"};
+      }
+      if (statuses.every((s) => ["selected", "abstained", "unavailable",
+                                 "disabled"].includes(s))) {
+        return {text: "Not selected", kind: "muted"};
+      }
+      return {text: "Selection not recorded", kind: "muted"};
+    }
+
+    function taskCard(task) {
+      const row = task.row, ex = task.ex;
+      const qid = row ? row.question_id : ex.question_id;
+      const result = row
+        ? (row.correct ? "Correct" : "Incorrect")
+        : (noResponseSource ? "Answer record unavailable" : "Not answered");
+      const topicName = taskTopicName(
+        (row || ex).skill_id, ex && ex.skill_name);
+      const missingMapping = row && row.subtopic_id === null;
+      const subName = row
+        ? (missingMapping ? "Unavailable for this record"
+                          : row.subtopic_name)
+        : (ex.concept_label || "—");
+      const role = feedbackRole(task);
+      const d = el("details", null, "skill-task");
+      d.dataset.disclosureKey = `skill-task:${qid}`;
+      const summary = el("summary");
+      summary.appendChild(el("span",
+        `#${row ? row.position : "—"} · ${topicName} · ${subName}`,
+        "skill-task-label"));
+      const statusGroup = el("span", null, "skill-task-status");
+      if (role.badge) {
+        statusGroup.appendChild(el("span",
+          (role.badge === "example"
+            ? "Selected worked review" : "Review focus")
+          + (selection.provisional ? " (provisional)" : ""),
+          `skill-badge is-${role.badge}`));
+      }
+      statusGroup.appendChild(el("span", result,
+        `skill-task-result ${result === "Correct"
+          ? "is-correct" : result === "Incorrect"
+            ? "is-incorrect" : "is-unknown"}`));
+      summary.appendChild(statusGroup);
+      d.appendChild(summary);
+      const text = (row && row.text) || (ex && ex.text);
+      if (text) {
+        d.appendChild(el("h4", englishQuestionText({text})));
+      }
+      const options = (row && row.options) || (ex && ex.options) || [];
+      if (options.length) {
+        const list = el("ol");
+        options.forEach((option) =>
+          list.appendChild(el("li", englishOptionText(option))));
+        d.appendChild(list);
+      }
+      d.appendChild(kv("Topic", topicName));
+      d.appendChild(kv("Subtopic", subName));
+      if (missingMapping) {
+        d.appendChild(el("p",
+          "Historical subtopic mapping is unavailable for this record; " +
+          "the current content label is not substituted.", "meta small"));
+      }
+      d.appendChild(kv(missingMapping
+          ? "Task requirement (current descriptive context)"
+          : "Task requirement",
+        (ex && ex.mathematical_task)
+          ? ex.mathematical_task
+          : "No descriptive context is bound to this task in the " +
+            "current content map."));
+      if (row) {
+        d.appendChild(kv("Your answer",
+          englishOptionText(row.options[row.selected_index])));
+        d.appendChild(kv("Correct answer",
+          englishOptionText(row.options[row.answer_index])));
+      }
+      d.appendChild(kv("Result", result));
+      d.appendChild(kv("Feedback role", role.text));
+      return d;
+    }
+
+    if (tasks.length) {
+      const section = el("details", null, "skill-map-section");
+      section.dataset.disclosureKey = "skill-map-assessed";
+      section.appendChild(el("summary",
+        `Assessed tasks (${tasks.length})`));
+      section.appendChild(el("p",
+        "Task requirements are not separately measured skills. An " +
+        "incorrect choice does not establish which step was difficult " +
+        "or why the choice was made. 'Not selected as a worked-review " +
+        "example' does not remove a task from the aggregate counts " +
+        "above. Badges: 'Selected worked review' marks the recorded " +
+        "example task; 'Review focus' marks other tasks inside a " +
+        "selected focus subtopic.", "meta"));
+      tasks.forEach((task) => section.appendChild(taskCard(task)));
+      content.appendChild(section);
+    }
+    if (practiceRows.length) {
+      const section = el("details", null, "skill-map-section");
+      section.dataset.disclosureKey = "skill-map-practice";
+      section.appendChild(el("summary",
+        `Practice drafts (${practiceRows.length})`));
+      section.appendChild(el("p",
+        "Separate possible practice drafts — not answered assessment " +
+        "evidence and not automatically assigned to this learner. " +
+        "Task requirements are not separately measured skills. " +
+        "'Selected practice' marks the recorded practice " +
+        "recommendation — it is not approval or release, and not " +
+        "evidence that a teacher-edited document includes it.", "meta"));
+      if (examples.editedDocument) {
+        section.appendChild(el("p",
+          "The current feedback is a teacher-edited document; whether " +
+          "the edited wording includes the recorded selection cannot " +
+          "be confirmed from this view.", "meta"));
+      }
+      practiceRows.forEach((ex) => {
+        const sel = practiceSelectionFor(ex);
+        const item = el("details", null, "skill-task");
+        item.dataset.disclosureKey = `skill-practice:${ex.question_id}`;
+        const topicName = taskTopicName(ex.skill_id, ex.skill_name);
+        const summary = el("summary");
+        summary.appendChild(el("span",
+          `Practice · ${topicName} · ${ex.concept_label || "—"}`,
+          "skill-task-label"));
+        summary.appendChild(el("span", null, "skill-task-status"))
+          .appendChild(el("span", sel.text,
+            `skill-badge is-${sel.kind}`));
+        item.appendChild(summary);
+        item.appendChild(el("h4", englishQuestionText(ex)));
+        const options = el("ol");
+        (ex.options || []).forEach((option) =>
+          options.appendChild(el("li", englishOptionText(option))));
+        item.appendChild(options);
+        item.appendChild(kv("Topic", topicName));
+        item.appendChild(kv("Subtopic", ex.concept_label || "—"));
+        item.appendChild(kv("Task requirement",
+          ex.mathematical_task || "—"));
+        item.appendChild(kv("Selection", sel.text));
+        section.appendChild(item);
+      });
+      content.appendChild(section);
+    }
+    if (content.childElementCount) pane.appendChild(content);
   }
 
   function ktChart(diag) {
@@ -2848,7 +3226,13 @@ function createDetailView(root, options = {}) {
               "topics, answer keys, checked maths and practice cards " +
               "remain application-owned."
             : "Strengths, review focus and next steps are " +
-              "application-owned."));
+              "application-owned." +
+              (((preview && preview.review_examples) || []).some(
+                (e) => e.explanation_source === "provider")
+                ? " Worked explanations are AI-drafted and " +
+                  "shape-checked, not fact-verified; teacher review " +
+                  "is required."
+                : "")));
       }
     }
     if (detail.feedback_variant === "worked_first" && preview
@@ -2905,7 +3289,11 @@ function createDetailView(root, options = {}) {
     const shown = el("div", null, "feedback-preview");
     renderStructuredFeedback(shown, preview);
     card.appendChild(shown);
-    if (delivery.deterministic_preview) {
+    if (delivery.deterministic_preview
+        && (wording.providerAuthored
+            || delivery.preview_source === "teacher_edited"
+            || (job.status === "pending"
+                && job.provider_mode === "hosted"))) {
       const compare = el("details", null,
         "raw end-deterministic-comparison");
       compare.dataset.disclosureKey = "end-deterministic-comparison";
@@ -3504,40 +3892,59 @@ function createDetailView(root, options = {}) {
     card.appendChild(el("h3", "Student midpoint check-in"));
     const midpoint = detail.checkpoints.midpoint || {};
     const job = midpoint.phrasing_job || null;
+    const pending = Boolean(job && job.status === "pending");
     const aittaActive = Boolean(
-      job && job.status === "ready" && midpoint.provider_draft);
+      !pending && job && job.status === "ready"
+      && midpoint.provider_draft);
     const baseline = midpoint.student_message
       || (midpoint.baseline_student && midpoint.baseline_student.message);
     const message = aittaActive ? midpoint.provider_draft : baseline;
-    if (!message) {
+    if (!pending && !message) {
       card.appendChild(el("p",
         "No saved midpoint message is available in this result."));
     } else {
       card.appendChild(el("p",
         "Current student-facing wording from the 20-question " +
         "checkpoint, displayed with English topic labels. Aitta " +
-        "wording is used automatically when the hosted draft is ready; " +
-        "otherwise the deterministic check-in is shown. This record " +
-        "does not confirm that the student opened or read it.",
+        "wording is used automatically when the hosted draft is " +
+        "ready; while it is being generated a waiting notice is " +
+        "shown, and the deterministic check-in takes over only if " +
+        "generation finishes without a draft. This record does not " +
+        "confirm that the student opened or read it.",
         "meta"));
-      const box = el("div", null, "midpoint-feedback-message");
-      const sections = message.sections || [];
-      if (sections.length) {
-        sections.forEach((section) => {
-          if (section.title) box.appendChild(el("h4", section.title));
-          box.appendChild(el("p", englishMidpointText(section.text)));
-          if (section.kind === "encouragement") {
-            renderMidpointSummary(box, message);
-          }
-        });
+      if (pending) {
+        // No wording is shown as current while the call is queued,
+        // in flight, or between automatic retries.
+        const waiting = el("div", null, "midpoint-feedback-waiting");
+        waiting.setAttribute("role", "status");
+        waiting.setAttribute("aria-live", "polite");
+        waiting.setAttribute("aria-busy", "true");
+        waiting.appendChild(el("p",
+          "Aitta is preparing the midpoint check-in. Please wait " +
+          "while generation and any automatic retries finish."));
+        card.appendChild(waiting);
+        card.appendChild(kv("Generation status", "Processing"));
       } else {
-        renderMidpointSummary(box, message);
-        box.appendChild(el("p", englishMidpointText(message.text || "")));
+        const box = el("div", null, "midpoint-feedback-message");
+        const sections = message.sections || [];
+        if (sections.length) {
+          sections.forEach((section) => {
+            if (section.title) box.appendChild(el("h4", section.title));
+            box.appendChild(el("p", englishMidpointText(section.text)));
+            if (section.kind === "encouragement") {
+              renderMidpointSummary(box, message);
+            }
+          });
+        } else {
+          renderMidpointSummary(box, message);
+          box.appendChild(el("p",
+            englishMidpointText(message.text || "")));
+        }
+        card.appendChild(box);
+        card.appendChild(kv("Wording source",
+          aittaActive ? "Aitta" : "Deterministic fallback"));
       }
-      card.appendChild(box);
-      card.appendChild(kv("Wording source",
-        aittaActive ? "Aitta" : "Deterministic fallback"));
-      if (aittaActive && baseline) {
+      if ((pending || aittaActive) && baseline) {
         const compare = el("details", null,
           "raw midpoint-deterministic-comparison");
         compare.dataset.disclosureKey =
@@ -3554,7 +3961,7 @@ function createDetailView(root, options = {}) {
         card.appendChild(compare);
       }
     }
-    renderMidpointProviderDraft(card, midpoint, aittaActive);
+    renderMidpointProviderDraft(card, midpoint, aittaActive, pending);
     pane.appendChild(card);
   }
 
@@ -3562,7 +3969,8 @@ function createDetailView(root, options = {}) {
      automatically when ready; the deterministic check-in is the
      fallback. Rejected wording and execution records stay
      teacher-facing only. */
-  function renderMidpointProviderDraft(card, midpoint, aittaActive) {
+  function renderMidpointProviderDraft(card, midpoint, aittaActive,
+                                       pending) {
     const job = midpoint.phrasing_job || null;
     const draft = midpoint.provider_draft || null;
     if (!job && !draft) return;
@@ -3575,7 +3983,8 @@ function createDetailView(root, options = {}) {
       "the topic table are application-owned; wording is " +
       "shape-checked, not fact-verified.", "warn"));
     renderMidpointDraftJob(inner, job);
-    renderMidpointVersionDetails(inner, midpoint, job, aittaActive);
+    renderMidpointVersionDetails(inner, midpoint, job, aittaActive,
+                                 pending);
     if (!aittaActive) {
       renderMidpointDraftMessage(inner, draft, job);
     }
@@ -3621,10 +4030,12 @@ function createDetailView(root, options = {}) {
      saved records only, no invented constants. The deterministic
      reference version lives inside its own comparison dropdown. */
   function renderMidpointVersionDetails(inner, midpoint, job,
-                                        aittaActive) {
-    const selected = aittaActive
+                                        aittaActive, pending) {
+    // While pending no wording is selected, so neither the baseline
+    // template nor the draft version is claimed as the live one.
+    const selected = pending ? null : (aittaActive
       ? midpoint.provider_draft_version
-      : midpoint.student_message_version;
+      : midpoint.student_message_version);
     if (selected) {
       inner.appendChild(kv("Template version", selected));
     }
@@ -3715,8 +4126,8 @@ function createDetailView(root, options = {}) {
     if (job && job.status === "pending") {
       inner.appendChild(el("p",
         "Aitta midpoint drafting is queued or in progress. The " +
-        "deterministic student check-in above remains unchanged.",
-        "meta"));
+        "student sees a waiting notice; the deterministic check-in " +
+        "stays saved for comparison and fallback.", "meta"));
       return;
     }
     const transport = (job && job.execution && job.execution.metadata
@@ -3778,7 +4189,9 @@ function createDetailView(root, options = {}) {
         saved.appendChild(shown);
         const savedBaseline =
           (detail.checkpoints.end || {}).baseline_student;
-        if (savedBaseline && savedBaseline.message) {
+        if (savedBaseline && savedBaseline.message
+            && endFeedbackSource(savedReview, null, null)
+                 .providerAuthored) {
           const compare = el("details", null,
             "raw end-deterministic-comparison");
           compare.dataset.disclosureKey =
@@ -3995,188 +4408,7 @@ function createDetailView(root, options = {}) {
     }
   }
 
-  /* ---------- review tab with per-session draft state ---------- */
-
-  function draftKey(sid, audience) { return `${sid}:${audience}`; }
-
-  function draftFor(sid, audience, currentHash) {
-    const key = draftKey(sid, audience);
-    if (!drafts.has(key)) {
-      drafts.set(key, {
-        judgments: {}, note: "", label: "",
-        hash: currentHash, savedToast: null});
-    }
-    const draft = drafts.get(key);
-    // First-ready bind: a draft opened while the provider job was still
-    // pending holds hash null; adopt the first real hash. An already
-    // bound non-null hash is never overwritten silently.
-    if (draft.hash === null && currentHash) draft.hash = currentHash;
-    return draft;
-  }
-
-  function renderReviewContent() {
-    const pane = $("#tab-review");
-    if (detail.read_only) {
-      pane.replaceChildren(el("h3", "Saved result — read-only"), el("p",
-        detail.read_only_reason || "Replay this scenario, then select the new result to record an educator review against its exact feedback version. Original reports and existing blind comparisons are never overwritten.", "boundary-note"));
-      renderLedger(pane);
-      return;
-    }
-    const hashes = detail.review_hashes || {};
-    const audience = "student";
-    const currentHash = hashes[audience] || null;
-    const draft = draftFor(selected, audience, currentHash);
-    const key = [selected, audience, currentHash,
-                 (detail.reviews || []).length, draft.savedToast,
-                 draft.stale].join("|");
-    if (key === reviewRenderKey && pane.childNodes.length) {
-      return; // poll left the form untouched; draft state is in DOM
-    }
-    reviewRenderKey = key;
-    pane.replaceChildren();
-    const card = el("div", null, "card-inner");
-    card.appendChild(el("p", contract ? contract.notice : "", "warn"));
-
-    card.appendChild(el("p", "Shared student-facing feedback", "meta"));
-
-    if (!currentHash) {
-      card.appendChild(el("p",
-        "Reviews open once the end feedback draft exists."));
-      renderLedger(card);
-      pane.appendChild(card);
-      return;
-    }
-
-    const stale = draft.hash !== currentHash || draft.stale;
-    if (stale) {
-      const warn = el("div", null, "warn");
-      warn.appendChild(el("p", STALE_NOTE));
-      const adopt = el("button", "Review current version", "primary small");
-      adopt.type = "button";
-      adopt.addEventListener("click", () => {
-        draft.hash = currentHash;
-        draft.stale = false;
-        draft.judgments = {}; // choices must be re-checked
-        draft.savedToast = null;
-        reviewRenderKey = null;
-        renderPane("review", renderReviewContent);
-      });
-      warn.appendChild(adopt);
-      card.appendChild(warn);
-    }
-    card.appendChild(el("p",
-      `Draft message bound: ${draft.hash.slice(0, 16)}…`,
-      "mono small"));
-
-    const form = el("form", null, "review-form");
-    (contract.fields || []).forEach((field) => {
-      const wrap = el("div", null, "field");
-      const sel = el("select");
-      sel.id = `${prefix}rev-field-${field.id}`;
-      const fieldLabel = el("label", field.question);
-      fieldLabel.htmlFor = sel.id;
-      wrap.appendChild(fieldLabel);
-      const blank = el("option", "— choose —");
-      blank.value = "";
-      sel.appendChild(blank);
-      field.choices.forEach((c) => {
-        const o = el("option", c);
-        o.value = c;
-        sel.appendChild(o);
-      });
-      sel.value = draft.judgments[field.id] || "";
-      sel.addEventListener("change", () => {
-        draft.judgments[field.id] = sel.value;
-      });
-      wrap.appendChild(sel);
-      form.appendChild(wrap);
-    });
-    const note = document.createElement("textarea");
-    note.id = `${prefix}rev-note`;
-    note.maxLength = 3000;
-    note.value = draft.note;
-    note.addEventListener("input", () => { draft.note = note.value; });
-    const label = document.createElement("input");
-    label.id = `${prefix}rev-reviewer`;
-    label.maxLength = 80;
-    label.value = draft.label;
-    label.addEventListener("input", () => { draft.label = label.value; });
-    const noteLabel = el("label", "Note (≤3000 chars, plain text)");
-    noteLabel.htmlFor = note.id;
-    const reviewerLabel = el("label", "Reviewer label (optional)");
-    reviewerLabel.htmlFor = label.id;
-    form.appendChild(noteLabel);
-    form.appendChild(note);
-    form.appendChild(reviewerLabel);
-    form.appendChild(label);
-    const status = el("p", null, "meta");
-    if (draft.savedToast) status.textContent = draft.savedToast;
-    const save = el("button", "Save review note", "primary");
-    save.type = "submit";
-    form.appendChild(save);
-    form.appendChild(status);
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const judgments = {};
-      let missing = false;
-      (contract.fields || []).forEach((field) => {
-        const v = draft.judgments[field.id] || "";
-        if (!v) missing = true;
-        judgments[field.id] = v;
-      });
-      if (missing) {
-        status.textContent = "Answer all five review questions.";
-        return;
-      }
-      save.disabled = true;
-      status.textContent = "Saving…";
-      try {
-        await api(`/api/teacher/sessions/${selected}/reviews`, {
-          body: {audience, message_sha256: draft.hash,
-                 judgments, note: draft.note,
-                 reviewer_label: draft.label || "anonymous"}});
-        draft.savedToast =
-          `Review note recorded — bound to ${draft.hash.slice(0, 16)}…`;
-        draft.stale = false;
-        status.textContent = draft.savedToast;
-        reviewRenderKey = null;
-        pollOnce(); // ledger refreshes separately
-      } catch (err) {
-        if (err.status === 409) {
-          draft.stale = true;
-          reviewRenderKey = null;
-          renderPane("review", renderReviewContent);
-        } else {
-          status.textContent = "Review was not accepted.";
-        }
-      } finally {
-        save.disabled = false;
-      }
-    });
-    card.appendChild(form);
-    renderLedger(card);
-    pane.appendChild(card);
-  }
-
-  function renderLedger(card) {
-    const ledger = el("div", null, "ledger");
-    ledger.appendChild(el("h3", "Saved review notes"));
-    (detail.reviews || []).forEach((entry) => {
-      const row = el("div", null, "ledger-row");
-      row.appendChild(el("p",
-        `${entry.recorded_at} · ${entry.audience} · ` +
-        `${entry.reviewer_label}`, "meta"));
-      row.appendChild(el("p",
-        `bound message ${entry.message_sha256.slice(0, 16)}… · ` +
-        `candidate ${entry.selected_candidate_id}`, "mono small"));
-      row.appendChild(jsonDetails("Judgments", entry.judgments,
-        `judgments:${entry.audience}:${entry.message_sha256}:` +
-        `${entry.recorded_at}`));
-      if (entry.note) row.appendChild(el("p", entry.note, "note"));
-      ledger.appendChild(row);
-    });
-    card.appendChild(ledger);
-  }
+  /* ---------- tabs ---------- */
 
   $("#ws-tabs").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-tab]");
@@ -4191,10 +4423,8 @@ function createDetailView(root, options = {}) {
 
   return {update(view) {
     if (JSON.stringify(view) === JSON.stringify(detail)) return;
-    if (selected !== view.session_id) reviewRenderKey = null;
     detail = view;
     selected = view.session_id;
-    contract = view.review_contract;
     renderDetail();
   }};
 }

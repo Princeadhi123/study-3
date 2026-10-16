@@ -35,11 +35,9 @@ function initResearchWorkspace({mountDetail, getConfig}) {
   }
 
   function replayProviderLabel(run) {
-    if (run.provider_mode === "rules") return "Rules only";
-    if (run.retry_failed_provider_calls) {
-      return "Configured providers · retry failed calls enabled";
-    }
-    return "Configured providers · capture reuse";
+    if (run.provider_mode === "rules" || run.provider_execution === "rules_only") return "Rules only";
+    if (run.provider_execution === "fresh_hosted_calls") return "Configured providers · fresh hosted calls";
+    return "Configured providers · historical execution";
   }
 
   function feedbackVariantLabel(variant) {
@@ -246,7 +244,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const detail = el("div", null, "scenario-detail");
     detail.id = "scenario-detail";
     const intro = heading("EXPLORE THE EVIDENCE", "Choose a scenario.",
-      "Use the same detailed views as live sessions. Replay a case to test your changes and record new educator review notes.");
+      "Use the same detailed views as live sessions. Replay a case to test your changes. Use 03 Blind comparison to compare feedback drafts.");
     intro.id = "scenario-intro";
     detail.append(intro);
     const versionBar = el("div", null, "replay-toolbar");
@@ -262,10 +260,6 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     detail.append(versionBar, caseNotice, viewHost);
     scenarioView = mountDetail(viewHost, {refresh: () => loadCase(chosen)});
     side.append(count, list); layout.append(side, detail); libraryPane.append(layout);
-    libraryPane.append(raw("Replay identity and interpretation limits", {
-      report_sha256: library.report_sha256, source: library.source, policy: library.policy,
-      selector_execution: library.summary.selector_execution, limitation: library.limitation,
-      cached_captures_are_independent_trials: false, educational_effectiveness_tested: false}));
     function renderCases() {
       const query = search.value.trim().toLowerCase();
       const rows = library.scenarios.filter((row) =>
@@ -315,11 +309,19 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     if (!id || !scenarioView) return;
     const request = ++caseRequest;
     const version = selectedRun;
+    const contextKey = `${id}|${version}`;
+    const contextChanged = displayedVersion !== contextKey;
     $("#scenario-intro").hidden = true;
-    if (displayedVersion !== `${id}|${version}`) viewHost.hidden = true;
+    if (contextChanged) viewHost.hidden = true;
     const run = runs.find((r) => r.id === version);
     const row = run?.cases.find((c) => c.scenario_id === id);
-    caseNotice.textContent = version ? `Replay result · ${feedbackVariantLabel(run?.feedback_variant)} · ${statusLabel(row?.status)}. Original results remain unchanged.` : "Retained original — read-only. Select a replay result to inspect current behavior and save review notes.";
+    const initialNotice = version ? `Replay result · ${feedbackVariantLabel(run?.feedback_variant)} · ${statusLabel(row?.status)}. Original results remain unchanged.` : "Retained original — read-only. Select a replay result to inspect current behavior.";
+    // During refresh of the already-displayed context keep the confirmed
+    // stage suffix; rewriting the generic prefix here would flicker on
+    // every poll until the detail response returns.
+    if (contextChanged && caseNotice.textContent !== initialNotice) {
+      caseNotice.textContent = initialNotice;
+    }
     if (version && !row?.session_id) {
       viewHost.hidden = true;
       return;
@@ -331,8 +333,9 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       exposed = true;
       try { sessionStorage.setItem("replay-exposure", "yes"); } catch (err) {}
       scenarioView.update(view);
-      if (version) caseNotice.textContent = replayCaseNotice(run, row, response);
-      displayedVersion = `${id}|${version}`;
+      const noticeText = version ? replayCaseNotice(run, row, response) : initialNotice;
+      if (caseNotice.textContent !== noticeText) caseNotice.textContent = noticeText;
+      displayedVersion = contextKey;
       viewHost.hidden = false;
     } catch (err) {
       if (request !== caseRequest) return;
@@ -493,19 +496,12 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const approval = el("label", null, "attestation");
     const budget = getConfig().call_budget;
     approval.append(consent, el("span", budget.limit === null
-      ? "I approve hosted calls for this run. The server sets no local cap on new calls; provider charges may apply. Successful captures are reused; failed calls are retried only when the retry option is on."
-      : "I approve hosted calls for this run within the server's remaining call budget. Successful captures are reused; failed calls are retried only when the retry option is on."));
+      ? "I approve hosted calls for this run. The server sets no local cap on new calls; provider charges may apply. Every call is a fresh hosted request; no saved provider results are reused. Transient failures are retried automatically within limits."
+      : "I approve hosted calls for this run within the server's remaining call budget. Every call is a fresh hosted request; no saved provider results are reused. Transient failures are retried automatically within limits."));
     approval.hidden = true;
-    const retry = el("input"); retry.type = "checkbox"; retry.id = "replay-retry-failed"; retry.checked = true;
-    const retryApproval = el("label", null, "attestation");
-    retryApproval.append(retry, el("span", "Retry failed provider calls; reuse successful captures."));
-    retryApproval.hidden = true;
-    const retryNote = notice("Each failed call may make one new attempt per scenario, using the existing call budget. Previous failures are preserved. A retry can still fail or time out.", "meta small");
-    retryNote.hidden = true;
     mode.addEventListener("change", () => {
       const hosted = mode.value === "hosted";
       approval.hidden = !hosted; consent.required = hosted;
-      retryApproval.hidden = !hosted; retryNote.hidden = !hosted;
       updateVariantNote();
     });
     const explanation = notice(`This creates ${selectedIds.length} separate test results using the original answers. It recomputes scoring, skill maps and feedback, and requests fresh frozen-model diagnostics. No model retraining. Hosted budget used: ${budget.used}/${budget.limit ?? "unlimited"}.`);
@@ -514,7 +510,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const cancel = button("Cancel", () => closeReplayDialog(dialog));
     const actions = el("div", null, "replay-toolbar"); actions.append(start, cancel);
     form.append(title, explanation, field("Feedback execution", mode),
-      field("Feedback variant", variant), variantNote, parallelField, approval, retryApproval, retryNote,
+      field("Feedback variant", variant), variantNote, parallelField, approval,
       notice("Restart the server after Python changes. Historical outputs and reviews are preserved. One replay batch runs at a time; stop prevents further cases after the active wave finishes.", "meta small"), error, actions);
     dialog.append(form); document.body.append(dialog);
     dialog.addEventListener("close", () => dialog.remove());
@@ -527,7 +523,6 @@ function initResearchWorkspace({mountDetail, getConfig}) {
           report_sha256: library.report_sha256, scenario_ids: selectedIds, provider_mode: mode.value,
           feedback_variant: variant.value,
           allow_provider_calls: mode.value === "hosted" && consent.checked,
-          retry_failed_provider_calls: mode.value === "hosted" && retry.checked,
           max_parallel: Number(parallel.value)};
         const run = await api("/api/teacher/replays", {body});
         if (chosen && selectedIds.includes(chosen)) selectedRun = run.id;

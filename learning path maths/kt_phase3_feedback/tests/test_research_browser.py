@@ -263,7 +263,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
-    def test_selected_filtered_all_replays_and_shared_review_views(self):
+    def test_selected_filtered_all_replays_and_shared_detail_views(self):
         b = self.browser
         self.navigate("/teacher")
         b.wait("document.querySelector('#unlock-panel')")
@@ -273,10 +273,11 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('.scenario-row')")
         b.js("document.querySelector('.scenario-row').click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 5)
+        self.assertIsNone(b.js("document.querySelector('#scenario-ws-tabs [data-tab=review]')"))
+        self.assertIsNone(b.js("document.querySelector('#scenario-tab-review')"))
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=evidence]').click()")
         self.assertEqual(b.js("document.querySelectorAll('#scenario-tab-evidence .qrow').length"), 40)
-        b.js("document.querySelector('#scenario-ws-tabs [data-tab=review]').click()")
-        self.assertTrue(b.js("document.querySelector('#scenario-tab-review').textContent.includes('read-only')"))
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=evidence]').click(); document.querySelector('#replay-selected').click()")
         b.wait("document.querySelector('dialog[open]')")
         self.assertTrue(b.js("document.querySelector('#replay-provider-mode').options[1].disabled"))
@@ -290,18 +291,19 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(b.js("document.querySelectorAll('#scenario-tab-evidence .qrow').length"), 40)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=research]').click()")
         self.assertTrue(b.js("Boolean(document.querySelector('#scenario-tab-research svg'))"))
-        b.js("document.querySelector('#scenario-ws-tabs [data-tab=review]').click()")
-        b.wait("document.querySelector('#scenario-tab-review form')")
-        b.js("const f=document.querySelector('#scenario-tab-review form'); f.querySelectorAll('select').forEach(n=>{n.selectedIndex=1;n.dispatchEvent(new Event('change'));}); f.querySelector('textarea').value='Replay review fixture'; f.querySelector('textarea').dispatchEvent(new Event('input')); f.requestSubmit()")
-        b.wait("document.querySelector('#scenario-tab-review .ledger').textContent.includes('Replay review fixture')")
+        self.assertIsNone(b.js("document.querySelector('#scenario-ws-tabs [data-tab=review]')"))
+        self.assertIsNone(b.js("document.querySelector('#scenario-tab-review')"))
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
+        b.wait("document.querySelector('#scenario-tab-feedback').childElementCount > 0")
+        self.assertFalse(b.js("document.querySelector('#scenario-tab-feedback').hidden"))
         b.viewport(390, 844)
         self.assert_no_overflow()
         b.js("document.querySelector('#scenario-ws-detail').scrollIntoView({block:'start'})")
-        b.screenshot("replay-review-mobile.png")
+        b.screenshot("replay-feedback-mobile.png")
         b.viewport(1440, 1100)
-        b.screenshot("replay-review-desktop.png")
+        b.screenshot("replay-feedback-desktop.png")
         b.js("document.querySelector('#scenario-version').value=''; document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
-        b.wait("document.querySelector('#scenario-tab-review').textContent.includes('read-only')")
+        b.wait("!document.querySelector('#scenario-tab-overview').textContent.includes('What changed')")
         b.js("document.querySelector('#scenario-search').value='Every answer'; document.querySelector('#scenario-search').dispatchEvent(new Event('input')); document.querySelector('#replay-filtered').click()")
         b.wait("document.querySelector('dialog[open]')")
         self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 1)
@@ -350,6 +352,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(f"{library_text}.includes('Observed answer counts describe this assessment')"))
         self.assertTrue(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
         self.assertFalse(b.js("document.querySelector('#library-pane').textContent.toLowerCase().includes('conformal')"))
+        self.assertFalse(b.js(f"{library_text}.includes('Replay identity and interpretation limits')"))
         self.assertFalse(b.js("Boolean(document.querySelector('.scenario-row.active'))"))
         try:
             exposure_before = b.js("sessionStorage.getItem('replay-exposure')")
@@ -369,7 +372,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js("Boolean(document.querySelector('#research-readiness'))"))
         b.js("document.querySelector('.scenario-row').click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
-        self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 6)
+        self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 5)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         b.wait("Boolean(document.querySelector("
                "'#scenario-tab-feedback .saved-end-feedback'))")
@@ -413,12 +416,19 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(all(t["judgment"]["resolved_preference"] == "tie" for t in exported["tasks"]))
         b.js("document.querySelector('[data-workspace=live]').click(); document.querySelector('#sim-form').requestSubmit()")
         b.wait("!document.querySelector('#ws-detail').hidden")
-        b.js("document.querySelector('[data-tab=review]').click()")
-        b.wait("document.querySelector('#tab-review form')")
-        b.js("const note=document.querySelector('#tab-review textarea'); note.value='Preserve this unsaved note'; note.dispatchEvent(new Event('input'))")
+        self.assertEqual(b.js("document.querySelectorAll('#ws-tabs .tab').length"), 5)
+        self.assertIsNone(b.js("document.querySelector('#ws-tabs [data-tab=review]')"))
+        self.assertIsNone(b.js("document.querySelector('#tab-review')"))
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback').childElementCount > 0")
+        self.assertFalse(b.js("document.querySelector('#tab-feedback').hidden"))
+        b.screenshot("live-feedback-desktop.png")
+        b.js("document.querySelector('[data-tab=overview]').click()")
+        self.assertFalse(b.js("document.querySelector('#tab-overview').hidden"))
+        self.assertTrue(b.js("document.querySelector('#tab-feedback').hidden"))
         time.sleep(2.3)
-        self.assertEqual(b.js("document.querySelector('#tab-review textarea').value"), "Preserve this unsaved note")
-        b.screenshot("live-review-desktop.png")
+        self.assertTrue(b.js("document.querySelector('#tab-overview').textContent.includes('Answered')"))
+        self.assertIsNone(b.js("document.querySelector('#tab-review')"))
         b.viewport(390, 844)
         self.assert_no_overflow()
         b.viewport(1440, 1100)
@@ -1087,13 +1097,12 @@ class ResearchBrowserTests(unittest.TestCase):
         time.sleep(2.3)
         self.assertTrue(b.js(f"{research_dd}.open"))
         self.assertTrue(b.js(f"{edit_dd}.open"))
-        b.js("document.querySelector('#ws-tabs [data-tab=review]').click()")
-        review = "document.querySelector('#tab-review')"
-        b.wait(f"Boolean({review}.querySelector('form'))")
-        self.assertFalse(b.js(
-            "Boolean(document.querySelector('#tab-review select[data-audience]'))"))
-        self.assertTrue(b.js(
-            f"{review}.textContent.includes('Shared student-facing feedback')"))
+        self.assertEqual(b.js("document.querySelectorAll('#ws-tabs .tab').length"), 5)
+        self.assertIsNone(b.js("document.querySelector('#ws-tabs [data-tab=review]')"))
+        self.assertIsNone(b.js("document.querySelector('#tab-review')"))
+        b.js("document.querySelector('#ws-tabs [data-tab=overview]').click()")
+        self.assertFalse(b.js("document.querySelector('#tab-overview').hidden"))
+        self.assertTrue(b.js("document.querySelector('#tab-feedback').hidden"))
         self.assertEqual(b.errors, [])
 
     def test_integrated_feedback_practice_flow(self):
@@ -2507,6 +2516,67 @@ class ResearchBrowserTests(unittest.TestCase):
         notice = ("document.querySelector("
                   "'#scenario-detail > p[role=\"status\"]')")
 
+        expected_ready = (
+            "Replay result · Question-first · Running. Original results "
+            "remain unchanged. Feedback is ready; model diagnostics are "
+            "still pending. This replay is not complete.")
+        expected_pending = (
+            "Replay result · Question-first · Running. Original results "
+            "remain unchanged. Feedback is still being prepared; this "
+            "replay is not complete.")
+
+        def assert_notice_stable_during_held_poll(expected):
+            # Hold one replay-case detail GET open during a natural poll:
+            # the confirmed stage suffix must remain while the request is
+            # in flight (rewriting the generic prefix there flickered),
+            # and an identical payload must not rewrite the live region.
+            b.js(
+                "window.__origFetch = window.fetch;"
+                "window.__noticeLog = [];"
+                "window.__detailWaiting = 0;"
+                "window.__detailDone = 0;"
+                "window.__detailGate = null;"
+                "window.__holdDetail = true;"
+                "window.__noticeObs = new MutationObserver(() => {"
+                "  window.__noticeLog.push(document.querySelector("
+                "    '#scenario-detail > p[role=\"status\"]')"
+                "    .textContent);});"
+                "window.__noticeObs.observe(document.querySelector("
+                "  '#scenario-detail > p[role=\"status\"]'),"
+                "  {childList: true, characterData: true, subtree: true});"
+                "window.fetch = function(url, opts) {"
+                "  const isDetail = typeof url === 'string'"
+                "    && url.indexOf('/api/teacher/replays/') === 0"
+                "    && url.indexOf('/cases/') > 0;"
+                "  if (!isDetail) return window.__origFetch(url, opts);"
+                "  const begin = window.__holdDetail"
+                "    ? new Promise((res) => { window.__detailWaiting++;"
+                "        window.__detailGate = res; })"
+                "    : Promise.resolve();"
+                "  return begin"
+                "    .then(() => window.__origFetch(url, opts))"
+                "    .then((r) => { window.__detailDone++; return r; });"
+                "};")
+            try:
+                try:
+                    b.wait("window.__detailWaiting >= 1")
+                    self.assertEqual(expected,
+                                     b.js(f"{notice}.textContent"))
+                    self.assertEqual([], b.js("window.__noticeLog"))
+                finally:
+                    # Release any held request before waiting or leaving.
+                    b.js("window.__holdDetail = false;"
+                         "if (window.__detailGate) {"
+                         "  const release = window.__detailGate;"
+                         "  window.__detailGate = null; release(); }")
+                b.wait("window.__detailDone >= 1")
+                self.assertEqual(expected, b.js(f"{notice}.textContent"))
+                self.assertEqual([], b.js("window.__noticeLog"))
+            finally:
+                b.js("window.fetch = window.__origFetch;"
+                     "if (window.__noticeObs) window.__noticeObs"
+                     ".disconnect();")
+
         # --- Part A: provider finishes while end diagnostics blocked ---
         gen_gate.set()
         run_a = start_replay()
@@ -2520,6 +2590,7 @@ class ResearchBrowserTests(unittest.TestCase):
                f"{json.dumps(MULTI_SECTIONS['assessment_summary'])})")
         b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
                "diagnostics are still pending. This replay is not complete.')")
+        assert_notice_stable_during_held_poll(expected_ready)
         b.screenshot("qf_pending_diagnostics_desktop.png")
         b.viewport(390, 844)
         self.assert_no_overflow()
@@ -2548,11 +2619,18 @@ class ResearchBrowserTests(unittest.TestCase):
                "prepared; this replay is not complete.')")
         # No final preview while pending; deterministic baseline text is
         # rendered locally, so the provider summary wording is not a
-        # discriminating marker — the notice transition is.
-        detail_text = b.js(f"{detail}.textContent")
+        # discriminating marker — the notice transition is. The midpoint
+        # generation-details box carries its own shape-checked disclaimer
+        # on backend timing, so it is excluded from the end-feedback
+        # wording check.
+        detail_text = b.js(
+            f"(() => {{ const node = {detail}.cloneNode(true);"
+            " node.querySelectorAll('.midpoint-provider-draft')"
+            ".forEach((n) => n.remove()); return node.textContent; })()")
         self.assertFalse(b.js(
             f"Boolean({detail}.querySelector('.feedback-preview'))"))
         self.assertNotIn("shape-checked, not fact-verified", detail_text)
+        assert_notice_stable_during_held_poll(expected_pending)
 
         gen_gate.set()
         # End diagnostics remain blocked, so the run record JSON cannot
@@ -2578,6 +2656,50 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(390, 844)
         self.assert_no_overflow()
         b.viewport(1440, 1100)
+
+        # Context switch must not retain the previous stage suffix.
+        b.js("document.querySelector('#scenario-version').value='';"
+             "document.querySelector('#scenario-version')"
+             ".dispatchEvent(new Event('change'))")
+        b.wait(f"{notice}.textContent.includes('Retained original')")
+        self.assertNotIn("Replay is complete",
+                         b.js(f"{notice}.textContent"))
+
+        # A same-context reload of the retained original that fails must
+        # still recover through Retry: the confirmed notice stays
+        # untouched while the request is in flight, the failure shows
+        # the error + Retry, and a successful retry restores the
+        # retained-original notice.
+        b.js(
+            "window.__origFetch2 = window.fetch;"
+            "window.__failNextScenario = true;"
+            "window.fetch = function(url, opts) {"
+            "  const isScenario = typeof url === 'string'"
+            "    && url.indexOf('/api/teacher/scenarios/') === 0;"
+            "  if (isScenario && window.__failNextScenario) {"
+            "    window.__failNextScenario = false;"
+            "    return Promise.reject(new TypeError('injected failure'));"
+            "  }"
+            "  return window.__origFetch2(url, opts);"
+            "};")
+        try:
+            b.js("document.querySelectorAll('.scenario-row')[1].click()")
+            b.wait(f"{notice}.textContent.includes('Could not load')")
+            b.wait(f"Boolean({notice}.querySelector('button'))")
+            b.js(f"{notice}.querySelector('button').click()")
+            b.wait(f"{notice}.textContent.includes('Retained original')")
+            self.assertFalse(b.js(
+                f"Boolean({notice}.querySelector('button'))"))
+            self.assertNotIn("Could not load",
+                             b.js(f"{notice}.textContent"))
+        finally:
+            b.js("window.fetch = window.__origFetch2;")
+
+        b.js(f"document.querySelector('#scenario-version')"
+             f".value={json.dumps(run_b['id'])};"
+             "document.querySelector('#scenario-version')"
+             ".dispatchEvent(new Event('change'))")
+        b.wait(f"{notice}.textContent.includes('Replay is complete')")
         self.assertEqual(b.errors, [])
 
     def test_replay_worked_first_waits_for_diagnostics(self):
@@ -2682,6 +2804,594 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(390, 844)
         self.assert_no_overflow()
         b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
+    def test_skill_map_evidence_and_task_roles(self):
+        # Aligned rules-mode service; a warm-bank session binds the real
+        # assessed-task descriptions from the v3 content context.
+        self.service.close(wait=True)
+        bank = make_bank()
+        self.service = DemoService(
+            root=self.root / "aligned_data", bank=bank,
+            taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        warm_bank, _, _ = load_research_bank("warm")
+        created = self.service.create_session(bank_mode="warm")
+        partial_sid = created["session_id"]
+        for question in warm_bank["questions"][:20]:
+            self.service.submit_response(
+                partial_sid, created["student_token"],
+                {"question_id": question["question_id"],
+                 "selected_index": question["answer_index"]})
+        result = self.service.simulate("alternating", 5, bank_mode="warm")
+        sid = result["session_id"]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        view = self.service.teacher_session(sid)
+        end = view["checkpoints"]["end"]
+        review = end["student_review"] or end["baseline_student"]
+        self.assertIsNotNone(review)
+        preview = view["feedback_delivery"]["preview"]
+        examples = preview.get("review_examples") or []
+        self.assertTrue(examples)
+        example = examples[0]
+        rows = {r["question_id"]: r for r in view["question_responses"]}
+        focus_subs = set()
+        for cand in review.get("selected_candidates") or []:
+            for inner in cand.get("review_candidates") or [cand]:
+                focus = (inner or {}).get("focus") or {}
+                if focus.get("subtopic_id"):
+                    focus_subs.add(focus["subtopic_id"])
+        self.assertTrue(focus_subs)
+        same_sub = next(r for r in view["question_responses"]
+                        if r["subtopic_id"] == example["subtopic_id"]
+                        and r["question_id"] != example["question_id"])
+        other = next(r for r in view["question_responses"]
+                     if r["subtopic_id"] not in focus_subs)
+        ex_ctx = next(e for e in view["content_context"]["exercises"]
+                      if e["question_id"] == example["question_id"])
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-search').value='alternating'; document.querySelector('#session-search').dispatchEvent(new Event('input'))")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
+        pane = "document.querySelector('#tab-graph')"
+        b.wait(f"{pane}.textContent.includes('Assessed tasks (40)')")
+        graph = f"{pane}.textContent"
+        self.assertTrue(b.js(f"{graph}.includes('Practice drafts (24)')"))
+        self.assertTrue(b.js(f"{graph}.includes('not prerequisites')"))
+        self.assertTrue(b.js(f"{graph}.includes('pending formal educator review')"))
+        self.assertTrue(b.js(f"{graph}.includes('observed correct')"))
+        for topic in end["graph"]["topics"]:
+            self.assertTrue(b.js(
+                f"{graph}.includes(englishSkillName({json.dumps(topic['skill_name'])})"
+                f" + ' — ' + {topic['correct']} + '/' + {topic['out_of']}"
+                " + ' observed correct')"))
+        for leaf in [s for t in end["graph"]["topics"] for s in t["subtopics"]
+                     if s["subtopic_id"] in focus_subs]:
+            line = (f"{leaf['subtopic_name']}: {leaf['correct']} correct, "
+                    f"{leaf['incorrect']} incorrect of {leaf['out_of']}"
+                    " · selected review focus")
+            self.assertTrue(b.js(f"{graph}.includes({json.dumps(line)})"))
+
+        def card(qid):
+            return ("document.querySelector('#tab-graph "
+                    f"details[data-disclosure-key=\"skill-task:{qid}\"]')")
+
+        ex_sel = card(example["question_id"])
+        b.wait(f"Boolean({ex_sel})")
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes('Selected worked-review example')"))
+        ex_row = rows[example["question_id"]]
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes(englishOptionText("
+            f"{json.dumps(ex_row['options'][ex_row['selected_index']])}))"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes(englishOptionText("
+            f"{json.dumps(ex_row['options'][ex_row['answer_index']])}))"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes('Task requirement')"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes("
+            f"{json.dumps(ex_ctx['mathematical_task'])})"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.querySelector('summary').textContent"
+            f".includes(englishSkillName({json.dumps(ex_ctx['skill_name'])}))"))
+        self.assertTrue(b.js(
+            f"{card(same_sub['question_id'])}.textContent.includes("
+            "'Selected review focus — a different task in this subtopic')"))
+        other_sel = card(other["question_id"])
+        self.assertTrue(b.js(
+            f"{other_sel}.textContent.includes("
+            "'Not selected as a worked-review example')"))
+        self.assertFalse(b.js(
+            f"{other_sel}.textContent.includes('Selected review focus')"))
+
+        # Collapsed summaries carry the selection badges at a glance.
+        self.assertTrue(b.js(
+            f"{ex_sel}.querySelector('summary').textContent"
+            ".includes('Selected worked review')"))
+        focus_sel = card(same_sub["question_id"])
+        self.assertTrue(b.js(
+            f"{focus_sel}.querySelector('summary').textContent"
+            ".includes('Review focus')"))
+        self.assertFalse(b.js(
+            f"{focus_sel}.querySelector('summary').textContent"
+            ".includes('Selected worked review')"))
+        for fragment in ("Selected worked review", "Review focus"):
+            self.assertFalse(b.js(
+                f"{other_sel}.querySelector('summary').textContent"
+                f".includes({json.dumps(fragment)})"))
+
+        b.js("document.querySelector('#tab-graph "
+             "details[data-disclosure-key=skill-map-assessed]').open = true")
+        b.js(f"{ex_sel}.open = true")
+        b.js("document.querySelector('#tab-graph "
+             "details[data-disclosure-key=skill-map-evidence-use]').open = true")
+        time.sleep(2.4)
+        self.assertTrue(b.js(f"{ex_sel}.open"))
+        self.assertTrue(b.js(
+            "document.querySelector('#tab-graph "
+            "details[data-disclosure-key=skill-map-evidence-use]').open"))
+        b.js(f"{ex_sel}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("skill-map-live-desktop.png")
+        b.viewport(390, 844)
+        b.js(f"{ex_sel}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("skill-map-live-mobile.png")
+        b.viewport(1440, 1100)
+
+        # Disclosure scopes are session-specific: the same task key is
+        # closed again in the other session.
+        b.js("document.querySelector('#session-search').value='manual'; document.querySelector('#session-search').dispatchEvent(new Event('input'))")
+        b.js("document.querySelector('#session-list button').click()")
+        b.wait("document.querySelector('#ws-title').textContent.includes('Manual')")
+        b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
+        b.wait(f"{pane}.textContent.includes('Not answered')")
+        self.assertTrue(b.js(
+            f"{graph}.includes('Feedback selection pending')"))
+        unanswered = warm_bank["questions"][30]
+        un_sel = card(unanswered["question_id"])
+        self.assertTrue(b.js(
+            f"{un_sel}.querySelector('summary').textContent"
+            ".includes('Not answered')"))
+        self.assertFalse(b.js(f"{ex_sel}.open"))
+        answered = card(warm_bank["questions"][0]["question_id"])
+        self.assertTrue(b.js(
+            f"{answered}.querySelector('summary').textContent"
+            ".includes('Correct')"))
+        self.assertEqual(b.errors, [])
+
+    def test_skill_map_retained_original_historical_mapping(self):
+        # A retained original whose recorded taxonomy no longer matches
+        # the current one keeps an explicit missing-mapping label; the
+        # current content label is never substituted as history.
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        report["source"]["taxonomy_sha256"] = "0" * 64
+        stale_report = self.root / "report_missing_mapping.json"
+        stale_report.write_text(json.dumps(report), encoding="utf-8")
+        self.service.close(wait=True)
+        bank = make_bank()
+        self.service = DemoService(
+            root=self.root / "mapping_data", bank=bank,
+            taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
+            replay_report=stale_report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        cid = self.service.research.library()["scenarios"][0]["id"]
+        view = self.service.scenario_detail(cid)["detail"]
+        self.assertTrue(view["question_responses"])
+        self.assertTrue(all(r["subtopic_id"] is None
+                            for r in view["question_responses"]))
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=graph]').click()")
+        pane = "document.querySelector('#scenario-tab-graph')"
+        b.wait(f"{pane}.textContent.includes('Assessed tasks (40)')")
+        graph = f"{pane}.textContent"
+        self.assertTrue(b.js(f"{graph}.includes('Practice drafts (24)')"))
+        self.assertTrue(b.js(
+            f"{graph}.includes('Unavailable for this record')"))
+        self.assertFalse(b.js(f"{graph}.includes('Subtopic sA')"))
+        qid = view["question_responses"][0]["question_id"]
+        sel = ("document.querySelector('#scenario-tab-graph "
+               f"details[data-disclosure-key=\"skill-task:{qid}\"]')")
+        b.js(f"{sel}.open = true")
+        self.assertTrue(b.js(
+            f"{sel}.textContent.includes("
+            "'Historical subtopic mapping is unavailable')"))
+        self.assertTrue(b.js(
+            f"{sel}.textContent.includes("
+            "'No descriptive context is bound to this task')"))
+        self.assertTrue(b.js(
+            f"{sel}.textContent.includes("
+            "'Not selected as a worked-review example')"))
+        b.js("document.querySelector('#scenario-tab-graph "
+             "details[data-disclosure-key=skill-map-assessed]').open = true")
+        b.js(f"{sel}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("skill-map-retained-desktop.png")
+        b.viewport(390, 844)
+        b.js(f"{sel}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("skill-map-retained-mobile.png")
+        b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
+    def test_skill_map_feedback_role_edge_cases(self):
+        # Aligned rules-mode service with a warm live session; the view
+        # is patched per variant to cover historical null mapping and
+        # preview edge cases against the same rendered detail.
+        self.service.close(wait=True)
+        bank = make_bank()
+        self.service = DemoService(
+            root=self.root / "edge_data", bank=bank,
+            taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        result = self.service.simulate("alternating", 7, bank_mode="warm")
+        sid = result["session_id"]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        view = self.service.teacher_session(sid)
+        review = (view["checkpoints"]["end"]["student_review"]
+                  or view["checkpoints"]["end"]["baseline_student"])
+        examples = view["feedback_delivery"]["preview"].get(
+            "review_examples") or []
+        self.assertTrue(examples)
+        example_qid = examples[0]["question_id"]
+        focus_subs = set()
+        for cand in review.get("selected_candidates") or []:
+            for inner in cand.get("review_candidates") or [cand]:
+                focus = (inner or {}).get("focus") or {}
+                if focus.get("subtopic_id"):
+                    focus_subs.add(focus["subtopic_id"])
+        self.assertTrue(focus_subs)
+        focus_task = next(r for r in view["question_responses"]
+                          if r["subtopic_id"] in focus_subs
+                          and r["question_id"] != example_qid)
+        original = self.service.teacher_session
+        self.addCleanup(
+            setattr, self.service, "teacher_session", original)
+        b = self.browser
+
+        def open_graph():
+            self.navigate("/teacher")
+            b.wait("document.querySelector('#unlock-panel')")
+            b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('#session-list button')")
+            b.js("document.querySelector('#session-list button').click()")
+            b.wait("!document.querySelector('#ws-detail').hidden")
+            b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
+            b.wait("document.querySelector('#tab-graph').textContent"
+                   ".includes('Assessed tasks (40)')")
+
+        def card(qid):
+            return ("document.querySelector('#tab-graph "
+                    f"details[data-disclosure-key=\"skill-task:{qid}\"]')")
+
+        ft = card(focus_task["question_id"])
+        ex_sel = card(example_qid)
+
+        # A recorded answer with a null historical subtopic id must not
+        # be relabeled by the current content concept, even when that
+        # concept is the selected focus.
+        def missing_mapping(sid_arg):
+            patched = original(sid_arg)
+            for row in patched["question_responses"]:
+                row["subtopic_id"] = None
+            return patched
+        self.service.teacher_session = missing_mapping
+        open_graph()
+        self.assertTrue(b.js(
+            f"{ft}.textContent.includes('Unavailable for this record')"))
+        self.assertTrue(b.js(
+            f"{ft}.textContent.includes("
+            "'Task requirement (current descriptive context)')"))
+        self.assertFalse(b.js(
+            f"{ft}.textContent.includes('Selected review focus')"))
+        self.assertTrue(b.js(
+            f"{ft}.textContent.includes("
+            "'Not selected as a worked-review example')"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes("
+            "'Selected worked-review example')"))
+        self.assertFalse(b.js(
+            f"{ft}.querySelector('summary').textContent"
+            ".includes('Review focus')"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.querySelector('summary').textContent"
+            ".includes('Selected worked review')"))
+
+        # An empty current preview list is honored; the retained review
+        # example list is not resurrected.
+        def empty_examples(sid_arg):
+            patched = original(sid_arg)
+            patched["feedback_delivery"]["preview"]["review_examples"] = []
+            return patched
+        self.service.teacher_session = empty_examples
+        open_graph()
+        for sel in (ft, ex_sel):
+            self.assertTrue(b.js(
+                f"{sel}.textContent.includes('Selected review focus; no "
+                "structured worked-review example is available for this "
+                "subtopic')"))
+            self.assertFalse(b.js(
+                f"{sel}.textContent.includes("
+                "'Selected worked-review example')"))
+            self.assertTrue(b.js(
+                f"{sel}.querySelector('summary').textContent"
+                ".includes('Review focus')"))
+            self.assertFalse(b.js(
+                f"{sel}.querySelector('summary').textContent"
+                ".includes('Selected worked review')"))
+
+        # A teacher-edited document never implies an included example.
+        def edited_document(sid_arg):
+            patched = original(sid_arg)
+            patched["feedback_delivery"]["preview"]["document_text"] = (
+                "Teacher-edited document wording.")
+            return patched
+        self.service.teacher_session = edited_document
+        open_graph()
+        self.assertTrue(b.js(
+            f"{ft}.textContent.includes('Selected review focus; "
+            "structured example linkage into the teacher-edited "
+            "document is unavailable')"))
+        self.assertFalse(b.js(
+            f"{ex_sel}.textContent.includes("
+            "'Selected worked-review example')"))
+        self.assertFalse(b.js(
+            f"{ex_sel}.querySelector('summary').textContent"
+            ".includes('Selected worked review')"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.querySelector('summary').textContent"
+            ".includes('Review focus')"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes('teacher-edited document "
+            "is unavailable')"))
+
+        # An example whose worked solution failed stays honest.
+        def unavailable_solution(sid_arg):
+            patched = original(sid_arg)
+            patched["feedback_delivery"]["preview"]["review_examples"][0][
+                "status"] = "unavailable"
+            return patched
+        self.service.teacher_session = unavailable_solution
+        open_graph()
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes('Selected worked-review "
+            "example — worked solution unavailable')"))
+        self.assertEqual(b.errors, [])
+
+    def test_skill_map_practice_selection_badges(self):
+        # Practice badges come only from recorded selected_question_id
+        # identity on end.practice_contexts (or the legacy flat
+        # practice_context); the view is patched per variant.
+        self.service.close(wait=True)
+        bank = make_bank()
+        self.service = DemoService(
+            root=self.root / "practice_data", bank=bank,
+            taxonomy=make_taxonomy(bank), diagnostics=fake_diagnostics(bank),
+            replay_report=self.report, replay_source=self.source)
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        result = self.service.simulate("alternating", 9, bank_mode="warm")
+        sid = result["session_id"]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        view = self.service.teacher_session(sid)
+        practices = [e for e in view["content_context"]["exercises"]
+                     if e["role"] == "practice"]
+        self.assertEqual(len(practices), 24)
+        chosen = practices[0]
+        same_topic = next(e for e in practices
+                          if e["skill_id"] == chosen["skill_id"]
+                          and e["question_id"] != chosen["question_id"])
+        other_topic = next(e for e in practices
+                           if e["skill_id"] != chosen["skill_id"])
+        original = self.service.teacher_session
+        self.addCleanup(
+            setattr, self.service, "teacher_session", original)
+        b = self.browser
+
+        def open_graph():
+            self.navigate("/teacher")
+            b.wait("document.querySelector('#unlock-panel')")
+            b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('#session-list button')")
+            b.js("document.querySelector('#session-list button').click()")
+            b.wait("!document.querySelector('#ws-detail').hidden")
+            b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
+            b.wait("document.querySelector('#tab-graph').textContent"
+                   ".includes('Practice drafts (24)')")
+
+        def pcard(qid):
+            return ("document.querySelector('#tab-graph "
+                    f"details[data-disclosure-key=\"skill-practice:{qid}\"]')")
+
+        ch = pcard(chosen["question_id"])
+        st = pcard(same_topic["question_id"])
+        ot = pcard(other_topic["question_id"])
+
+        def summary_text(sel):
+            return f"{sel}.querySelector('summary').textContent"
+
+        # Exact recorded selection: only the matching row is marked.
+        def selected(mutate_doc=False):
+            def patched(sid_arg):
+                v = original(sid_arg)
+                v["checkpoints"]["end"]["practice_contexts"] = [
+                    {"candidate_id": "c1", "skill_id": chosen["skill_id"],
+                     "context": {"status": "selected",
+                                 "selected_question_id":
+                                     chosen["question_id"],
+                                 "pool_sha256": "p"}},
+                    {"candidate_id": "c2", "skill_id": same_topic["skill_id"],
+                     "context": {"status": "abstained",
+                                 "selected_question_id": None,
+                                 "pool_sha256": None}}]
+                if mutate_doc:
+                    v["feedback_delivery"]["preview"]["document_text"] = (
+                        "Teacher-edited wording.")
+                return v
+            return patched
+        self.service.teacher_session = selected()
+        open_graph()
+        b.js("document.querySelector('#tab-graph "
+             "details[data-disclosure-key=skill-map-practice]').open = true")
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+        self.assertTrue(b.js(
+            f"{ch}.textContent.includes('Selected practice')"))
+        self.assertTrue(b.js(
+            f"{summary_text(st)}.includes('Not selected')"))
+        self.assertTrue(b.js(f"{st}.textContent.includes('Not selected')"))
+        self.assertFalse(b.js(
+            f"{summary_text(st)}.includes('Selected practice')"))
+        self.assertFalse(b.js(
+            f"{summary_text(ot)}.includes('Selected practice')"))
+        b.js(f"{ch}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("skill-map-practice-selected-desktop.png")
+        b.viewport(390, 844)
+        b.js(f"{ch}.scrollIntoView({{block: 'center'}})")
+        self.assert_no_overflow()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+        b.screenshot("skill-map-practice-selected-mobile.png")
+        b.viewport(1440, 1100)
+
+        # A teacher-edited document keeps the recorded badge but the
+        # section admits linkage cannot be confirmed.
+        self.service.teacher_session = selected(mutate_doc=True)
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+        self.assertTrue(b.js(
+            "document.querySelector('#tab-graph').textContent"
+            ".includes('cannot be confirmed')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-graph').textContent"
+            ".includes('approved')"))
+
+        # An empty multi slot list is a recorded state: the stale flat
+        # context is not resurrected.
+        def empty_slots(sid_arg):
+            v = original(sid_arg)
+            v["checkpoints"]["end"]["practice_contexts"] = []
+            v["checkpoints"]["end"]["practice_context"] = {
+                "status": "selected",
+                "selected_question_id": chosen["question_id"],
+                "pool_sha256": "stale"}
+            return v
+        self.service.teacher_session = empty_slots
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selection not recorded')"))
+        self.assertFalse(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+
+        # Legacy flat context still works when the multi-slot property
+        # is absent entirely.
+        def legacy_flat(sid_arg):
+            v = original(sid_arg)
+            v["checkpoints"]["end"].pop("practice_contexts", None)
+            v["checkpoints"]["end"]["practice_context"] = {
+                "status": "selected",
+                "selected_question_id": chosen["question_id"],
+                "pool_sha256": "p"}
+            return v
+        self.service.teacher_session = legacy_flat
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+        self.assertTrue(b.js(
+            f"{summary_text(st)}.includes('Not selected')"))
+
+        # A selected slot without a recorded question id cannot mark a
+        # row — missing identity, not non-selection.
+        def selected_no_id(sid_arg):
+            v = original(sid_arg)
+            v["checkpoints"]["end"]["practice_contexts"] = [
+                {"candidate_id": "c1", "skill_id": chosen["skill_id"],
+                 "context": {"status": "selected",
+                             "selected_question_id": None,
+                             "pool_sha256": "p"}}]
+            return v
+        self.service.teacher_session = selected_no_id
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selection not recorded')"))
+        self.assertFalse(b.js(
+            f"{summary_text(ch)}.includes('Selected practice')"))
+        self.assertFalse(b.js(
+            f"{summary_text(ch)}.includes('Not selected')"))
+
+        # No recorded identity at all.
+        def unrecorded(sid_arg):
+            v = original(sid_arg)
+            v["checkpoints"]["end"].pop("practice_contexts", None)
+            v["checkpoints"]["end"].pop("practice_context", None)
+            return v
+        self.service.teacher_session = unrecorded
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selection not recorded')"))
+        self.assertFalse(b.js(
+            f"{summary_text(ch)}.includes('Not selected')"))
+
+        # Terminal non-selection states stay honest.
+        def terminal(status):
+            def patched(sid_arg):
+                v = original(sid_arg)
+                v["checkpoints"]["end"]["practice_contexts"] = [
+                    {"candidate_id": "c1", "skill_id": chosen["skill_id"],
+                     "context": {"status": status,
+                                 "selected_question_id": None,
+                                 "pool_sha256": None}}]
+                return v
+            return patched
+        for status, label in (("disabled", "Selection disabled"),
+                              ("unavailable", "Selection unavailable"),
+                              ("abstained", "Not selected")):
+            self.service.teacher_session = terminal(status)
+            open_graph()
+            self.assertTrue(b.js(
+                f"{summary_text(ch)}.includes({json.dumps(label)})"))
+            self.assertFalse(b.js(
+                f"{summary_text(ch)}.includes('Selected practice')"))
+
+        # A provider still waiting on practice is pending, not recorded.
+        def pending(sid_arg):
+            v = original(sid_arg)
+            v["provider_job"]["status"] = "waiting_for_practice"
+            return v
+        self.service.teacher_session = pending
+        open_graph()
+        self.assertTrue(b.js(
+            f"{summary_text(ch)}.includes('Selection pending')"))
         self.assertEqual(b.errors, [])
 
 

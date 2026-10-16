@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import phase3_paths  # noqa: F401
 from aitta_generator import AittaGenerator
@@ -224,6 +225,180 @@ class CaptureRetryTests(unittest.TestCase):
         self.assertEqual(self.cache.new_calls, 1)
 
 
+def _flaky(cache, calls, outcomes):
+    """Hosted-style obtain with per-outcome transport metadata."""
+    adapter = Metadata()
+
+    def callback():
+        calls.append(len(calls) + 1)
+        outcome = (outcomes[len(calls) - 1]
+                   if len(calls) <= len(outcomes) else "ok")
+        if isinstance(outcome, BaseException):
+            adapter.last_metadata = {
+                "status": "failed",
+                "transport": {"stage": "open_failed",
+                              "failure_kind": "timeout"}}
+            raise outcome
+        adapter.last_metadata = {"status": "completed"}
+        return "ok"
+    return cache.obtain("aitta_full", {"req": 1}, callback, adapter)
+
+
+class FreshCaptureTests(unittest.TestCase):
+    """reuse_captures=False: hosted demo calls never reuse captures."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.cache = CaptureCache(self.root, None, reuse_captures=False)
+
+    def _seed(self, record):
+        base = self.cache.path("aitta_test", {"req": 1})
+        if isinstance(record, str):
+            base.write_text(record, encoding="utf-8")
+        else:
+            base.write_text(json.dumps(record), encoding="utf-8")
+        return base
+
+    def _valid_record(self, ok=True, reply="old"):
+        return {"provider": "aitta_test", "request": {"req": 1},
+                "ok": ok, "reply": reply, "metadata": {},
+                "original_call_latency_ms": 1, "origin": "hosted_replay"}
+
+    def _retry_cache(self, budget=None):
+        cache = CaptureCache(self.root, budget, automatic_retries=True,
+                             reuse_captures=False)
+        cache._stop_retries.wait = mock.Mock(return_value=False)
+        return cache
+
+    def test_identical_payload_calls_fresh_each_time(self):
+        calls = []
+        _, first = _obtain(self.cache, calls)
+        _, second = _obtain(self.cache, calls)
+        self.assertEqual(calls, [1, 2])
+        self.assertFalse(first["reused"])
+        self.assertFalse(second["reused"])
+        self.assertNotEqual(first["capture_file"], second["capture_file"])
+        self.assertEqual(self.cache.new_calls, 2)
+        self.assertEqual(
+            len(list(self.root.glob("aitta_test_*.json"))), 2)
+
+    def test_saved_successful_capture_ignored_and_preserved(self):
+        base = self._seed(self._valid_record(ok=True))
+        before = base.read_bytes()
+        calls = []
+        reply, execution = _obtain(self.cache, calls)
+        self.assertEqual(reply, "ok")
+        self.assertFalse(execution["reused"])
+        self.assertNotEqual(execution["capture_file"], base.name)
+        self.assertEqual(calls, [1])
+        self.assertEqual(base.read_bytes(), before)
+
+    def test_saved_failed_capture_ignored_and_preserved(self):
+        base = self._seed(self._valid_record(ok=False, reply=None))
+        before = base.read_bytes()
+        calls = []
+        reply, execution = _obtain(self.cache, calls)
+        self.assertEqual(reply, "ok")
+        self.assertFalse(execution["reused"])
+        self.assertEqual(calls, [1])
+        self.assertEqual(base.read_bytes(), before)
+
+    def test_malformed_saved_capture_not_read(self):
+        base = self._seed("{not json")
+        calls = []
+        reply, execution = _obtain(self.cache, calls)
+        self.assertEqual(reply, "ok")
+        self.assertFalse(execution["reused"])
+        self.assertEqual(calls, [1])
+        self.assertEqual(base.read_text(encoding="utf-8"), "{not json")
+
+    def test_new_cache_instance_same_root_still_fresh(self):
+        calls = []
+        _obtain(self.cache, calls)
+        fresh = CaptureCache(self.root, None, reuse_captures=False)
+        _obtain(fresh, calls)
+        self.assertEqual(calls, [1, 2])
+
+    def test_budget_exhausted_blocks_call_without_capture_reuse(self):
+        self._seed(self._valid_record(ok=True))
+        cache = CaptureCache(self.root, 0, reuse_captures=False)
+        calls = []
+        with self.assertRaises(SystemExit):
+            _obtain(cache, calls)
+        self.assertEqual(calls, [])
+
+    def test_automatic_retry_timeout_then_success(self):
+        cache = self._retry_cache()
+        calls = []
+        reply, execution = _flaky(cache, calls,
+                                  [TimeoutError("n"), "ok"])
+        self.assertEqual(reply, "ok")
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(execution["automatic_retry"], {
+            "attempts": 2, "max_attempts": 3, "stop_reason": "success"})
+        captures = sorted(self.root.glob("aitta_full_*.json"))
+        self.assertEqual(len(captures), 2)
+        for path in captures:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("retry_of_failed_capture", record)
+            self.assertNotIn("previous_capture_file", record)
+
+    def test_automatic_retry_exhausts_at_three_calls(self):
+        cache = self._retry_cache()
+        calls = []
+        reply, execution = _flaky(
+            cache, calls, [TimeoutError("n")] * 3)
+        self.assertIsNone(reply)
+        self.assertEqual(calls, [1, 2, 3])
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "attempts_exhausted")
+
+    def test_nonretryable_failure_single_call(self):
+        cache = self._retry_cache()
+        adapter = Metadata()
+        adapter.last_metadata = {
+            "status": "failed",
+            "transport": {"stage": "body_received",
+                          "failure_kind": "http_error",
+                          "http_status": 400}}
+
+        calls = []
+
+        def counted():
+            calls.append(1)
+            raise ValueError("contract rejection")
+        reply, execution = cache.obtain(
+            "aitta_full", {"req": 1}, counted, adapter)
+        self.assertIsNone(reply)
+        self.assertEqual(calls, [1])
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "non_retryable")
+
+    def test_concurrent_identical_calls_both_fresh(self):
+        calls = []
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def worker():
+            barrier.wait(timeout=10)
+            outcomes.append(_obtain(self.cache, calls))
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            [execution["reused"] for _reply, execution in outcomes],
+            [False, False])
+        files = {execution["capture_file"]
+                 for _reply, execution in outcomes}
+        self.assertEqual(len(files), 2)
+
+
 APP_JS = Path(__file__).resolve().parent.parent / "web_demo" / "app.js"
 HARNESS = """
 const vm = require("vm");
@@ -364,12 +539,20 @@ class SuccessOpener:
         if len(self.calls) <= self.failures:
             raise TimeoutError("simulated aitta timeout")
         candidate_id = context["selected_candidate"]["candidate_id"]
+        content = {"candidate_id": candidate_id,
+                   "sections": dict(VALID_SECTIONS)}
+        if context.get("review_examples") is not None:
+            content["worked_reviews"] = [
+                {"question_id": e["question_id"],
+                 "steps": ["Fixture checked step."],
+                 "reasoning_question":
+                     "Why does the fixture step work?"}
+                for e in context["review_examples"]
+                if e.get("status") == "ready"]
         reply = {"choices": [{"finish_reason": "stop",
                               "message": {"role": "assistant",
                                           "content": json.dumps(
-                                              {"candidate_id": candidate_id,
-                                               "sections": dict(
-                                                   VALID_SECTIONS)})}}],
+                                              content)}}],
                  "model": MODEL,
                  "usage": {"prompt_tokens": 10, "completion_tokens": 20,
                            "total_tokens": 30}}
@@ -396,7 +579,8 @@ class ReplayRetryApiTests(unittest.TestCase):
             self.root, self.bank, self.taxonomy)
         self.opener = SuccessOpener()
         (self.root / "captures").mkdir()
-        self.cache = CaptureCache(self.root / "captures", None)
+        self.cache = CaptureCache(self.root / "captures", None,
+                                  reuse_captures=False)
         native = FullFeedbackAittaGenerator(
             AittaGenerator("fake-key-not-real-000000000000",
                            "https://aitta.example.test", model=MODEL,
@@ -431,100 +615,94 @@ class ReplayRetryApiTests(unittest.TestCase):
             time.sleep(.03)
         self.fail("replay did not finish")
 
-    def test_retry_flag_validation(self):
+    def test_obsolete_retry_flag_rejected_like_any_unknown_key(self):
+        for value in (True, False, "yes"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    self.service.replays.start(
+                        self.request(retry_failed_provider_calls=value))
         with self.assertRaises(ValueError):
-            self.service.replays.start(
-                self.request(retry_failed_provider_calls="yes"))
-        with self.assertRaises(ValueError):
-            self.service.replays.start(
-                self.request(retry_failed_provider_calls=True,
-                             unknown_field=True))
-        with self.assertRaises(ValueError):
-            self.service.replays.start(
-                self.request(provider_mode="rules",
-                             allow_provider_calls=False,
-                             retry_failed_provider_calls=True))
-        with self.assertRaises(ValueError):
-            self.service.replays.start(
-                self.request(allow_provider_calls=False,
-                             retry_failed_provider_calls=True))
+            self.service.replays.start(self.request(unknown_field=True))
         self.assertEqual(self.service.replays.list()["runs"], [])
 
-    def test_legacy_five_field_request_still_works(self):
+    def test_run_records_fresh_provider_execution(self):
         run = self.service.replays.start(self.request())
         record = self.service.replays.get(run["id"])
-        self.assertFalse(record.get("retry_failed_provider_calls", False))
+        self.assertNotIn("retry_failed_provider_calls", record)
+        self.assertEqual(record["provider_execution"],
+                         "fresh_hosted_calls")
 
-    def test_retry_flag_persisted_and_idempotent(self):
-        request = self.request(retry_failed_provider_calls=True)
+    def test_request_id_stays_idempotent(self):
+        request = self.request()
         run = self.service.replays.start(request)
-        self.assertTrue(run["retry_failed_provider_calls"])
         again = self.service.replays.start(request)
         self.assertEqual(again["id"], run["id"])
         self.assertEqual(len(self.service.replays.list()["runs"]), 1)
         with self.assertRaises(ResearchConflict):
             self.service.replays.start(
-                dict(request, retry_failed_provider_calls=False))
+                dict(request, max_parallel=2))
+        self.assertEqual(len(self.service.replays.list()["runs"]), 1)
+        finished = self.wait(run["id"])
+        self.assertEqual(finished["status"], "complete")
+        # Resubmitting the same request id after completion makes no
+        # new hosted call.
+        self.service.replays.start(request)
+        self.assertEqual(len(self.opener.calls), 1)
         self.assertEqual(len(self.service.replays.list()["runs"]), 1)
 
-    def test_failed_call_retried_on_next_flagged_run(self):
+    def test_each_new_request_makes_a_fresh_hosted_call(self):
         self.opener.failures = 1
-        request_one = self.request(retry_failed_provider_calls=True)
         first = self.wait(
-            self.service.replays.start(request_one)["id"])
+            self.service.replays.start(self.request())["id"])
         self.assertEqual(first["cases"][0]["provider_status"], "fallback")
         self.assertEqual(len(self.opener.calls), 1)
         captures = self.root / "captures"
-        base_files = [p for p in captures.glob("aitta_full_*.json")
-                      if "_attempt_" not in p.name]
-        self.assertEqual(len(base_files), 1)
-        base_bytes = base_files[0].read_bytes()
-        base_record = json.loads(base_bytes)
-        self.assertFalse(base_record["ok"])
-        self.assertNotIn("retry_failed_provider_calls",
-                         json.dumps(base_record["request"]))
+        fresh_files = sorted(captures.glob("aitta_full_*_call_*.json"))
+        self.assertEqual(len(fresh_files), 1)
+        self.assertFalse(json.loads(
+            fresh_files[0].read_text(encoding="utf-8"))["ok"])
         first_run_bytes = (self.root / "runtime" / "replay_runs" /
                            f"{first['id']}.json").read_bytes()
-        request_two = self.request(retry_failed_provider_calls=True)
+        # A new request id does not reuse the saved failure: it calls
+        # again, and the earlier capture stays untouched.
         second = self.wait(
-            self.service.replays.start(request_two)["id"])
+            self.service.replays.start(self.request())["id"])
         self.assertEqual(second["cases"][0]["provider_status"], "ready")
         self.assertEqual(len(self.opener.calls), 2)
-        attempt_files = sorted(
-            captures.glob("aitta_full_*_attempt_*.json"))
-        self.assertEqual(len(attempt_files), 1)
-        attempt = json.loads(attempt_files[0].read_text())
-        self.assertTrue(attempt["ok"])
-        self.assertTrue(attempt["retry_of_failed_capture"])
-        self.assertEqual(attempt["attempt_number"], 2)
-        self.assertEqual(attempt["previous_capture_file"],
-                         base_files[0].name)
-        self.assertEqual(base_files[0].read_bytes(), base_bytes)
+        # A third new request does not reuse the saved success either.
+        third = self.wait(
+            self.service.replays.start(self.request())["id"])
+        self.assertEqual(third["cases"][0]["provider_status"], "ready")
+        self.assertEqual(len(self.opener.calls), 3)
+        self.assertEqual(
+            len(list(captures.glob("aitta_full_*_call_*.json"))), 3)
+        self.assertEqual(
+            list(captures.glob("*_attempt_*.json")), [])
         self.assertEqual(
             (self.root / "runtime" / "replay_runs" /
              f"{first['id']}.json").read_bytes(), first_run_bytes)
-        execution = second["cases"][0]
-        self.assertEqual(execution["status"], "complete")
-        request_three = self.request(retry_failed_provider_calls=True)
-        third = self.wait(
-            self.service.replays.start(request_three)["id"])
-        self.assertEqual(third["cases"][0]["provider_status"], "ready")
-        self.assertEqual(len(self.opener.calls), 2)
+        for run in (second, third):
+            session_id = run["cases"][0]["session_id"]
+            detail = self.service.teacher_session(session_id)
+            execution = (detail["provider_job"]["executions"]
+                         ["student"]["generator"])
+            self.assertFalse(execution["reused"])
+            self.assertNotIn("retry_of_failed_capture", execution)
 
-    def test_unflagged_run_reuses_failure(self):
-        self.opener.failures = 1
+    def test_call_budget_still_enforced(self):
         first = self.wait(
             self.service.replays.start(self.request())["id"])
-        self.assertEqual(first["cases"][0]["provider_status"], "fallback")
+        self.assertEqual(first["cases"][0]["provider_status"], "ready")
         self.assertEqual(len(self.opener.calls), 1)
+        self.cache.budget = 1
         second = self.wait(
             self.service.replays.start(self.request())["id"])
-        self.assertEqual(second["cases"][0]["provider_status"], "fallback")
+        # No fallback to the stored capture when the budget is spent.
+        self.assertEqual(second["cases"][0]["provider_status"],
+                         "fallback")
         self.assertEqual(len(self.opener.calls), 1)
-        self.assertEqual(
-            list((self.root / "captures").glob("*_attempt_*.json")), [])
 
-    def test_legacy_single_worker_uses_retry_scope(self):
+    def test_legacy_single_worker_also_calls_fresh(self):
         self.opener.failures = 1
         legacy = DemoService(
             root=self.root / "legacy", bank=self.bank,
@@ -545,28 +723,23 @@ class ReplayRetryApiTests(unittest.TestCase):
                 time.sleep(.03)
             self.fail("legacy replay did not finish")
 
-        first = wait(legacy.replays.start(
-            self.request(retry_failed_provider_calls=True))["id"])
+        first = wait(legacy.replays.start(self.request())["id"])
         self.assertEqual(first["cases"][0]["provider_status"], "fallback")
         self.assertEqual(len(self.opener.calls), 1)
-        second = wait(legacy.replays.start(
-            self.request(retry_failed_provider_calls=True))["id"])
+        second = wait(legacy.replays.start(self.request())["id"])
         self.assertEqual(second["cases"][0]["provider_status"], "ready")
         self.assertEqual(len(self.opener.calls), 2)
-        attempts = list((self.root / "captures").glob(
-            "aitta_full_*_attempt_*.json"))
-        self.assertEqual(len(attempts), 1)
 
-    def test_rules_replay_never_retries(self):
+    def test_rules_replay_makes_no_hosted_call(self):
         self.opener.failures = 1
         first = self.wait(
             self.service.replays.start(self.request())["id"])
         self.assertEqual(len(self.opener.calls), 1)
-        self.cache.new_calls = 0
         rules = self.wait(self.service.replays.start(
             self.request(provider_mode="rules",
                          allow_provider_calls=False))["id"])
         self.assertEqual(rules["status"], "complete")
+        self.assertEqual(rules["provider_execution"], "rules_only")
         self.assertEqual(len(self.opener.calls), 1)
 
 

@@ -180,8 +180,7 @@ class ScenarioReplays:
     def start(self, body):
         keys = {"request_id", "report_sha256", "scenario_ids",
                 "provider_mode", "allow_provider_calls"}
-        optional = {"retry_failed_provider_calls", "max_parallel",
-                    "feedback_variant"}
+        optional = {"max_parallel", "feedback_variant"}
         if not (isinstance(body, dict) and keys <= set(body) <= keys | optional):
             raise ValueError("invalid replay request")
         feedback_variant = body.get("feedback_variant", "question_first")
@@ -190,9 +189,6 @@ class ScenarioReplays:
             raise ValueError("invalid replay selection")
         if (feedback_variant == "worked_first"
                 and self.service.review_mode != "aligned_two_topic"):
-            raise ValueError("invalid replay selection")
-        retry_failed = body.get("retry_failed_provider_calls", False)
-        if type(retry_failed) is not bool:
             raise ValueError("invalid replay selection")
         max_parallel = body.get("max_parallel", self.max_parallel)
         if (type(max_parallel) is not int
@@ -208,9 +204,6 @@ class ScenarioReplays:
         if body["provider_mode"] == "hosted" and (
                 self.service.provider_mode != "hosted" or not body["allow_provider_calls"]):
             raise ValueError("hosted replay requires configuration and explicit consent")
-        if retry_failed and (
-                body["provider_mode"] != "hosted" or not body["allow_provider_calls"]):
-            raise ValueError("retrying failed calls requires hosted mode with provider consent")
         with self.lock:
             if self._path(body["request_id"]).exists():
                 existing = self._read(body["request_id"])
@@ -236,7 +229,9 @@ class ScenarioReplays:
                       "request": copy.deepcopy(body), "created_at": utc_now(), "status": "queued",
                       "report_sha256": body["report_sha256"], "source": library["source"],
                       "code_sha256": self.code, "provider_mode": body["provider_mode"],
-                      "retry_failed_provider_calls": retry_failed,
+                      "provider_execution": ("fresh_hosted_calls"
+                                             if body["provider_mode"] == "hosted"
+                                             else "rules_only"),
                       "feedback_variant": feedback_variant,
                       "max_parallel": min(max_parallel, len(ids)),
                       "diagnostics_mode": "fresh_frozen_model_inference", "cancel_requested": False,
@@ -281,14 +276,12 @@ class ScenarioReplays:
             with self.lock:
                 record = self._read(run_id)
                 report_sha256 = record["report_sha256"]
-                retry_failed = record.get("retry_failed_provider_calls", False)
                 provider_mode = record["provider_mode"]
                 bank_mode = record.get("bank_mode", "demo")
                 feedback_variant = record.get(
                     "feedback_variant", "question_first")
             replay = {"run_id": run_id, "scenario_id": row["scenario_id"],
                       "scenario_name": row["name"], "report_sha256": report_sha256,
-                      "retry_failed_provider_calls": retry_failed,
                       "feedback_variant": feedback_variant}
             created = self.service.create_session(label=row["display_name"], replay=replay,
                                                   provider_mode=provider_mode,

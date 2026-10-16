@@ -16,9 +16,11 @@ import threading
 import time
 import unittest
 import urllib.request
+from unittest import mock
 from pathlib import Path
 
 import phase3_paths  # noqa: F401
+import worked_review_math
 from aitta_generator import AittaGenerationError, AittaGenerator
 from assessment_worked_review import build_assessment_review_examples
 from demo_api import make_server
@@ -29,6 +31,7 @@ import feedback_practice
 from feedback_practice import resolve_practice
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
+    MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
     build_multi_full_input, validate_worked_reviews)
 from replay_provider_scenarios import CaptureCache
 from worked_first_context import (
@@ -85,6 +88,31 @@ class WorkedReviewOpener(RecordingOpener):
             candidate_id=context["selected_candidate"]["candidate_id"],
             sections=self.sections, worked_reviews=reviews)
         return super().open(request, timeout)
+
+
+class SectionsStub:
+    """Fixture generator: two-field sections reply plus deterministic
+    worked_reviews built from the request's ready review_examples
+    whenever the grounded contract applies (worked-first schema or a
+    non-null assessment context). Tests that are not about authoring
+    wording use it to satisfy the contract without a wire fake."""
+    supports_full_feedback = True
+    execution = None
+
+    def generate(self, payload):
+        from full_feedback import worked_review_examples_for_reply
+        reply = {"candidate_id":
+                 payload["selected_candidate"]["candidate_id"],
+                 "sections": dict(VALID_SECTIONS)}
+        expected = worked_review_examples_for_reply(payload)
+        if expected is not None:
+            reply["worked_reviews"] = [
+                {"question_id": e["question_id"],
+                 "steps": ["Fixture authored step."],
+                 "reasoning_question":
+                     "Why does the fixture step work?"}
+                for e in expected]
+        return reply
 
 
 class WorkedReviewValidationTests(unittest.TestCase):
@@ -239,7 +267,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v3")
+                         "aitta_worked_first_evidence_author_v4")
         meta = generator.last_metadata
         self.assertEqual(meta["status"], "completed")
         self.assertEqual(meta["prompt_version"], WF_PROMPT)
@@ -257,6 +285,267 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(len(opener.calls), 1)
         self.assertTrue(cached.execution["reused"])
         self.assertEqual(first, second)
+
+    PROVIDER_EXAMPLE_KEYS = {
+        "question_id", "prompt", "options", "selected_answer",
+        "correct_answer", "skill_id", "subtopic_id",
+        "for_subtopic_name", "status"}
+
+    def _assert_wire_has_questions_only(self, payload, context,
+                                        worked_first):
+        """The serialized model request carries question/answer records
+        only: no deterministic steps, explanations, reasoning
+        questions, solver versions, notices or baseline sections."""
+        wire_examples = context["review_examples"]
+        local = payload["review_examples"]
+        self.assertEqual(len(wire_examples), len(local))
+        for wire, card in zip(wire_examples, local):
+            self.assertEqual(set(wire), self.PROVIDER_EXAMPLE_KEYS)
+            # The projected status marks provider-generation readiness
+            # even when the local solver marked the card unavailable.
+            self.assertEqual(wire["status"], "ready")
+            for key in self.PROVIDER_EXAMPLE_KEYS - {"status"}:
+                self.assertEqual(wire[key], card[key])
+        raw = json.dumps(context)
+        for forbidden in ('"steps"', '"explanation"',
+                          '"reasoning_question"', '"checked_steps"',
+                          '"checked_reasoning_question"',
+                          '"solution_version"', '"notice"',
+                          '"baseline_sections"', '"assessment_context"',
+                          '"selection_policy"', "SENTINEL_CHECKED_STEP",
+                          "SENTINEL_REASONING", "sentinel_solution_v0",
+                          '"answer_index"', '"selected_index"'):
+            self.assertNotIn(forbidden, raw)
+        if worked_first:
+            wf = context["worked_first_context"]
+            self.assertEqual(
+                set(wf), {"version", "assessment_records",
+                          "concept_graph", "model_context"})
+            records = wf["assessment_records"]
+            self.assertEqual(len(records), 40)
+            for record in records:
+                self.assertEqual(
+                    set(record),
+                    {"position", "skill_id", "subtopic_id",
+                     "subtopic_name", "question", "options",
+                     "selected_answer", "correct_answer", "correct"})
+        else:
+            self.assertNotIn("worked_first_context", context)
+
+    def test_wire_projects_questions_without_solutions(self):
+        # Sentinel deterministic output proves nothing solver-produced
+        # reaches the wire: the input validator rebuilds the cards, so
+        # the same sentinel must appear in the rebuilt internal payload
+        # yet be absent from the serialized request.
+        sentinel = {"steps": ["SENTINEL_CHECKED_STEP keep internal."],
+                    "reasoning_question":
+                        "SENTINEL_REASONING why does it work?",
+                    "solution_version": "sentinel_solution_v0"}
+        contexts = [feedback_practice.empty_context("abstained")
+                    for candidate in self.bundle["review_candidates"]
+                    if candidate["focus"] is not None]
+        with mock.patch.object(
+                worked_review_math, "solution",
+                side_effect=lambda *a, **k: copy.deepcopy(sentinel)):
+            inputs = {
+                "worked_first": build_multi_full_input(
+                    self.evidence, "student", self.bundle, contexts,
+                    assessment_context=self.assessment_context,
+                    worked_first_context=self.wf_context),
+                "grounded_multi": build_multi_full_input(
+                    self.evidence, "student", self.bundle, contexts,
+                    assessment_context=self.assessment_context)}
+            for name, payload in inputs.items():
+                with self.subTest(variant=name):
+                    pristine = copy.deepcopy(payload)
+                    self.assertTrue(all(
+                        c["steps"] == sentinel["steps"]
+                        and c["solution_version"]
+                        == "sentinel_solution_v0"
+                        for c in payload["review_examples"]))
+                    self.assertIn("baseline_sections", payload)
+                    for mode in ("native", "cached"):
+                        with self.subTest(variant=name, mode=mode):
+                            opener = WorkedReviewOpener()
+                            native = self._generator(opener)
+                            generator = native
+                            if mode == "cached":
+                                root = (Path(self.tmp.name)
+                                        / f"proj_{name}")
+                                root.mkdir(exist_ok=True)
+                                generator = CachedFullFeedbackGenerator(
+                                    native,
+                                    CaptureCache(root, None),
+                                    MODEL, "hash")
+                                generator.generate(
+                                    copy.deepcopy(payload))
+                            reply = generator.generate(
+                                copy.deepcopy(payload))
+                            self.assertEqual(
+                                [w["question_id"] for w in
+                                 reply["worked_reviews"]],
+                                [c["question_id"] for c in
+                                 payload["review_examples"]])
+                            self.assertEqual(len(opener.calls), 1)
+                            context = json.loads(
+                                opener.calls[0]["body"]["messages"]
+                                [1]["content"])
+                            self._assert_wire_has_questions_only(
+                                payload, context,
+                                worked_first=(name == "worked_first"))
+                    self.assertEqual(payload, pristine)
+
+    def test_unsupported_solvers_still_reach_model_as_questions(self):
+        """Cards whose deterministic solver raises remain selected
+        provider inputs: the wire carries each recorded question and
+        answers without any solution fields, and a valid reply covers
+        every selected card."""
+        with mock.patch.object(
+                worked_review_math, "solution",
+                side_effect=ValueError("unsupported question")):
+            contexts = [feedback_practice.empty_context("abstained")
+                        for candidate in
+                        self.bundle["review_candidates"]
+                        if candidate["focus"] is not None]
+            payload = build_multi_full_input(
+                self.evidence, "student", self.bundle, contexts,
+                assessment_context=self.assessment_context,
+                worked_first_context=self.wf_context)
+            self.assertTrue(payload["review_examples"])
+            self.assertTrue(all(
+                c["status"] == "unavailable"
+                for c in payload["review_examples"]))
+            opener = WorkedReviewOpener()
+            reply = self._generator(opener).generate(
+                copy.deepcopy(payload))
+            self.assertEqual(
+                [w["question_id"] for w in reply["worked_reviews"]],
+                [c["question_id"] for c in payload["review_examples"]])
+            context = json.loads(
+                opener.calls[0]["body"]["messages"][1]["content"])
+            self._assert_wire_has_questions_only(
+                payload, context, worked_first=True)
+
+    def test_unsupported_service_cards_overlay_provider(self):
+        """End-to-end service path with the solver unavailable: the
+        provider reply supplies the card wording, marker fields state
+        the input was the question and recorded answers, and the
+        deterministic comparison stays unavailable rather than
+        inventing a solution."""
+        for variant in ("worked_first", "question_first"):
+            with self.subTest(variant=variant):
+                with mock.patch.object(
+                        worked_review_math, "solution",
+                        side_effect=ValueError("unsupported question")):
+                    opener = WorkedReviewOpener()
+                    service = DemoService(
+                        root=Path(self.tmp.name) / f"svc_un_{variant}",
+                        bank=self.bank, taxonomy=self.taxonomy,
+                        diagnostics=fake_diagnostics(self.bank),
+                        provider_mode="hosted",
+                        generator=self._generator(opener))
+                    self.addCleanup(service.close, wait=True)
+                    created = service.create_session(
+                        feedback_variant=variant)
+                    sid, token = (created["session_id"],
+                                  created["student_token"])
+                    for row in self.rows:
+                        service.submit_response(sid, token, row)
+                    self.assertTrue(wait_for(
+                        lambda: service._load_meta(sid)
+                        ["provider_job"]["status"]
+                        in ("ready", "fallback")))
+                    meta = service._load_meta(sid)
+                    self.assertEqual(meta["provider_job"]["status"],
+                                     "ready")
+                    review = meta["checkpoints"]["end"][
+                        "student_review"]
+                    self.assertEqual(
+                        set(review["trace"]["worked_review_sources"]
+                            .values()), {"provider"})
+                    for card in review["review_examples"]:
+                        self.assertEqual(card["status"], "ready")
+                        self.assertEqual(card["explanation_source"],
+                                         "provider")
+                        self.assertEqual(
+                            card["explanation_input"],
+                            "question_and_recorded_answers_v1")
+                        self.assertEqual(card["checked_steps"], [])
+                        self.assertIsNone(card["solution_version"])
+                        self.assertTrue(card["steps"])
+                    detail = service.teacher_session(sid)
+                    delivery = detail["feedback_delivery"]
+                    preview = delivery["preview"]
+                    for card in preview["review_examples"]:
+                        self.assertEqual(card["explanation_source"],
+                                         "provider")
+                        self.assertIsNone(card.get("solution_version"))
+                    det = delivery["deterministic_preview"]
+                    self.assertNotIn("question_and_recorded_answers_v1",
+                                     json.dumps(det))
+                    for card in det["review_examples"]:
+                        self.assertEqual(card["status"], "unavailable")
+                        self.assertFalse(card["steps"])
+                        self.assertNotEqual(
+                            card.get("explanation_source"), "provider")
+                    released = service.release_feedback(sid, {
+                        "message_sha256":
+                            delivery["preview_sha256"]})
+                    self.assertTrue(released["released"])
+
+    def test_unsupported_rejected_generation_keeps_unavailable(self):
+        # When the provider reply omits a selected card it is rejected
+        # and locally unavailable cards stay unavailable; no
+        # replacement is invented.
+        class MissingCardStub:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                from full_feedback import (
+                    worked_review_examples_for_reply)
+                expected = worked_review_examples_for_reply(payload)
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": [
+                        {"question_id": expected[0]["question_id"],
+                         "steps": ["Fixture authored step."],
+                         "reasoning_question": "Why?"}]}
+
+        with mock.patch.object(
+                worked_review_math, "solution",
+                side_effect=ValueError("unsupported question")):
+            service = DemoService(
+                root=Path(self.tmp.name) / "svc_unrej",
+                bank=self.bank, taxonomy=self.taxonomy,
+                diagnostics=fake_diagnostics(self.bank),
+                provider_mode="hosted",
+                generator=MissingCardStub())
+            self.addCleanup(service.close, wait=True)
+            created = service.create_session(
+                feedback_variant="worked_first")
+            sid, token = (created["session_id"],
+                          created["student_token"])
+            for row in self.rows:
+                service.submit_response(sid, token, row)
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid)["provider_job"]
+                ["status"] in ("ready", "fallback")))
+            meta = service._load_meta(sid)
+            self.assertEqual(meta["provider_job"]["status"],
+                             "fallback")
+            review = meta["checkpoints"]["end"]["student_review"]
+            self.assertEqual(
+                review["trace"]["fallback_reason"],
+                "invalid_generation")
+            for card in review["review_examples"]:
+                self.assertEqual(card["status"], "unavailable")
+                self.assertFalse(card["steps"])
+                self.assertNotEqual(card.get("explanation_source"),
+                                    "provider")
+                self.assertNotIn("checked_steps", card)
 
     def test_invalid_worked_reviews_rejected_with_draft(self):
         bad = [dict(question_id=self.ready_ids[0], steps=["ok"],
@@ -318,20 +607,27 @@ class WorkedReviewWireTests(unittest.TestCase):
             secret, generator.last_rejected_draft["content"])
 
     def test_service_overlay_and_release(self):
-        for mode in ("native", "cached"):
-            with self.subTest(mode=mode):
+        # Both aligned variants overlay provider worked_reviews onto
+        # ready cards; native and cached generators behave the same.
+        cases = [("native", "worked_first"),
+                 ("cached", "worked_first"),
+                 ("native", "question_first"),
+                 ("cached", "question_first")]
+        for mode, variant in cases:
+            with self.subTest(mode=mode, variant=variant):
                 opener = WorkedReviewOpener()
                 native = self._generator(opener)
                 generator = native
                 cache = None
                 if mode == "cached":
-                    cache_root = Path(self.tmp.name) / "ov_captures"
+                    cache_root = (Path(self.tmp.name)
+                                  / f"ov_captures_{variant}")
                     cache_root.mkdir(exist_ok=True)
                     cache = CaptureCache(cache_root, None)
                     generator = CachedFullFeedbackGenerator(
                         native, cache, MODEL, "hash")
                 service = DemoService(
-                    root=Path(self.tmp.name) / f"svc_{mode}",
+                    root=Path(self.tmp.name) / f"svc_{mode}_{variant}",
                     bank=self.bank, taxonomy=self.taxonomy,
                     diagnostics=fake_diagnostics(self.bank),
                     provider_mode="hosted", generator=generator)
@@ -339,7 +635,7 @@ class WorkedReviewWireTests(unittest.TestCase):
                     service.cache = cache
                 self.addCleanup(service.close, wait=True)
                 created = service.create_session(
-                    feedback_variant="worked_first")
+                    feedback_variant=variant)
                 sid, token = (created["session_id"],
                               created["student_token"])
                 for row in self.rows:
@@ -416,6 +712,18 @@ class WorkedReviewWireTests(unittest.TestCase):
                         candidate=by_cand.get(slot.get("candidate_id")),
                         aligned=True)["card"]
                     for slot in end.get("practice_contexts") or []]
+                if variant == "question_first":
+                    # The concise student preview rewrites practice
+                    # notices/relationships; mirror that transform so
+                    # the comparison checks wording source, not the
+                    # established concise copy.
+                    from assessment_worked_review import (
+                        concise_student_preview)
+                    expected_cards = concise_student_preview(
+                        {"practice_activities": expected_cards,
+                         "sections": [], "review_examples": []},
+                        review.get("selected_candidates"))[
+                            "practice_activities"]
                 self.assertEqual(
                     preview.get("practice_activities") or [],
                     expected_cards)
@@ -493,21 +801,17 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(released_card["steps"], teacher_steps)
         self.assertNotIn("rejected_draft", json.dumps(snapshot))
 
-    def test_question_first_gets_no_overlay(self):
-        class Stub:
-            supports_full_feedback = True
-            execution = None
-
-            def generate(self, payload):
-                return {"candidate_id":
-                        payload["selected_candidate"]["candidate_id"],
-                        "sections": dict(VALID_SECTIONS)}
-
+    def test_question_first_overlay_and_request_contract(self):
+        # Question-first grounded requests now use the v7 grounded
+        # output contract: the reply must carry worked_reviews and the
+        # overlay reaches ready cards exactly as in worked-first.
+        opener = WorkedReviewOpener()
         service = DemoService(
             root=Path(self.tmp.name) / "svc_qf",
             bank=self.bank, taxonomy=self.taxonomy,
             diagnostics=fake_diagnostics(self.bank),
-            provider_mode="hosted", generator=Stub())
+            provider_mode="hosted",
+            generator=self._generator(opener))
         self.addCleanup(service.close, wait=True)
         created = service.create_session(
             feedback_variant="question_first")
@@ -516,17 +820,144 @@ class WorkedReviewWireTests(unittest.TestCase):
             service.submit_response(sid, token, row)
         self.assertTrue(wait_for(
             lambda: service._load_meta(sid)["provider_job"]["status"]
-            in ("ready", "fallback")))
-        review = service._load_meta(
-            sid)["checkpoints"]["end"]["student_review"]
-        self.assertNotIn("worked_review_sources", review["trace"])
-        for card in review.get("review_examples") or []:
-            self.assertNotIn("explanation_source", card)
-            self.assertNotIn("checked_steps", card)
+            == "ready"))
+        self.assertEqual(len(opener.calls), 1)
+        body = opener.calls[0]["body"]
+        context = json.loads(body["messages"][1]["content"])
+        # The grounded multi request keeps the multi schema/v7 version;
+        # the raw 40-record assessment context stays worked-first-only
+        # and is never placed on the question-first wire.
+        self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
+        self.assertEqual(context["prompt_version"],
+                         MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+        self.assertTrue(context["prompt_version"].endswith("_v8"))
+        self.assertNotIn("assessment_context", context)
+        self.assertNotIn("worked_first_context", context)
+        instructions = body["messages"][0]["content"]
+        self.assertIn("worked_reviews", instructions)
+        self.assertIn("Return an empty list", instructions)
+        self.assertNotIn("MUST NOT return worked_reviews", instructions)
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(
+            review["trace"]["worked_review_sources"],
+            {qid: "provider" for qid in self.ready_ids})
+        det = {c["question_id"]: c for c in
+               build_assessment_review_examples(
+                   self.evidence, review["selected_candidates"],
+                   self.assessment_context)}
+        by_qid = {c["question_id"]: c
+                  for c in review["review_examples"]}
+        # Cards exist only for real grounded examples; every ready one
+        # carries provider wording, and none is invented.
+        self.assertEqual(set(by_qid), set(det))
+        for index, qid in enumerate(self.ready_ids):
+            card = by_qid[qid]
+            steps, reasoning = (AUTHORED[index]
+                                if index < len(AUTHORED) else GENERIC)
+            self.assertEqual(card["steps"], list(steps))
+            self.assertEqual(card["reasoning_question"], reasoning)
+            self.assertEqual(card["explanation_source"], "provider")
+            self.assertEqual(card["checked_steps"], det[qid]["steps"])
+        # Sections stay application-owned shape: question-first is not
+        # a provider full narrative.
+        self.assertEqual(
+            review["trace"]["validation"],
+            "application_owned_facts_and_actions_provider_summary_"
+            "and_worked_reviews_shape_checked_requires_educator_"
+            "review")
+        # The deterministic comparison retains the template cards.
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        det_preview = delivery["deterministic_preview"]
+        authored = {step for steps, _q in AUTHORED for step in steps}
+        for card in det_preview.get("review_examples") or []:
+            self.assertNotEqual(
+                card.get("explanation_source"), "provider")
+            self.assertFalse(
+                authored & set(card.get("steps") or []))
+
+    def test_grounded_two_field_reply_falls_back(self):
+        # A legacy two-field reply no longer satisfies a grounded
+        # request (worked-first or assessment-context question-first):
+        # it is an invalid_generation fallback, not a silent success
+        # that keeps deterministic templates under a provider label.
+        class TwoFieldStub:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                return {"candidate_id":
+                        payload["selected_candidate"]["candidate_id"],
+                        "sections": dict(VALID_SECTIONS)}
+
+        for variant in ("worked_first", "question_first"):
+            with self.subTest(variant=variant):
+                service = DemoService(
+                    root=Path(self.tmp.name) / f"svc_2f_{variant}",
+                    bank=self.bank, taxonomy=self.taxonomy,
+                    diagnostics=fake_diagnostics(self.bank),
+                    provider_mode="hosted", generator=TwoFieldStub())
+                self.addCleanup(service.close, wait=True)
+                created = service.create_session(
+                    feedback_variant=variant)
+                sid, token = (created["session_id"],
+                              created["student_token"])
+                for row in self.rows:
+                    service.submit_response(sid, token, row)
+                self.assertTrue(wait_for(
+                    lambda: service._load_meta(sid)["provider_job"]
+                    ["status"] in ("ready", "fallback")))
+                meta = service._load_meta(sid)
+                self.assertEqual(meta["provider_job"]["status"],
+                                 "fallback")
+                review = meta["checkpoints"]["end"]["student_review"]
+                self.assertEqual(
+                    review["trace"]["fallback_reason"],
+                    "invalid_generation")
+                sources = review["trace"]["worked_review_sources"]
+                self.assertTrue(all(source == "application"
+                                    for source in sources.values()))
+                for card in review["review_examples"]:
+                    self.assertNotEqual(card.get("explanation_source"),
+                                        "provider")
+                    self.assertNotIn("checked_steps", card)
+                # Provider wording never reaches the cards or the
+                # released-path preview.
+                self.assertNotIn(AUTHORED[0][0][0],
+                                 json.dumps(review["review_examples"]))
+
+    def test_zero_ready_examples_still_require_empty_list(self):
+        # Grounded contract with no reviewable example at all (all
+        # answers correct): the reply must still carry
+        # worked_reviews: [] and validation accepts exactly that.
+        rows = grounded_rows(self.bank, [])
+        evidence = build_evidence(self.bank, self.taxonomy, rows)
+        bundle = build_review_bundles(evidence)[0]
+        contexts = [feedback_practice.empty_context("abstained")
+                    for candidate in bundle["review_candidates"]
+                    if candidate["focus"] is not None]
+        payload = build_multi_full_input(
+            evidence, "student", bundle, contexts,
+            assessment_context={
+                "bank": self.bank, "taxonomy": self.taxonomy,
+                "responses": rows})
+        self.assertEqual(payload["review_examples"], [])
+        opener = WorkedReviewOpener()
+        reply = self._generator(opener).generate(payload)
+        self.assertEqual(reply["worked_reviews"], [])
+        # On that exact zero-ready request a reply that omits the
+        # field entirely is still rejected.
+        generator = self._generator(RecordingOpener(
+            wire_reply(candidate_id=bundle["candidate_id"])))
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(copy.deepcopy(payload))
+        self.assertEqual(generator.last_metadata["rejection_code"],
+                         "invalid_reply_fields")
 
     def test_legacy_two_field_reply_keeps_deterministic_cards(self):
         # A stub generator that returns the legacy two-field reply in
-        # worked_first mode keeps the deterministic checked cards.
+        # worked_first mode is rejected (invalid_generation) and the
+        # deterministic checked cards are kept.
         class Stub:
             supports_full_feedback = True
             execution = None
@@ -590,15 +1021,6 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertNotIn("rejected_draft", json.dumps(snapshot))
 
     def test_deterministic_preview_comparison_teacher_only(self):
-        class SectionsStub:
-            supports_full_feedback = True
-            execution = None
-
-            def generate(self, payload):
-                return {"candidate_id":
-                        payload["selected_candidate"]["candidate_id"],
-                        "sections": dict(VALID_SECTIONS)}
-
         cases = [
             ("worked_first", "aligned_two_topic", "worked_first", True),
             ("question_first", "aligned_two_topic", "question_first",
@@ -653,10 +1075,10 @@ class WorkedReviewWireTests(unittest.TestCase):
                                     main["sections"])
                 self.assertNotIn(
                     AUTHORED[0][0][0], json.dumps(det))
-                if name == "worked_first":
+                if name in ("worked_first", "question_first"):
                     # Checked baseline cards keep the deterministic
                     # steps and the correct answer, never the provider
-                    # explanation.
+                    # explanation — for both aligned variants.
                     for card in det.get("review_examples") or []:
                         self.assertNotEqual(
                             card.get("explanation_source"), "provider")
@@ -667,6 +1089,13 @@ class WorkedReviewWireTests(unittest.TestCase):
                     for card in det.get("review_examples") or []:
                         self.assertFalse(
                             authored & set(card.get("steps") or []))
+                    # The main preview carries the provider overlay on
+                    # ready cards only.
+                    for card in main.get("review_examples") or []:
+                        if card["status"] == "ready":
+                            self.assertEqual(
+                                card.get("explanation_source"),
+                                "provider")
                 # The student snapshot never exposes the comparison.
                 snap = service.snapshot(sid, token)
                 self.assertNotIn("deterministic_preview",
@@ -808,8 +1237,9 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "Why does dividing 50 into ten equal parts give 10%?",
             text)
         self.assertIn(
-            "AI-drafted explanation based on checked mathematics; "
-            "teacher review required.", text)
+            "AI-drafted explanation from the question and recorded "
+            "answers; not independently verified. Teacher review "
+            "required.", text)
         # The deterministic checked steps stay available on the card
         # data (not rendered as the explanation) and IDs are intact.
         self.assertNotIn("checked_steps", text)
@@ -1038,6 +1468,119 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         student_text = b.js("document.body.textContent")
         self.assertIn("Simplify: 3x + 2x", student_text)
         self.assertNotIn("Sievennä", student_text)
+        self.assertEqual(b.errors, [])
+
+    def test_question_first_provider_worked_review_with_provenance(
+            self):
+        # Question-first grounded sessions now receive provider-authored
+        # worked-review steps + reasoning questions behind the same
+        # think-first reveal; the deterministic comparison keeps the
+        # application template and the release snapshot keeps the
+        # approved provider wording.
+        created = self.service.create_session(
+            feedback_variant="question_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] == "ready"),
+            "provider job did not reach ready")
+        # Nothing is visible to the student before teacher release.
+        pre = self.service.snapshot(sid, token)
+        self.assertIsNone(pre["feedback"]["end"])
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback .review-example')")
+        # The think-first scaffold shows first; the provider-authored
+        # steps/reasoning sit behind the reveal disclosure.
+        detail = "document.querySelector('#tab-feedback')"
+        text = b.js(f"{detail}.textContent")
+        self.assertIn("Think first", text)
+        b.js("document.querySelectorAll('#tab-feedback "
+             ".worked-solution').forEach(d => d.open = true)")
+        text = b.js(f"{detail}.textContent")
+        self.assertIn(
+            "10% means one tenth of the whole amount.", text)
+        self.assertIn(
+            "Explain your reasoning: Why does dividing 50 into ten "
+            "equal parts give 10%?", text)
+        self.assertIn(
+            "AI-drafted explanation from the question and recorded "
+            "answers; not independently verified. Teacher review "
+            "required.", text)
+        # Teacher-only source label: not confirmed to a hosted capture
+        # in this fixture, so it reports the generic AI source.
+        release_card = ("document.querySelector('#tab-feedback "
+                        ".release-card')")
+        card_text = b.js(f"{release_card}.textContent")
+        self.assertIn("Worked explanations", card_text)
+        self.assertIn("AI-generated", card_text)
+        # The deterministic comparison still shows the application
+        # template, never the provider wording.
+        meta = self.service._load_meta(sid)
+        det = self.service._deterministic_preview(meta)
+        det_marker = next(
+            step for card in det.get("review_examples") or []
+            for step in card.get("steps") or [])
+        b.js("document.querySelector('.end-deterministic-comparison')"
+             ".open = true")
+        comparison = b.js(
+            "document.querySelector('.end-deterministic-comparison')"
+            ".textContent")
+        self.assertIn(det_marker, comparison)
+        self.assertNotIn(AUTHORED[0][0][0], comparison)
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            box = "#tab-feedback .review-example"
+            b.js(
+                f"let el_ = document.querySelector('{box}');"
+                "let n = el_; while (n) { if (n.tagName === 'DETAILS')"
+                " n.open = true; n = n.parentElement; }"
+                "el_.scrollIntoView({block:'center'});")
+            b.wait("document.querySelector('" + box +
+                   "').getBoundingClientRect().top > 0")
+            b.screenshot("llm_worked_review_question_first_desktop.png")
+            b.viewport(390, 844)
+            self.assertLessEqual(b.js(
+                "document.documentElement.scrollWidth - "
+                "document.documentElement.clientWidth"), 0)
+            b.screenshot("llm_worked_review_question_first_mobile.png")
+            b.viewport(1440, 1100)
+        # Approve and release; the student snapshot retains the
+        # provider-authored card wording.
+        detail = self.service.teacher_session(sid)
+        released = self.service.release_feedback(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"], "reviewer_label": "browser-test"})
+        self.assertTrue(released["released"])
+        snapshot = self.service.snapshot(sid, token)
+        end_examples = (snapshot["feedback"]["end"]
+                        .get("review_examples") or [])
+        self.assertIn(AUTHORED[0][0][0], json.dumps(end_examples))
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.body.textContent.includes('Think first')",
+               timeout=30)
+        b.js("document.querySelectorAll('.worked-solution')"
+             ".forEach(d => d.open = true)")
+        student_text = b.js("document.body.textContent")
+        self.assertIn(
+            "10% means one tenth of the whole amount.", student_text)
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            b.screenshot("llm_worked_review_question_first_student.png")
         self.assertEqual(b.errors, [])
 
     def test_single_document_editor_roundtrip(self):
@@ -1416,6 +1959,161 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         if os.environ.get("BROWSER_SCREENSHOTS"):
             b.screenshot("end_document_editor_mobile.png")
         b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
+    def _teacher_feedback_tab(self):
+        """Navigate to the teacher console, unlock and open the first
+        session's feedback tab."""
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        return b
+
+    def test_fallback_preview_hides_deterministic_comparison(self):
+        # A terminal deterministic fallback previews the same baseline
+        # the comparison would show, so the comparison is hidden; the
+        # preview, generation details and editor remain. Saving a
+        # teacher edit on the fallback restores the baseline
+        # comparison for the edited draft.
+        self.opener.reviews_override = lambda ready: [
+            {"question_id": "unknown_qid", "steps": ["x"],
+             "reasoning_question": "Why?"}]
+        created = self.service.create_session(
+            feedback_variant="worked_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] == "fallback"),
+            "provider job did not reach fallback")
+        b = self._teacher_feedback_tab()
+        b.wait("document.querySelector('#tab-feedback "
+               ".feedback-preview')")
+        release_card = ("document.querySelector('#tab-feedback "
+                        ".release-card')")
+        self.assertIn("Deterministic", b.js(f"{release_card}"
+                                            ".textContent"))
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('Deterministic end feedback - comparison')"))
+        self.assertIsNotNone(b.js(
+            "document.querySelector('#tab-feedback "
+            "details[data-disclosure-key=feedback-research]')"))
+        self.assertIsNotNone(b.js(
+            "document.querySelector('#tab-feedback "
+            "details[data-disclosure-key=feedback-editing]')"))
+        detail = self.service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        sections = {s["kind"]: s["text"] for s in preview["sections"]}
+        sections["assessment_summary"] = "Teacher-reviewed wording."
+        saved = self.service.save_feedback_edit(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"],
+            "sections": sections})
+        self.assertTrue(saved["saved"])
+        b.wait("document.querySelector('#tab-feedback "
+               ".end-deterministic-comparison')")
+        comparison = b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison').textContent")
+        self.assertIn("Deterministic end feedback - comparison",
+                      comparison)
+        self.assertEqual(b.errors, [])
+
+    def test_rules_preview_hides_deterministic_comparison(self):
+        # A purely deterministic (rules-mode) session previews the
+        # baseline itself; the comparison disclosure is redundant and
+        # is not rendered.
+        created = self.service.create_session(
+            feedback_variant="worked_first", provider_mode="rules")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: ((self.service.teacher_session(sid)
+                      .get("feedback_delivery") or {})
+                     .get("preview") is not None)),
+            "rules-mode preview did not appear")
+        b = self._teacher_feedback_tab()
+        b.wait("document.querySelector('#tab-feedback "
+               ".feedback-preview')")
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('Deterministic end feedback - comparison')"))
+        self.assertIsNotNone(b.js(
+            "document.querySelector('#tab-feedback "
+            "details[data-disclosure-key=feedback-research]')"))
+        self.assertEqual(b.errors, [])
+
+    def test_read_only_comparison_follows_provider_authorship(self):
+        # The saved (read-only) end-feedback view shows the baseline
+        # comparison only when the saved wording is provider-authored;
+        # a deterministic saved review hides it.
+        created = self.service.create_session(
+            feedback_variant="worked_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] == "ready"),
+            "provider job did not reach ready")
+        b = self._teacher_feedback_tab()
+        b.wait("document.querySelector('#tab-feedback "
+               ".feedback-preview')")
+        detail = self.service.teacher_session(sid)
+        read_only = copy.deepcopy(detail)
+        read_only["read_only"] = True
+        read_only["feedback_delivery"] = None
+        end_review = (read_only["checkpoints"]["end"]
+                      ["student_review"])
+        det = copy.deepcopy(read_only)
+        det["checkpoints"]["end"]["student_review"]["trace"] = {
+            "phrasing_source": "deterministic"}
+        self.assertNotEqual(
+            end_review["trace"].get("phrasing_source"),
+            "deterministic")
+        b.js(
+            "window.__detail = null; window.__origApi = api; "
+            f"window.__sid = {json.dumps(sid)}; "
+            "api = (path, options = {}) => window.__origApi(path, "
+            "options).then((res) => (window.__detail && path === "
+            "`/api/teacher/sessions/${window.__sid}`) "
+            "? window.__detail : res)")
+        b.js(f"window.__detail = {json.dumps(det)}")
+        b.wait("document.querySelector('#tab-feedback "
+               ".saved-end-feedback')")
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison')"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('Deterministic end feedback - comparison')"))
+        b.js(f"window.__detail = {json.dumps(read_only)}")
+        b.wait("document.querySelector('#tab-feedback "
+               ".end-deterministic-comparison')")
+        comparison = b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison').textContent")
+        self.assertIn("Deterministic end feedback - comparison",
+                      comparison)
         self.assertEqual(b.errors, [])
 
 

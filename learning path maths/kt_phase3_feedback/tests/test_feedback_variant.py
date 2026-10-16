@@ -54,9 +54,23 @@ class FullStubGenerator:
         self.execution = {"status": "fake_completed"}
         if self.error is not None:
             raise self.error
-        return {"candidate_id":
-                payload["selected_candidate"]["candidate_id"],
-                "sections": dict(self.sections)}
+        reply = {"candidate_id":
+                 payload["selected_candidate"]["candidate_id"],
+                 "sections": dict(self.sections)}
+        # Grounded replies (worked-first schema or a non-null
+        # assessment context) must carry one worked review per
+        # projected provider example, even when the local solver
+        # marked a card unavailable.
+        from full_feedback import worked_review_examples_for_reply
+        expected = worked_review_examples_for_reply(payload)
+        if expected is not None:
+            reply["worked_reviews"] = [
+                {"question_id": e["question_id"],
+                 "steps": ["Fixture authored step."],
+                 "reasoning_question":
+                     "Why does the fixture step work?"}
+                for e in expected]
+        return reply
 
 
 class HostedFactoryTests(unittest.TestCase):
@@ -426,7 +440,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v3")
+            "aitta_worked_first_evidence_author_v4")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")

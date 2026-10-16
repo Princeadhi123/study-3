@@ -18,7 +18,8 @@ from live_diagnostics import LiveDiagnostics
 from mcq_service import MCQSessionService
 from research_runtime import (
     AUGMENTED_EMBEDDINGS, RESEARCH_STATUS, load_current_practice_pool,
-    load_research_bank, require_augmented_embeddings, validate_current_practice_pool)
+    load_research_bank, require_augmented_embeddings, teacher_content_context,
+    validate_current_practice_pool)
 from session_store import SessionStore
 from shadow_practice import ShadowPracticeRecommender
 from tests.helpers import make_bank, make_taxonomy, responses
@@ -277,6 +278,22 @@ class ResearchRuntimeTests(unittest.TestCase):
         js = (phase3_paths.PHASE3_ROOT / "web_demo/app.js").read_text(encoding="utf-8")
         self.assertNotIn("conformal", js.lower())
         self.assertNotRegex(js, r"__p\d+__q[a-f0-9]+")
+
+    def test_teacher_context_exercises_carry_graph_skill_names(self):
+        for mode in ("warm", "cold", "demo"):
+            context = teacher_content_context(mode)
+            self.assertTrue(context["exercises"])
+            for exercise in context["exercises"]:
+                self.assertIn("skill_name", exercise)
+                self.assertEqual(
+                    exercise["skill_name"],
+                    next(bank["skill_names"][exercise["skill_id"]]
+                         for bank in self.banks.values()
+                         if exercise["skill_id"] in bank["skill_names"])
+                    if exercise["skill_id"] not in self.demo["skill_names"]
+                    else self.demo["skill_names"][exercise["skill_id"]])
+            expected = 24 if mode == "demo" else 64
+            self.assertEqual(len(context["exercises"]), expected)
 
 
 if __name__ == "__main__":

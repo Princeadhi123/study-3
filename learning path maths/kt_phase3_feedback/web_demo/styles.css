@@ -185,6 +185,25 @@ table.grid th { background: #f0f5f5; font-weight: 600; }
 .axis-grid { stroke: var(--line); stroke-width: 1; }
 .axis-label { font-family: Consolas, monospace; font-size: 10px; fill: var(--muted); }
 .topic { border: 1px solid var(--line); border-radius: 8px; padding: .7rem 1rem; margin: .7rem 0; background: #fafcfc; }
+.skill-map-section { margin: .8rem 0; min-width: 0; }
+.skill-map-section > summary { cursor: pointer; font-size: .85rem; font-weight: 600; padding: .4rem 0; }
+.skill-task { border: 1px solid var(--line); border-radius: 8px; padding: .55rem .9rem; margin: .5rem 0; background: #fafcfc; min-width: 0; }
+.skill-task > summary { cursor: pointer; font-size: .8rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem .8rem; min-width: 0; list-style: none; }
+.skill-task > summary::before { content: "+"; font-weight: 600; color: var(--verdigris); margin-right: .4rem; }
+.skill-task[open] > summary::before { content: "–"; }
+.skill-task > summary::-webkit-details-marker { display: none; }
+.skill-task > summary:hover { color: var(--verdigris); }
+.skill-task-label { flex: 1 1 auto; min-width: 0; }
+.skill-task-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem .6rem; }
+.skill-badge { border: 1px solid var(--verdigris); border-radius: 999px; padding: 0 .55rem; font-size: .68rem; font-weight: 600; white-space: nowrap; }
+.skill-badge.is-example, .skill-badge.is-selected { background: #21615B; border-color: #21615B; color: #fff; }
+.skill-badge.is-focus { color: #21615B; }
+.skill-badge.is-muted { border-color: var(--line); color: var(--muted); font-weight: 400; }
+.skill-task-result { font-weight: 600; }
+.skill-task-result.is-correct { color: #21615B; }
+.skill-task-result.is-incorrect { color: #C5603F; }
+.skill-task-result.is-unknown { color: var(--muted); }
+.skill-task .kv .k { min-width: 150px; }
 .ktchart { width: 100%; max-width: 700px; height: auto; background: #fafcfc; border: 1px solid var(--line); border-radius: 8px; }
 .compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 .col { background: #f6f9f9; border: 1px solid var(--line); border-radius: 8px; padding: 1rem; min-width: 0; }
@@ -277,6 +296,7 @@ button.danger:hover:not(:disabled) { background: #82311c; }
   .workspace-nav #logout { flex: 0 0 auto; }
   .nav-number { display: none; }
   .kv .k { min-width: 0; width: 42%; flex-shrink: 0; }
+  .skill-task .kv .k { min-width: 0; }
   .ws-head { flex-direction: column; align-items: flex-start; gap: .5rem; }
   .judgment-fields { grid-template-columns: 1fr; }
   .decision-kv { grid-template-columns: 1fr; gap: .2rem; }

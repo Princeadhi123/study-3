@@ -172,7 +172,9 @@ authentication.
 - shows only observed totals at the end until the teacher approves;
 - displays the approved end package — review-focus narrative, worked review
   cards revisiting the student's own earliest incorrect assessment answers
-  (with the recorded selection, correct answer, and checked steps), and all
+  (with the recorded selection, correct answer, and the reviewed worked
+  steps — provider-drafted wording the teacher approved, or the local
+  checked solution when no provider wording was accepted), and all
   included aligned practice activities (up to two each) — after release.
 
 ### Teacher dashboard
@@ -244,13 +246,15 @@ recorded at creation and never reinterpreted afterwards:
 - `question_first` (default): the current presentation — concise student
   titles and question-first worked review cards; a hosted Aitta reply
   contributes only the shape-checked completion wording while strengths,
-  review focus and next steps stay application-owned.
+  review focus and next steps stay application-owned. Grounded review
+  cards may additionally carry provider-authored worked explanations
+  (same shape-only checks and teacher approval as below).
 - `worked_first` (aligned mode only): the original structured four sections
-  with standard titles and the exact checked review/practice cards. When a
+  with standard titles and the selected review/practice cards. When a
   validated Aitta reply is available it may supply all four narrative
   sections under guardrails `provider_full_narrative_shape_checked_v2`; the
   application-owned scope notice is appended exactly once and all counts,
-  selected topics, answer keys, checked maths and practice cards remain
+  selected topics, answer keys and practice cards remain
   application-owned. This narrative is shape-checked only — **not**
   fact-verified — and always requires educator review. Invalid provider
   output falls back to the deterministic four sections.
@@ -258,30 +262,38 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v3`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v4`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
-  order), the checked review cards, selected practice context, and
-  available experimental pre-answer KT estimates (explicitly *not*
-  mastery). The deterministic baseline is never sent to the provider; it
-  is retained locally for educator comparison and fallback and is not a
-  hallucination detector. The new prompt/context intentionally invalidates
-  earlier request captures. Question-first is unchanged.
-  The v3 reply additionally carries `worked_reviews`: one entry per ready
-  checked card with provider-authored `steps` and a `reasoning_question`
-  (shape-checked only — the teaching text is not semantically verified
-  and `solution_version` still refers to the application-checked
-  mathematics, not the prose). Displayed cards keep the deterministic
-  wording under `checked_steps`/`checked_reasoning_question`, record
-  `explanation_source` (`provider`/`application`) per card in
-  `trace.worked_review_sources`, and show the AI-draft provenance label
+  order), the selected review questions (recorded prompt, options,
+  selected and correct answers, and topic ids only — never deterministic
+  steps, explanations, reasoning questions, or the baseline sections),
+  selected practice context, and available experimental pre-answer KT
+  estimates (explicitly *not* mastery). The deterministic baseline is
+  never sent to the provider; it is retained locally for educator
+  comparison and fallback and is not a hallucination detector. The new
+  prompt/context intentionally invalidates earlier request captures.
+  The v4 reply additionally carries `worked_reviews`: exactly one entry
+  per selected review card — including cards whose local solver was
+  unavailable — with provider-authored `steps` and a `reasoning_question`
+  generated from the question and recorded answers (shape-checked only —
+  the teaching text is not independently mathematically verified;
+  `solution_version` still refers to the application-checked mathematics,
+  not the prose, and stays `null` when no checked solution exists).
+  Displayed cards keep any deterministic wording under
+  `checked_steps`/`checked_reasoning_question`, record
+  `explanation_source` (`provider`/`application`) on each ready card and
+  `explanation_input` (`question_and_recorded_answers_v1`) on new provider
+  cards. `trace.worked_review_sources` records the source by question id.
+  The cards show the AI-draft provenance label
   in teacher preview and release. A malformed hosted reply (bad
-  sections or bad `worked_reviews`) rejects the whole generation and
-  falls back to the deterministic draft, retaining a teacher-only
-  rejected draft; a legacy two-field reply from an injected generator
-  still supplies the narrative while the deterministic checked cards
-  are retained. A fresh hosted call happens only
-  when the user explicitly starts one.
+  sections or bad/missing `worked_reviews`) rejects the whole generation
+  and falls back to the deterministic draft, retaining a teacher-only
+  rejected draft; a legacy two-field reply without `worked_reviews` —
+  including one from an injected generator — is likewise rejected on
+  grounded requests, and a request with no selected review cards still
+  requires an explicit empty `worked_reviews` list. A fresh hosted call
+  happens only when the user explicitly starts one.
 
   Section wording may now use digits or number words (20 and twenty are
   both fine). Reply validation still checks only shape — section keys,
@@ -289,7 +301,7 @@ recorded at creation and never reinterpreted afterwards:
   candidate match, and secrets; it does not verify that a numerical claim
   matches the observed evidence, so educator review stays required and
   scored results/cards remain application-owned. The prompt version bumps
-  (`..._v4`, `..._v6`, `..._v2`, `shape_checked_v2`) leave prior captures
+  (`..._v4`, `..._v8`, `..._v2`, `shape_checked_v2`) leave prior captures
   untouched and never trigger a retry implicitly — a fresh hosted call
   happens only when the user explicitly starts one.
 
@@ -578,14 +590,21 @@ Aitta (current `aligned_two_topic` mode):
   `FullFeedbackAittaGenerator` in `full_feedback.py` — not the old
   opening-only `EvidenceAittaGenerator` seam;
 - receives observed aggregate evidence, the validated selected bundle and
-  per-focus plans, the deterministic baseline, the grounded worked review
-  cards (each selected focus's earliest incorrectly answered assessment
-  question with its recorded selection, correct answer, and checked steps),
-  and safe per-topic practice status/task descriptions — **no** raw bank or
+  per-focus plans, the grounded review questions (each selected focus's
+  earliest incorrectly answered assessment question with its prompt,
+  options, recorded selected and correct answers, and topic ids — never
+  deterministic steps, explanations, reasoning questions, or the
+  baseline sections), and safe per-topic practice status/task
+  descriptions (prompt
+  `aitta_assessment_grounded_two_topic_feedback_v8`) — **no** raw bank or
   responses, answer indices, practice answer keys, raw practice
   question/options, or KT probabilities;
-- does not score, select questions or topics, or invent worked solutions
-  (the application owns the checked steps);
+- does not score or select questions or topics; it authors worked-review
+  steps and a reasoning question per selected card from the question and
+  recorded answers — shape-checked only, not independently mathematically
+  verified, requiring teacher approval — while any locally computed
+  checked solution is retained privately for deterministic comparison
+  and fallback;
 - failure preserves the selected bundle and practice contexts with the
   deterministic baseline text.
 
@@ -611,20 +630,14 @@ Aligned KT practice (same 40-answer end checkpoint):
 `CaptureCache` reuses a recorded response only when the effective provider
 request matches — the cached body includes the prompt, so the new multi
 prompt versions isolate old single-mode captures without deleting them.
-Successful matching captures are always reused; failed captures are also
-reused by default so offline, batch, and older-API behavior is unchanged.
-The hosted replay UI and API (`retry_failed_provider_calls`, default off
-for API callers, on in the dialog) may opt a single replay run into
-retrying the latest failed capture: the scope is that run's sessions only,
-never a global switch, and there is no automatic retry loop — each scenario
-in a flagged run makes at most one new attempt per matching failed provider
-request, still inside the
-existing call budget and explicit consent. A retry appends an immutable
-`..._attempt_NNNNNNNNN.json` record next to the base capture; failed
-history is never overwritten, deleted, or renamed, and a successful retry
-becomes the reused capture for later calls, including after a restart —
-no fresh cache root is needed. Reuse is real captured provider output but
-is not a fresh or independent provider trial. The default per-process cap
+Offline and batch tools reuse matching captures (successes and, by
+default, failures) and may opt into `retry_failed_scope` to append
+immutable `..._attempt_NNNNNNNNN.json` retries without deleting history.
+The hosted demo runs with `reuse_captures=False`: every live or replay
+hosted call is a fresh provider request stored under a unique
+`..._call_<hex>.json` capture name, no prior capture is read or reused,
+and only the bounded automatic transient retry chain applies — there is
+no manual retry option. The default per-process cap
 is 12 new calls;
 `--unlimited-calls` removes it (mutually exclusive with `--call-budget`).
 Normally at most one Aitta call runs per completed scenario — not one

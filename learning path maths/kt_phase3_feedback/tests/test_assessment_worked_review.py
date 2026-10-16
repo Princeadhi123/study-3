@@ -160,16 +160,30 @@ class RecordingOpener:
         return _Response(self.payload)
 
 
-def wire_reply(candidate_id, sections=None):
+def wire_reply(candidate_id, sections=None, worked_reviews=None):
+    reply = {"candidate_id": candidate_id,
+             "sections": sections or dict(VALID_SECTIONS)}
+    if worked_reviews is not None:
+        reply["worked_reviews"] = worked_reviews
     return {"choices": [{"finish_reason": "stop",
                          "message": {"role": "assistant",
-                                     "content": json.dumps(
-                                         {"candidate_id": candidate_id,
-                                          "sections": sections
-                                          or dict(VALID_SECTIONS)})}}],
+                                     "content": json.dumps(reply)}}],
             "model": MODEL,
             "usage": {"prompt_tokens": 10, "completion_tokens": 20,
                       "total_tokens": 30}}
+
+
+def fixture_reviews(payload):
+    """Deterministic worked_reviews for every projected provider
+    example in the payload (selected cards, including ones whose local
+    solver was unavailable), fulfilling the grounded reply contract in
+    tests that are not about provider wording."""
+    from full_feedback import worked_review_examples_for_reply
+    expected = worked_review_examples_for_reply(payload) or []
+    return [{"question_id": e["question_id"],
+             "steps": ["Fixture authored step."],
+             "reasoning_question": "Why does the fixture step work?"}
+            for e in expected]
 
 
 class GroundedBuilderTests(unittest.TestCase):
@@ -577,9 +591,11 @@ class GroundedPipelineTests(unittest.TestCase):
         self.assertEqual(normalized, payload)
 
     def test_wire_contains_only_selected_cards(self):
+        payload = self._payload()
         opener = RecordingOpener(
-            wire_reply(candidate_id=self.bundle["candidate_id"]))
-        self._generator(opener).generate(copy.deepcopy(self._payload()))
+            wire_reply(candidate_id=self.bundle["candidate_id"],
+                       worked_reviews=fixture_reviews(payload)))
+        self._generator(opener).generate(copy.deepcopy(payload))
         body = opener.calls[0]["body"]
         context = json.loads(body["messages"][1]["content"])
         self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
@@ -737,7 +753,8 @@ class GroundedPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = CaptureCache(Path(tmp), 4)
             opener = RecordingOpener(
-                wire_reply(candidate_id=self.bundle["candidate_id"]))
+                wire_reply(candidate_id=self.bundle["candidate_id"],
+                           worked_reviews=fixture_reviews(payloads[0])))
             cached = CachedFullFeedbackGenerator(
                 self._generator(opener), cache, MODEL,
                 "endpointhash" * 8)
@@ -1173,7 +1190,8 @@ class GroundedServiceTests(unittest.TestCase):
                 return {
                     "candidate_id": payload["selected_candidate"]
                     ["candidate_id"],
-                    "sections": dict(VALID_SECTIONS)}
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
 
         generator = FakeGenerator()
         service = self._service(provider_mode="hosted",
@@ -1943,6 +1961,7 @@ class WarmBankQuestionFirstTests(unittest.TestCase):
                 "subtopic_id": self.leaf_for[qid],
                 "steps": solved["steps"],
                 "reasoning_question": solved["reasoning_question"],
+                "solution_version": solved["solution_version"],
                 "notice": CONCISE_READY_NOTICE}
 
     @staticmethod

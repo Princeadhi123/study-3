@@ -205,6 +205,8 @@ def teacher_content_context(bank_mode):
     graph = _capture()
     concepts = {n["id"]: n["label"] for n in graph["nodes"]
                 if n["type"] == "concept" and n["scope"] == "assessed_content"}
+    skills = {n["id"]: n["label"] for n in graph["nodes"]
+              if n["type"] == "skill"}
     sources = {"practice_pool_v2"}
     if bank_mode != "demo":
         sources.add(f"{bank_mode}_bank")
@@ -218,6 +220,7 @@ def teacher_content_context(bank_mode):
         "exercises": [{
             "question_id": e["id"], "source_id": e["source_id"],
             "role": e["role"], "skill_id": e["skill_id"],
+            "skill_name": skills.get(e["skill_id"]),
             "concept_id": e["concept_id"], "concept_label": concepts[e["concept_id"]],
             "text": e["question"]["text"],
             "options": copy.deepcopy(e["question"]["options"]),
