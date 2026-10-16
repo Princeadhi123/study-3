@@ -1567,13 +1567,14 @@ class ResearchBrowserTests(unittest.TestCase):
                 ".querySelectorAll('li')]"
                 ".map((n) => n.textContent)")
             self.assertEqual(shown_options, options_fi)
-            original_dd = ("document.querySelector('#tab-feedback "
-                           "details[data-disclosure-key=practice-original]')")
-            self.assertTrue(b.js(f"Boolean({original_dd})"))
-            self.assertFalse(b.js(f"{original_dd}.open"))
-            self.assertTrue(b.js(
-                f"{original_dd}.textContent.includes('Sievennä')"))
-            b.js(f"{original_dd}.open = true")
+            self.assertIsNone(b.js(
+                "document.querySelector('#tab-feedback "
+                "details[data-disclosure-key=practice-original]')"))
+            self.assertFalse(b.js(
+                "document.querySelector('#tab-feedback').textContent"
+                ".includes('Original question wording')"))
+            self.assertFalse(b.js(
+                f"{card}.textContent.includes('Sievennä')"))
             research_dd = ("document.querySelector('#tab-feedback "
                            "details[data-disclosure-key=feedback-research]')")
             edit_dd = ("document.querySelector('#tab-feedback "
@@ -1585,7 +1586,6 @@ class ResearchBrowserTests(unittest.TestCase):
             b.js(f"{field}.value='Finnish fixture edit.'; "
                  f"{field}.dispatchEvent(new Event('input')); {field}.focus()")
             time.sleep(2.3)
-            self.assertTrue(b.js(f"{original_dd}.open"))
             self.assertTrue(b.js(f"{edit_dd}.open"))
             self.assertEqual(b.js(f"{field}.value"),
                              "Finnish fixture edit.")
@@ -2527,7 +2527,8 @@ class ResearchBrowserTests(unittest.TestCase):
         # rendered locally, so the provider summary wording is not a
         # discriminating marker — the notice transition is.
         detail_text = b.js(f"{detail}.textContent")
-        self.assertNotIn("Preview hash", detail_text)
+        self.assertFalse(b.js(
+            f"Boolean({detail}.querySelector('.feedback-preview'))"))
         self.assertNotIn("shape-checked, not fact-verified", detail_text)
 
         gen_gate.set()
@@ -2543,7 +2544,7 @@ class ResearchBrowserTests(unittest.TestCase):
         # proves the case detail refreshed under unchanged run JSON.
         b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
                "diagnostics are still pending. This replay is not complete.')")
-        b.wait(f"{detail}.textContent.includes('Preview hash')")
+        b.wait(f"Boolean({detail}.querySelector('.feedback-preview'))")
         diag_gate.set()
         self.assertTrue(wait_for(
             lambda: self.service.replays.get(run_b["id"])["status"]

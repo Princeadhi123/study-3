@@ -173,22 +173,25 @@ Key contracts:
   per run; separate runs of the same answers under each variant are
   saved independently, and historical records without the field display
   as "Historical / unspecified" and are never regenerated.
-- **Midpoint teacher-only draft**: at answer 20 the student check-in
-  stays fully deterministic (`compose_midpoint_message`). In hosted
-  sessions a separate phrasing job may make at most one extra provider
-  call (shared budget/capture cache, `aitta_midpoint` namespace,
+- **Midpoint hosted rewording**: at answer 20 the check-in is first
+  saved deterministically (`compose_midpoint_message`) and stays the
+  immutable baseline. In hosted sessions a phrasing job runs once —
+  up to three provider attempts for transient failures under the
+  bounded retry policy (shared budget/capture cache,
+  `aitta_midpoint` namespace,
   `phase3_midpoint_feedback_generation_v1`, prompt
-  `aitta_midpoint_check_in_v1`) carrying only first-20 broad-topic
+  `aitta_midpoint_check_in_v2`) carrying only first-20 broad-topic
   aggregate counts — no raw answers, identifiers, baselines, or
   second-half data. The validated four-section reply is overlaid onto
   the deterministic headings/counts/table via `compose_midpoint_draft`
   and stored as the checkpoint `provider_draft`
-  (`phase3_teacher_midpoint_llm_draft_v1`) for teacher comparison only:
-  never student-facing, never auto-released, shape-checked not
-  fact-verified. Failures fall back to no draft (deterministic message
-  unchanged) and retain a sanitized rejected draft in the teacher-only
-  `phrasing_job`; a restart marks a pending job `interrupted_by_restart`
-  without rerunning. Rules sessions never call the midpoint adapter.
+  (`phase3_student_midpoint_llm_v1`); when the job is ready that draft
+  becomes the student-facing check-in automatically — no teacher
+  approval and no release step. Pending, failed, and rules sessions
+  keep showing the deterministic wording; failures retain a sanitized
+  rejected draft in the teacher-only `phrasing_job`; a restart marks a
+  pending job `interrupted_by_restart` without rerunning. Rules
+  sessions never call the midpoint adapter.
 - **Failure and restart**: a completed selector execution (fresh or cached)
   is preserved even when the aligned practice or generation stage fails;
   a generator that ran and failed is recorded as failed, one never started

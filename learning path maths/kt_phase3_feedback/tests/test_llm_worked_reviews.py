@@ -589,6 +589,117 @@ class WorkedReviewWireTests(unittest.TestCase):
         snapshot = service.snapshot(sid, token)
         self.assertNotIn("rejected_draft", json.dumps(snapshot))
 
+    def test_deterministic_preview_comparison_teacher_only(self):
+        class SectionsStub:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                return {"candidate_id":
+                        payload["selected_candidate"]["candidate_id"],
+                        "sections": dict(VALID_SECTIONS)}
+
+        cases = [
+            ("worked_first", "aligned_two_topic", "worked_first", True),
+            ("question_first", "aligned_two_topic", "question_first",
+             False),
+            ("legacy_single", "legacy_single", "question_first", False)]
+        for name, review_mode, variant, real_opener in cases:
+            with self.subTest(variant=name):
+                if real_opener:
+                    generator = FullFeedbackAittaGenerator(
+                        AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                                       opener=WorkedReviewOpener()))
+                else:
+                    generator = SectionsStub()
+                service = DemoService(
+                    root=Path(self.tmp.name) / f"svc_dp_{name}",
+                    bank=self.bank, taxonomy=self.taxonomy,
+                    diagnostics=fake_diagnostics(self.bank),
+                    provider_mode="hosted", generator=generator,
+                    review_mode=review_mode)
+                self.addCleanup(service.close, wait=True)
+                created = service.create_session(
+                    feedback_variant=variant)
+                sid, token = (created["session_id"],
+                              created["student_token"])
+                for row in self.rows:
+                    service.submit_response(sid, token, row)
+                self.assertTrue(wait_for(
+                    lambda: service._load_meta(sid)["provider_job"]
+                    ["status"] in ("ready", "fallback")))
+                meta_before = copy.deepcopy(service._load_meta(sid))
+                self.assertEqual(meta_before["provider_job"]["status"],
+                                 "ready")
+                detail = service.teacher_session(sid)
+                delivery = detail["feedback_delivery"]
+                det = delivery["deterministic_preview"]
+                self.assertIsNotNone(det)
+                # It equals _final_preview over the stored baseline
+                # exactly as the helper specifies.
+                meta = service._load_meta(sid)
+                copy_meta = copy.deepcopy(meta)
+                copy_meta["feedback_edit"] = None
+                copy_meta["checkpoints"]["end"]["student_review"] = (
+                    copy_meta["checkpoints"]["end"]
+                    ["baseline_student"])
+                copy_meta["provider_job"]["status"] = "fallback"
+                self.assertEqual(
+                    det, service._final_preview(copy_meta))
+                # The read never mutates persisted meta or hashes.
+                self.assertEqual(service._load_meta(sid), meta_before)
+                main = delivery["preview"]
+                self.assertNotEqual(det["sections"],
+                                    main["sections"])
+                self.assertNotIn(
+                    AUTHORED[0][0][0], json.dumps(det))
+                if name == "worked_first":
+                    # Checked baseline cards keep the deterministic
+                    # steps and the correct answer, never the provider
+                    # explanation.
+                    for card in det.get("review_examples") or []:
+                        self.assertNotEqual(
+                            card.get("explanation_source"), "provider")
+                        self.assertIsNotNone(
+                            card.get("correct_answer"))
+                    authored = {step for steps, _q in AUTHORED
+                                for step in steps}
+                    for card in det.get("review_examples") or []:
+                        self.assertFalse(
+                            authored & set(card.get("steps") or []))
+                # The student snapshot never exposes the comparison.
+                snap = service.snapshot(sid, token)
+                self.assertNotIn("deterministic_preview",
+                                 json.dumps(snap))
+                # Teacher edits change only the main preview.
+                section_keys = {"assessment_summary",
+                                "observed_strengths",
+                                "review_focus", "next_steps"}
+                sections = {s["kind"]: s["text"]
+                            for s in main["sections"]
+                            if s["kind"] in section_keys}
+                if set(sections) == section_keys:
+                    sections["assessment_summary"] = (
+                        "Teacher-edited summary wording.")
+                    saved = service.save_feedback_edit(sid, {
+                        "message_sha256": delivery["preview_sha256"],
+                        "sections": sections})
+                    self.assertTrue(saved["saved"])
+                    edited = service.teacher_session(sid)
+                    edited_delivery = edited["feedback_delivery"]
+                    self.assertEqual(edited_delivery["preview_source"],
+                                     "teacher_edited")
+                    self.assertEqual(
+                        edited_delivery["deterministic_preview"], det)
+                    self.assertNotEqual(
+                        edited_delivery["preview"]["sections"],
+                        main["sections"])
+                    self.assertEqual(service._load_meta(sid)
+                                     ["checkpoints"]["end"]
+                                     ["student_review"],
+                                     meta_before["checkpoints"]["end"]
+                                     ["student_review"])
+
 
 @unittest.skipUnless(os.environ.get("RUN_BROWSER_TESTS") == "1",
                      "opt-in installed Edge + websocket-client browser test")
@@ -712,6 +823,82 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             b.wait("document.querySelector('" + box +
                    "').getBoundingClientRect().top > 0")
             b.screenshot("llm_worked_review_desktop.png")
+        # The deterministic comparison sits in a collapsed disclosure
+        # after the main preview and is not shown by default.
+        self.assertFalse(b.js(
+            "document.querySelector('.end-deterministic-comparison')"
+            " === null"))
+        self.assertFalse(b.js(
+            "document.querySelector('.end-deterministic-comparison')"
+            ".open"))
+        meta = self.service._load_meta(sid)
+        det = self.service._deterministic_preview(meta)
+        det_marker = next(
+            step for card in det.get("review_examples") or []
+            for step in card.get("steps") or [])
+        self.assertNotIn("Preview hash", b.js(
+            "document.querySelector('#tab-feedback .release-card')"
+            ".textContent"))
+        hash_before = (self.service.teacher_session(sid)
+                       ["feedback_delivery"]["preview_sha256"])
+        b.js("document.querySelector('.end-deterministic-comparison')"
+             ".open = true")
+        comparison = b.js(
+            "document.querySelector('.end-deterministic-comparison')"
+            ".textContent")
+        self.assertIn(det_marker, comparison)
+        self.assertIn("not the preview being approved", comparison)
+        self.assertNotIn(AUTHORED[0][0][0], comparison)
+        # The removed "Original question wording" disclosures are gone
+        # from the main preview and the expanded comparison; English
+        # prompts/options render directly on the cards instead.
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            "details[data-disclosure-key^=\"worked-review-original:\"], "
+            "#tab-feedback details[data-disclosure-key^="
+            "\"practice-original\"]').length"), 0)
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('Original question wording')"))
+        preview_text = b.js(
+            "document.querySelector('#tab-feedback .feedback-preview')"
+            ".textContent")
+        for host_text in (preview_text, comparison):
+            self.assertIn("Simplify: 3x + 2x", host_text)
+            self.assertNotIn("Sievennä", host_text)
+        # Opening the comparison changes neither the preview hash nor
+        # the approval payload, and stays open across poll refreshes.
+        hash_after = (self.service.teacher_session(sid)
+                      ["feedback_delivery"]["preview_sha256"])
+        self.assertEqual(hash_before, hash_after)
+        b.js("window.__detT0 = Date.now()")
+        b.wait("Date.now() - window.__detT0 > 3000")
+        self.assertTrue(b.js(
+            "document.querySelector('.end-deterministic-comparison')"
+            ".open"))
+        # Release and confirm the shared student renderer also has no
+        # original-wording disclosures and shows the English question.
+        detail = self.service.teacher_session(sid)
+        released = self.service.release_feedback(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"], "reviewer_label": "browser-test"})
+        self.assertTrue(released["released"])
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.body.textContent.includes('Worked review')",
+               timeout=30)
+        self.assertFalse(b.js(
+            "document.body.textContent.includes("
+            "'Original question wording')"))
+        self.assertEqual(b.js(
+            "document.querySelectorAll('details[data-disclosure-key^="
+            "\"worked-review-original:\"], details[data-disclosure-key^="
+            "\"practice-original\"]').length"), 0)
+        student_text = b.js("document.body.textContent")
+        self.assertIn("Simplify: 3x + 2x", student_text)
+        self.assertNotIn("Sievennä", student_text)
         self.assertEqual(b.errors, [])
 
 

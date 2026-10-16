@@ -166,8 +166,9 @@ authentication.
 - accepts ordered `{question_token, selected_index}` responses (opaque
   session/position tokens; no private question IDs);
 - shows application-owned midpoint results and a deterministic check-in
-  at 20 answers; in hosted mode a separate teacher-only comparison draft
-  may be generated asynchronously — it is never student-facing;
+  at 20 answers; in hosted mode an Aitta-phrased check-in may replace
+  the deterministic wording automatically when the asynchronous draft
+  is ready (shape-checked only, never teacher-approved);
 - shows only observed totals at the end until the teacher approves;
 - displays the approved end package — review-focus narrative, worked review
   cards revisiting the student's own earliest incorrect assessment answers
@@ -209,6 +210,11 @@ changes on release. Stale-hash submissions return 409; tested queue, worker,
 and restart paths settle to terminal fallback/unavailable states rather than
 remaining pending, and never fabricate questions. Saved educator-review
 ledger records are unscored and do not constitute release approval.
+The end preview card also carries a collapsed "Deterministic end
+feedback - comparison" disclosure (teacher-only) that renders the
+stored deterministic baseline through the same variant layout — a
+reference for comparing the Aitta or edited wording, never part of
+the preview being approved and never student-facing.
 
 The dashboard polls approximately every two seconds. Unchanged payloads skip
 redraws; expanded sections and unsaved review edits are preserved across real
@@ -271,8 +277,10 @@ recorded at creation and never reinterpreted afterwards:
   untouched and never trigger a retry implicitly — a fresh hosted call
   happens only when the user explicitly starts one.
 
-  Midpoint has a separate teacher-only draft: after answer 20 a hosted
-  session queues at most one extra provider call (shared call budget and
+  Midpoint has a hosted Aitta rewording path: after answer 20 a hosted
+  session queues one midpoint generation job — up to three provider
+  attempts for transient failures under the bounded retry policy below
+  (shared call budget and
   capture cache, `aitta_midpoint` namespace) under wire schema
   `phase3_midpoint_feedback_generation_v1`. The request carries only
   first-half aggregate counts per broad topic — no questions, options,
@@ -281,13 +289,38 @@ recorded at creation and never reinterpreted afterwards:
   four section keys) is shape-checked with the same rejection codes,
   then overlaid onto the deterministic check-in's headings, totals, and
   topic table via `compose_midpoint_draft`; the result is stored as the
-  checkpoint's `provider_draft` for teacher comparison only
-  (`phase3_teacher_midpoint_llm_draft_v1`). It is shape-checked, not
-  fact-verified, is never shown to the student, and is never released
-  automatically; failures leave the deterministic check-in untouched and
-  retain any rejected draft in the teacher-only `phrasing_job` record.
-  Rules sessions and sessions without a midpoint adapter record
-  `not_requested` and make no call.
+  checkpoint's `provider_draft` (`phase3_student_midpoint_llm_v1`) and
+  becomes the student-facing check-in automatically when the job is
+  ready — no teacher approval or release gate applies at the midpoint.
+  Pending, failed, and rules sessions keep the saved deterministic
+  wording (`student_message` remains the immutable baseline; the
+  educator view offers it in a collapsed comparison disclosure), and a
+  rejected reply is retained in the teacher-only `phrasing_job` record
+  and never reaches the student. The draft is shape-checked, not
+  fact-verified; a late-ready draft simply appears in the next student
+  snapshot without changing end feedback or release gating. Sessions
+  without a midpoint adapter record `not_requested` and make no call.
+
+  The hosted demo's shared capture cache performs bounded automatic
+  retries for the narrative namespaces (`aitta_full`, `aitta_midpoint`):
+  after a newly made call fails with a transient transport error — a
+  timeout, a network error, HTTP 429, or HTTP 5xx while opening or
+  reading the response — it waits about 2 seconds before a second
+  attempt and about 4 seconds before a third (plus small jitter, and
+  honouring a valid `Retry-After` response header; a requested delay
+  over 60 seconds stops the chain). Credential errors, contract or
+  content rejections, TLS certificate failures, and other non-transient
+  failures are never retried automatically. At most three new attempts
+  are made per invocation, every attempt is counted against the shared
+  call budget and preserved as its own immutable capture file, and the
+  saved teacher-only execution record notes `automatic_retry`
+  (attempts and stop reason). After the chain the session falls back to
+  the deterministic message exactly as a single failure would.
+  Retrying after a timeout can duplicate provider-side work; captures
+  that already failed still require the existing explicit retry to run
+  again, and replay tooling that does not opt in keeps the old
+  single-attempt behaviour. Closing the service interrupts the wait
+  between attempts but cannot cancel a network call already in flight.
 
 Historical sessions without a recorded variant display as
 "Historical / unspecified" and keep their saved preview behaviour.

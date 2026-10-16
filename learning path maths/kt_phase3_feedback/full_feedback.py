@@ -914,6 +914,8 @@ class FullFeedbackAittaGenerator:
         metadata = copy.deepcopy(self._last_metadata)
         transport = copy.deepcopy(self._observer.state)
         metadata["transport"] = transport
+        if self._observer.retry_after is not None:
+            metadata["retry_after_seconds"] = self._observer.retry_after
         if metadata.get("status") == "failed":
             metadata["failure_stage"] = (
                 "response_contract_or_full_feedback_validation"

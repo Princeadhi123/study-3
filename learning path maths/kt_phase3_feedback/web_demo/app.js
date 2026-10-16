@@ -994,9 +994,6 @@ function renderStructuredFeedback(container, payload) {
       const displayPrompt = changed("prompt")
         ? normalizeDisplayText(example.prompt)
         : englishQuestionText({text: example.prompt});
-      const rawPrompt = normalizeDisplayText(example.prompt);
-      const rawOptions =
-        (example.options || []).map(normalizeDisplayText);
       const displayOptions = (example.options || []).map(
         changed("options") ? normalizeDisplayText : englishOptionText);
       const selectedText = changed("selected_answer")
@@ -1086,20 +1083,6 @@ function renderStructuredFeedback(container, payload) {
         solutionHost = solution;
       } else {
         solutionContent(box);
-      }
-      if (displayPrompt !== rawPrompt
-          || displayOptions.join("\n") !== rawOptions.join("\n")) {
-        const original = el("details", null, "raw");
-        original.dataset.disclosureKey =
-          `worked-review-original:${example.question_id}`;
-        original.appendChild(el("summary", "Original question wording"));
-        original.appendChild(el("p", rawPrompt, "sec"));
-        const rawList = el("ul", null, "practice-options");
-        rawOptions.forEach((option) => {
-          rawList.appendChild(el("li", option));
-        });
-        original.appendChild(rawList);
-        box.appendChild(original);
       }
     } else {
       if (example.prompt) box.appendChild(el("p", example.prompt, "sec"));
@@ -1209,8 +1192,6 @@ function renderPracticeCard(container, practice, index, showNotice,
     const displayOptions = (question.options || []).map(
       questionChanged("options") ? normalizeDisplayText
                                  : englishOptionText);
-    const rawPrompt = normalizeDisplayText(question.text);
-    const rawOptions = (question.options || []).map(normalizeDisplayText);
     box.appendChild(el("p",
       practice.teacher_edited
         ? `${nameFor(question.skill_name, questionChanged("skill_name"))} · ` +
@@ -1225,20 +1206,6 @@ function renderPracticeCard(container, practice, index, showNotice,
     box.appendChild(list);
     if (practice.instruction) {
       box.appendChild(el("p", practice.instruction, "sec"));
-    }
-    if (displayPrompt !== rawPrompt
-        || displayOptions.join("\n") !== rawOptions.join("\n")) {
-      const original = el("details", null, "raw");
-      original.dataset.disclosureKey = index === 0
-        ? "practice-original" : `practice-original:${index}`;
-      original.appendChild(el("summary", "Original question wording"));
-      original.appendChild(el("p", rawPrompt, "sec"));
-      const rawList = el("ul", null, "practice-options");
-      rawOptions.forEach((option) => {
-        rawList.appendChild(el("li", option));
-      });
-      original.appendChild(rawList);
-      box.appendChild(original);
     }
   }
   const originalCard = teacherOriginalDetails(
@@ -1421,9 +1388,15 @@ function studentPage() {
       return;
     }
     if (answered === 20 && mid && !acked) {
+      const entering = $("#pause-panel").hidden;
       renderMessage($("#pause-message"), mid);
       showPanel(PANELS, "#pause-panel");
-      $("#pause-heading").focus({preventScroll: true});
+      // Focus the heading only when entering the pause; the poll must
+      // not steal focus back from the Continue button every cycle.
+      if (entering) $("#pause-heading").focus({preventScroll: true});
+      // Keep polling while paused so a ready Aitta midpoint wording
+      // replaces the deterministic fallback without a reload.
+      schedule(POLL_MS);
       return;
     }
     const question = snapshot.current_question;
@@ -2462,19 +2435,38 @@ function createDetailView(root, options = {}) {
     const shown = el("div", null, "feedback-preview");
     renderStructuredFeedback(shown, preview);
     card.appendChild(shown);
+    if (delivery.deterministic_preview) {
+      const compare = el("details", null,
+        "raw end-deterministic-comparison");
+      compare.dataset.disclosureKey = "end-deterministic-comparison";
+      compare.appendChild(el("summary",
+        "Deterministic end feedback - comparison"));
+      const inner = el("div");
+      inner.appendChild(el("p",
+        "Deterministic feedback is a reference, not a hallucination " +
+        "detector. Compare claims against the recorded evidence. " +
+        "This comparison is not the preview being approved.", "meta"));
+      renderStructuredFeedback(inner, delivery.deterministic_preview);
+      compare.appendChild(inner);
+      card.appendChild(compare);
+    }
     if (preview.practice && preview.practice.status === "disabled"
         && delivery.practice_hint) {
       card.appendChild(el("p", delivery.practice_hint, "meta"));
     }
-    card.appendChild(el("p",
-      `Preview hash: ${delivery.preview_sha256.slice(0, 16)}…`,
-      "mono small"));
     const draft = releaseDraftFor(selected);
     const edit = editDraftFor(selected, delivery);
     if (delivery.preview_source === "teacher_edited") {
       card.appendChild(kv("Preview source",
         `Teacher-edited draft (saved ${delivery.edited_at || "—"}, ` +
         `${delivery.edit_reviewer_label || "anonymous"})`));
+    } else {
+      const sourceLabel = {
+        injected_generator_full_sections: "Aitta",
+        injected_generator_opening_only: "Aitta",
+        deterministic: "Deterministic fallback"};
+      card.appendChild(kv("Wording source",
+        sourceLabel[delivery.preview_source] || "Recorded wording"));
     }
     const editStatus = el("p", edit.note || null, "meta");
     const sectionInputs = {};
@@ -2918,16 +2910,23 @@ function createDetailView(root, options = {}) {
     const card = el("div", null, "card-inner midpoint-feedback-card");
     card.appendChild(el("h3", "Student midpoint check-in"));
     const midpoint = detail.checkpoints.midpoint || {};
-    const message = midpoint.student_message
+    const job = midpoint.phrasing_job || null;
+    const aittaActive = Boolean(
+      job && job.status === "ready" && midpoint.provider_draft);
+    const baseline = midpoint.student_message
       || (midpoint.baseline_student && midpoint.baseline_student.message);
+    const message = aittaActive ? midpoint.provider_draft : baseline;
     if (!message) {
       card.appendChild(el("p",
         "No saved midpoint message is available in this result."));
     } else {
       card.appendChild(el("p",
-        "Saved student-facing wording from the 20-question checkpoint, " +
-        "displayed with English topic labels. This record does not " +
-        "confirm that the student opened or read it.", "meta"));
+        "Current student-facing wording from the 20-question " +
+        "checkpoint, displayed with English topic labels. Aitta " +
+        "wording is used automatically when the hosted draft is ready; " +
+        "otherwise the deterministic check-in is shown. This record " +
+        "does not confirm that the student opened or read it.",
+        "meta"));
       const box = el("div", null, "midpoint-feedback-message");
       const sections = message.sections || [];
       if (sections.length) {
@@ -2943,33 +2942,49 @@ function createDetailView(root, options = {}) {
         box.appendChild(el("p", englishMidpointText(message.text || "")));
       }
       card.appendChild(box);
-      if (midpoint.student_message_version) {
-        card.appendChild(kv("Message version",
-          midpoint.student_message_version));
+      card.appendChild(kv("Wording source",
+        aittaActive ? "Aitta" : "Deterministic fallback"));
+      const version = aittaActive
+        ? midpoint.provider_draft_version
+        : midpoint.student_message_version;
+      if (version) card.appendChild(kv("Message version", version));
+      if (aittaActive && baseline) {
+        const compare = el("details", null,
+          "raw midpoint-deterministic-comparison");
+        compare.dataset.disclosureKey =
+          "midpoint-deterministic-comparison";
+        compare.appendChild(el("summary",
+          "Deterministic midpoint - comparison"));
+        const inner = el("div");
+        renderMidpointDraftMessage(inner, baseline, null);
+        compare.appendChild(inner);
+        card.appendChild(compare);
       }
     }
-    renderMidpointProviderDraft(card, midpoint);
+    renderMidpointProviderDraft(card, midpoint, aittaActive);
     pane.appendChild(card);
   }
 
-  /* Teacher-only Aitta midpoint comparison draft. Never shown to the
-     student and never released automatically; the deterministic
-     check-in above remains the student-facing wording regardless. */
-  function renderMidpointProviderDraft(card, midpoint) {
+  /* Midpoint generation details: Aitta wording is shown to the student
+     automatically when ready; the deterministic check-in is the
+     fallback. Rejected wording and execution records stay
+     teacher-facing only. */
+  function renderMidpointProviderDraft(card, midpoint, aittaActive) {
     const job = midpoint.phrasing_job || null;
     const draft = midpoint.provider_draft || null;
     if (!job && !draft) return;
     const box = el("details", null, "raw midpoint-provider-draft");
     box.dataset.disclosureKey = "midpoint-provider-draft";
-    box.appendChild(el("summary",
-      "Aitta midpoint draft - teacher comparison only"));
+    box.appendChild(el("summary", "Midpoint generation details"));
     const inner = el("div");
     inner.appendChild(el("p",
-      "Unvalidated educator-comparison draft. It is not shown to the " +
-      "student, is not released automatically, and is shape-checked " +
-      "only - not fact-verified.", "warn"));
+      "Aitta wording is shown automatically when ready; shape-checked " +
+      "only, not fact-verified. Rejected wording and execution " +
+      "details are not student-facing.", "warn"));
     renderMidpointDraftJob(inner, midpoint, job);
-    renderMidpointDraftMessage(inner, draft);
+    if (!aittaActive) {
+      renderMidpointDraftMessage(inner, draft, job);
+    }
     const rejected = (job && job.execution
       && job.execution.rejected_draft) || null;
     if (rejected) {
@@ -3008,27 +3023,53 @@ function createDetailView(root, options = {}) {
       inner.appendChild(kv("Generation source",
         exec.reused ? "reused capture" : "new provider call"));
     }
+    if (exec.automatic_retry
+        && exec.automatic_retry.attempts !== undefined) {
+      inner.appendChild(kv("Attempts in this run",
+        exec.automatic_retry.attempts + " of "
+        + exec.automatic_retry.max_attempts));
+    }
   }
 
-  function renderMidpointDraftMessage(inner, draft) {
+  function renderMidpointDraftMessage(inner, draft, job) {
     if (draft && Array.isArray(draft.sections) && draft.sections.length) {
       const text = el("div", null, "midpoint-feedback-message");
       draft.sections.forEach((section) => {
         if (section.title) text.appendChild(el("h4", section.title));
-        text.appendChild(el("p", section.text || ""));
+        text.appendChild(el("p", englishMidpointText(
+          section.text || "")));
         if (section.kind === "encouragement") {
           renderMidpointSummary(text, draft);
         }
       });
       inner.appendChild(text);
-    } else if (draft) {
-      renderMidpointSummary(inner, draft);
-      inner.appendChild(el("p", draft.text || ""));
-    } else {
-      inner.appendChild(el("p",
-        "No Aitta draft was produced; the deterministic student " +
-        "check-in above remains unchanged.", "meta"));
+      return;
     }
+    if (draft) {
+      renderMidpointSummary(inner, draft);
+      inner.appendChild(el("p", englishMidpointText(
+        draft.text || "")));
+      return;
+    }
+    if (job && job.status === "pending") {
+      inner.appendChild(el("p",
+        "Aitta midpoint drafting is queued or in progress. The " +
+        "deterministic student check-in above remains unchanged.",
+        "meta"));
+      return;
+    }
+    const transport = (job && job.execution && job.execution.metadata
+      && job.execution.metadata.transport) || null;
+    if (transport && transport.failure_kind === "timeout") {
+      inner.appendChild(el("p",
+        "The Aitta request timed out before a draft was received. " +
+        "The deterministic student check-in above remains unchanged.",
+        "meta"));
+      return;
+    }
+    inner.appendChild(el("p",
+      "No Aitta draft was produced; the deterministic student " +
+      "check-in above remains unchanged.", "meta"));
   }
 
   function renderFeedbackContent() {

@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -120,13 +121,42 @@ def generation_request(payload, model):
                                                ("candidate_id", "strategy", "review_status")}}}
 
 
+AUTOMATIC_RETRY_PROVIDERS = frozenset({"aitta_full", "aitta_midpoint"})
+AUTOMATIC_RETRY_MAX = 3
+_RETRYABLE_STAGES = frozenset({"open_failed", "body_read_failed"})
+_RETRYABLE_KINDS = frozenset({"timeout", "network_error"})
+_RETRYABLE_HTTP = frozenset({429} | set(range(500, 600)))
+_RETRY_AFTER_LIMIT_SECONDS = 60.0
+
+
+def _automatic_retryable(execution):
+    """Transient transport failure kinds only; never contract,
+    credential, TLS, or content rejections."""
+    transport = ((execution.get("metadata") or {})
+                 .get("transport") or {})
+    if transport.get("stage") not in _RETRYABLE_STAGES:
+        return False
+    kind = transport.get("failure_kind")
+    if kind in _RETRYABLE_KINDS:
+        return True
+    return (kind == "http_error"
+            and transport.get("http_status") in _RETRYABLE_HTTP)
+
+
 class CaptureCache:
-    def __init__(self, root, budget):
+    def __init__(self, root, budget, automatic_retries=False):
         self.root, self.budget, self.new_calls = root, budget, 0
+        self._automatic_retries = bool(automatic_retries)
+        self._stop_retries = threading.Event()
         self._lock = threading.RLock()
         self._key_locks = {}
         self._retry_failed = contextvars.ContextVar(
             f"retry_failed_{id(self)}", default=False)
+
+    def stop_retries(self):
+        """Cancel automatic retry chains; an in-flight network call
+        cannot be cancelled, only the wait before the next attempt."""
+        self._stop_retries.set()
 
     def _key_lock(self, base):
         with self._lock:
@@ -176,49 +206,61 @@ class CaptureCache:
             raise ValueError("cache request does not match its capture")
         return latest, record, number
 
-    def obtain(self, provider, request, callback, adapter):
-        base = self.path(provider, request)
-        with self._key_lock(base):
-            with self._lock:
-                path, record, number = self._latest_record(provider, request)
-                previous = path.name
-                reused = record is not None and (
-                    record["ok"] or not self._retry_failed.get())
-                if not reused:
-                    retry = record is not None
-                    if retry:
-                        path = self._attempt_path(base, number + 1)
-                    if self.budget is not None and self.new_calls >= self.budget:
-                        raise SystemExit("new-call budget exhausted; captures retained for resume")
-                    self.new_calls += 1
-                    call_number = self.new_calls
+    def _retry_delay(self, attempts, execution):
+        """Backoff plus jitter, honoured Retry-After, or None when the
+        server asked for more than the hard 60-second limit."""
+        backoff = ((2.0 if attempts == 1 else 4.0)
+                   + random.uniform(0, 0.5))
+        requested = (execution.get("metadata") or {}).get(
+            "retry_after_seconds")
+        if requested is None:
+            return backoff
+        if requested > _RETRY_AFTER_LIMIT_SECONDS:
+            return None
+        return max(backoff, float(requested))
+
+    def _obtain_once(self, provider, base, request, callback, adapter):
+        """The original single-attempt capture/reuse semantics."""
+        with self._lock:
+            path, record, number = self._latest_record(provider, request)
+            previous = path.name
+            reused = record is not None and (
+                record["ok"] or not self._retry_failed.get())
             if not reused:
-                start = time.perf_counter()
-                try:
-                    reply = callback()
-                    ok = True
-                except Exception:
-                    reply, ok = None, False
-                latency_ms = round((time.perf_counter() - start) * 1000, 3)
-                metadata = adapter.last_metadata
-                record = {"provider": provider, "request": request, "ok": ok,
-                          "reply": reply, "metadata": metadata,
-                          "original_call_latency_ms": latency_ms,
-                          "origin": "hosted_replay"}
-                if not ok:
-                    rejected_draft = getattr(
-                        adapter, "last_rejected_draft", None)
-                    if rejected_draft is not None:
-                        record["rejected_draft"] = rejected_draft
+                retry = record is not None
                 if retry:
-                    record.update({
-                        "attempt_number": number + 1,
-                        "retry_of_failed_capture": True,
-                        "previous_capture_file": previous})
-                with self._lock:
-                    write_new(path, record)
-                    print(f"Captured {provider} call {call_number}: "
-                          f"{'completed' if ok else 'failed'}", flush=True)
+                    path = self._attempt_path(base, number + 1)
+                if self.budget is not None and self.new_calls >= self.budget:
+                    raise SystemExit("new-call budget exhausted; captures retained for resume")
+                self.new_calls += 1
+                call_number = self.new_calls
+        if not reused:
+            start = time.perf_counter()
+            try:
+                reply = callback()
+                ok = True
+            except Exception:
+                reply, ok = None, False
+            latency_ms = round((time.perf_counter() - start) * 1000, 3)
+            metadata = adapter.last_metadata
+            record = {"provider": provider, "request": request, "ok": ok,
+                      "reply": reply, "metadata": metadata,
+                      "original_call_latency_ms": latency_ms,
+                      "origin": "hosted_replay"}
+            if not ok:
+                rejected_draft = getattr(
+                    adapter, "last_rejected_draft", None)
+                if rejected_draft is not None:
+                    record["rejected_draft"] = rejected_draft
+            if retry:
+                record.update({
+                    "attempt_number": number + 1,
+                    "retry_of_failed_capture": True,
+                    "previous_capture_file": previous})
+            with self._lock:
+                write_new(path, record)
+                print(f"Captured {provider} call {call_number}: "
+                      f"{'completed' if ok else 'failed'}", flush=True)
         execution = {"capture_file": path.name, "reused": reused,
                      "origin": record["origin"], "metadata": record["metadata"],
                      "original_call_latency_ms": record["original_call_latency_ms"]}
@@ -232,6 +274,49 @@ class CaptureCache:
                     record["rejected_draft"])
             return None, execution
         return copy.deepcopy(record["reply"]), execution
+
+    def _next_retry_stop(self, execution, attempts):
+        """Decide the next wait, or the reason the chain ends."""
+        if self._stop_retries.is_set():
+            return "shutdown"
+        if not _automatic_retryable(execution):
+            return "non_retryable"
+        if attempts >= AUTOMATIC_RETRY_MAX:
+            return "attempts_exhausted"
+        delay = self._retry_delay(attempts, execution)
+        if delay is None:
+            return "retry_after_too_long"
+        return "shutdown" if self._stop_retries.wait(delay) else None
+
+    def obtain(self, provider, request, callback, adapter):
+        base = self.path(provider, request)
+        with self._key_lock(base):
+            reply, execution = self._obtain_once(
+                provider, base, request, callback, adapter)
+            if not (self._automatic_retries
+                    and provider in AUTOMATIC_RETRY_PROVIDERS
+                    and not execution["reused"]):
+                return reply, execution
+            attempts, stop = 1, "success" if reply is not None else None
+            while stop is None:
+                stop = self._next_retry_stop(execution, attempts)
+                if stop is not None:
+                    break
+                with self.retry_failed_scope(True):
+                    try:
+                        reply, execution = self._obtain_once(
+                            provider, base, request, callback, adapter)
+                    except SystemExit:
+                        stop = "budget_exhausted"
+                        break
+                attempts += 1
+                if reply is not None:
+                    stop = "success"
+            execution["automatic_retry"] = {
+                "attempts": attempts,
+                "max_attempts": AUTOMATIC_RETRY_MAX,
+                "stop_reason": stop}
+            return reply, execution
 
 
 class CachedSelector:

@@ -132,14 +132,10 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(
             "document.querySelectorAll("
             "'.review-example ol.worked-steps li').length >= 2"))
-        disclosure = b.js(
+        self.assertIsNone(b.js(
             "document.querySelector("
-            "'details[data-disclosure-key^=\"worked-review-original:\"]')"
-            " ? document.querySelector("
-            "'details[data-disclosure-key^=\"worked-review-original:\"]')"
-            ".textContent : null")
-        self.assertIsNotNone(disclosure)
-        self.assertIn("Original question wording", disclosure)
+            "'details[data-disclosure-key^=\"worked-review-original:\"]')"))
+        self.assertNotIn("Original question wording", blob)
         self.assertFalse(b.js(
             "Boolean(document.querySelector("
             "'.review-example script, .review-example img'))"))
@@ -275,7 +271,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertEqual(result["scripts"], 0)
         self.assertGreaterEqual(result["details"], 1)
         self.assertTrue(result["rawImg"])
-        self.assertGreaterEqual(result["original"], 1)
+        self.assertEqual(result["original"], 0)
         self.assertEqual(b.errors, [])
 
     def test_concise_summary_table_teacher_and_student(self):

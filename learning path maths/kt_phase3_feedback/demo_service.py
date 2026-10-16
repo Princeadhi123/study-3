@@ -340,7 +340,8 @@ class DemoService:
         native_generator = FullFeedbackAittaGenerator(inner)
         captures = self.root / "provider_captures"
         captures.mkdir(exist_ok=True)
-        self.cache = CaptureCache(captures, call_budget)
+        self.cache = CaptureCache(captures, call_budget,
+                                  automatic_retries=True)
         endpoint_hash = hashlib.sha256(
             inner._endpoint.encode("utf-8")).hexdigest()
         self.midpoint_generator = CachedMidpointGenerator(
@@ -448,6 +449,8 @@ class DemoService:
     def close(self, wait=False):
         with self.lock:
             self._closing = True
+        if self.cache is not None:
+            self.cache.stop_retries()
         self.replays.close(wait=True)
         self.provider_pool.shutdown(wait=wait)
         self.diag_pool.shutdown(wait=wait)
@@ -651,6 +654,11 @@ class DemoService:
         """Return the student-visible draft message for a checkpoint."""
         block = meta["checkpoints"][checkpoint]
         message = block.get("student_message")
+        job = block.get("phrasing_job") or {}
+        if checkpoint == "midpoint" and job.get("status") == "ready":
+            draft = block.get("provider_draft")
+            if draft is not None:
+                message = draft
         if message is not None:
             result = {"sections": copy.deepcopy(message["sections"]),
                       "text": message["text"]}
@@ -825,6 +833,23 @@ class DemoService:
                 return question_first_preview(preview)
             return preview
         return preview
+
+    def _deterministic_preview(self, meta):
+        """Teacher-only reference preview of the stored deterministic
+        baseline, rendered through the same variant-aware layout as the
+        main preview. The saved meta is never mutated and no provider
+        call is made; teacher edits and provider wording stay confined
+        to the main preview."""
+        end = meta["checkpoints"]["end"]
+        baseline = end.get("baseline_student")
+        if baseline is None:
+            return None
+        copy_meta = copy.deepcopy(meta)
+        copy_meta["feedback_edit"] = None
+        copy_meta["checkpoints"]["end"]["student_review"] = (
+            copy_meta["checkpoints"]["end"]["baseline_student"])
+        copy_meta["provider_job"]["status"] = "fallback"
+        return self._final_preview(copy_meta)
 
     @staticmethod
     def _delivery_status(session, meta):
@@ -1120,12 +1145,13 @@ class DemoService:
             self._run_recommendation, session_id, copy.deepcopy(rows))
 
     def _admit_midpoint_phrasing(self, session_id, meta, evidence):
-        """Queue the teacher-only Aitta midpoint comparison draft.
+        """Queue the Aitta midpoint wording job.
 
-        The student check-in message is already saved by the caller; this
-        job only fills the teacher-visible provider_draft record and never
-        touches student-facing fields. The evidence snapshot is frozen at
-        the 20th answer by the caller.
+        The deterministic check-in message is already saved by the
+        caller and remains the immutable baseline/fallback; this job
+        only fills the provider_draft record, which becomes the
+        student-facing midpoint wording when the job succeeds. The
+        evidence snapshot is frozen at the 20th answer by the caller.
         """
         block = meta["checkpoints"]["midpoint"]
         block["provider_draft"] = None
@@ -1182,7 +1208,7 @@ class DemoService:
 
     def _run_midpoint_phrasing(self, session_id, evidence,
                                retry_failed=False):
-        """Worker: one midpoint draft call; stores teacher-only output."""
+        """Worker: one midpoint draft call; stores provider_draft."""
         adapter = self.midpoint_generator
         cache = getattr(adapter, "cache", None) or self.cache
         retry_scope = (cache.retry_failed_scope(retry_failed)
@@ -2320,6 +2346,8 @@ class DemoService:
                 "preview": preview,
                 "preview_sha256": (canonical_digest(preview)
                                    if preview is not None else None),
+                "deterministic_preview":
+                    self._deterministic_preview(meta),
                 "released_feedback": None,
                 "released_at": None,
                 "reviewer_label": None}

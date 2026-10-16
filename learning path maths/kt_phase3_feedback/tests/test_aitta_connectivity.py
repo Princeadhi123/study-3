@@ -420,8 +420,9 @@ class BoundedWorkerTests(unittest.TestCase):
         with mock.patch.object(td.threading, "Thread") as thread_cls, \
              mock.patch.object(td.queue, "Queue") as queue_cls:
             queue_cls.return_value.get.side_effect = KeyboardInterrupt()
+            worker = mock.Mock()
             with self.assertRaises(KeyboardInterrupt):
-                td._run_bounded(mock.Mock(), 1.0)
+                td._run_bounded(worker, 1.0)
             thread_cls.return_value.start.assert_called_once()
             queue_cls.return_value.get.assert_called_once_with(
                 timeout=1.0)
@@ -624,8 +625,9 @@ class CliTests(unittest.TestCase):
         self.assertEqual(err, "")
 
     def test_bool_timeout_rejected(self):
+        generator = make_generator()
         with self.assertRaises(ValueError):
-            td.run_connectivity_check(make_generator(), timeout=True)
+            td.run_connectivity_check(generator, timeout=True)
 
     def test_secret_sentinel_not_leaked(self):
         sentinel = "S3CR3T-sentinel-value"

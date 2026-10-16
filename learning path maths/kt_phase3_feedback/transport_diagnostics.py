@@ -17,8 +17,10 @@ Boundaries:
   timeout unchanged; the observing response delegates ``read`` with the
   same limit and ``close`` unchanged. Exceptions always propagate to
   the existing adapter, so the no-redirects policy, 1 MiB response cap,
-  zero retries, and ``AittaGenerationError('Aitta request failed')``
-  sanitization are all preserved exactly.
+  and ``AittaGenerationError('Aitta request failed')`` sanitization are
+  all preserved exactly. The observer itself still performs no retries;
+  any bounded automatic retry lives in the hosted ``CaptureCache``,
+  keyed on the sanitized triple, not here.
 - The observer resets before every ``generate`` call, including
   payloads rejected by local validation, so telemetry can never report
   a stale stage from an earlier request.
@@ -31,7 +33,10 @@ Boundaries:
 """
 import argparse
 import copy
+import datetime
+import email.utils
 import json
+import math
 import queue
 import socket
 import ssl
@@ -61,12 +66,48 @@ def _classify(exc):
         return "http_error", (code if type(code) is int
                               and 100 <= code <= 599 else None)
     if isinstance(exc, urllib.error.URLError):
-        if isinstance(getattr(exc, "reason", None), TimeoutError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
             return "timeout", None
+        if isinstance(reason, ssl.SSLError):
+            return "transport_error", None
         return "network_error", None
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return "timeout", None
     return "transport_error", None
+
+
+def _retry_after_seconds(exc):
+    """Validated Retry-After delay from an HTTPError, or None.
+
+    Parses only the structured header value (delta seconds or an HTTP
+    date); exception text and other headers are never read.
+    """
+    if not isinstance(exc, urllib.error.HTTPError):
+        return None
+    try:
+        value = exc.headers.get("Retry-After") if exc.headers else None
+    except Exception:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    try:
+        delay = float(value)
+        if math.isfinite(delay) and delay >= 0:
+            return delay
+    except ValueError:
+        pass
+    try:
+        moment = email.utils.parsedate_to_datetime(value)
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return max(0.0, (moment - now).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 class _TransportObserver:
@@ -74,6 +115,7 @@ class _TransportObserver:
 
     def __init__(self):
         self._local = threading.local()
+        self._retry_after_local = threading.local()
         self._fallback_state = {"stage": "not_called", "failure_kind": None,
                                 "http_status": None}
 
@@ -86,9 +128,15 @@ class _TransportObserver:
         self._local.state = value
         self._fallback_state = value
 
+    @property
+    def retry_after(self):
+        """Validated Retry-After delay for this thread, or None."""
+        return self._retry_after_local.__dict__.get("value")
+
     def reset(self):
         self.state = {"stage": "not_called", "failure_kind": None,
                       "http_status": None}
+        self._retry_after_local.value = None
 
     def reached(self, stage):
         current = dict(self.state)
@@ -99,6 +147,7 @@ class _TransportObserver:
         kind, status = _classify(exc)
         self.state = {"stage": stage, "failure_kind": kind,
                       "http_status": status}
+        self._retry_after_local.value = _retry_after_seconds(exc)
 
 
 class _ObservedResponse:
