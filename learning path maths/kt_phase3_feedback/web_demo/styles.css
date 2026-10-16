@@ -159,6 +159,19 @@ details.raw pre { background: #f3f6f7; border: 1px solid var(--line); border-rad
 details.worked-hint { margin: .3rem 0 .3rem .6rem; }
 details.worked-solution { border: 1px solid var(--line); border-radius: 8px; padding: 0 .9rem .6rem; margin-top: .9rem; min-width: 0; }
 details.worked-solution > summary { font-weight: 600; }
+details.feedback-editor-section { border: 1px solid var(--line); border-radius: 8px; padding: .8rem; margin: .85rem 0; }
+details.feedback-editor-section > summary { font-weight: 600; }
+details.feedback-editor-section textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
+details.feedback-editor-subsection { margin-left: .75rem; margin-top: .9rem; border-left: 3px solid var(--verdigris); border-radius: 0 8px 8px 0; background: var(--wash); padding: .6rem .8rem; }
+details.feedback-editor-subsection > summary { font-size: .75rem; }
+.feedback-document .feedback-document-para { white-space: pre-wrap; }
+.feedback-document-heading { font-weight: 600; margin: .9rem 0 .35rem; }
+.edit-document { width: 100%; box-sizing: border-box; min-height: 16rem;
+  border: 1px solid var(--line); border-radius: 8px; padding: .8rem;
+  background: var(--panel, #fff); overflow-wrap: break-word; }
+.edit-document .feedback-document-para,
+.edit-document p { white-space: pre-wrap; }
+.edit-document.edit-disabled { background: var(--wash); opacity: .7; }
 table.grid { border-collapse: collapse; margin: 1rem 0; width: 100%; display: block; overflow-x: auto; }
 table.grid caption { text-align: left; font-size: .8rem; font-weight: 600; margin-bottom: .6rem; }
 table.grid th, table.grid td { border-bottom: 1px solid var(--line); padding: .6rem .65rem; font-size: .78rem; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
@@ -284,6 +297,7 @@ button.danger:hover:not(:disabled) { background: #82311c; }
   .ws-actions { flex-wrap: wrap; }
   .empty-state { padding: 2rem 1rem; }
   .assessment-facts { gap: 1.5rem; }
+  details.feedback-editor-subsection { margin-left: .35rem; padding: .35rem .6rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }

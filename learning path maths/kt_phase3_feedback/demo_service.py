@@ -131,6 +131,66 @@ def _strict_text(value, field, maximum):
     return value
 
 
+_DOCUMENT_BLOCK_FIELDS = {
+    "heading": {"kind", "text"},
+    "paragraph": {"kind", "text"},
+    "unordered_list": {"kind", "items"},
+    "ordered_list": {"kind", "items"}}
+
+
+def _document_blocks_text(blocks):
+    parts = []
+    for block in blocks:
+        if block["kind"] == "unordered_list":
+            parts.append("\n".join(f"- {item}" for item in
+                                   block["items"]))
+        elif block["kind"] == "ordered_list":
+            parts.append("\n".join(f"{i}. {item}" for i, item in
+                                   enumerate(block["items"], 1)))
+        else:
+            parts.append(block["text"])
+    return "\n\n".join(parts)
+
+
+def _validated_document_blocks(value):
+    if not isinstance(value, list) or not value:
+        raise ValueError("document_blocks must be a nonempty list")
+    if len(value) > 500:
+        raise ValueError("document_blocks exceeds 500 blocks")
+    blocks = []
+    for index, block in enumerate(value):
+        field = f"document_blocks[{index}]"
+        kind = block.get("kind") if isinstance(block, dict) else None
+        if not isinstance(kind, str) or kind not in _DOCUMENT_BLOCK_FIELDS:
+            raise ValueError(f"{field}.kind is not a supported block kind")
+        if set(block) != _DOCUMENT_BLOCK_FIELDS[kind]:
+            raise ValueError(f"{field} has unexpected fields")
+        if kind in ("heading", "paragraph"):
+            text = _strict_text(block["text"], f"{field}.text", 32768)
+            if kind == "heading" and not text.strip():
+                raise ValueError(f"{field}.text must be nonempty")
+            blocks.append({"kind": kind, "text": text})
+        else:
+            items = block["items"]
+            if (not isinstance(items, list) or not items
+                    or len(items) > 100):
+                raise ValueError(
+                    f"{field}.items must be 1-100 strings")
+            cleaned = []
+            for item_index, item in enumerate(items):
+                text = _strict_text(
+                    item, f"{field}.items[{item_index}]", 32768)
+                if not text.strip():
+                    raise ValueError(
+                        f"{field}.items[{item_index}] must be nonempty")
+                cleaned.append(text)
+            blocks.append({"kind": kind, "items": cleaned})
+    if len(_document_blocks_text(blocks)) > 32768:
+        raise ValueError("document_blocks exceeds 32768 serialized "
+                         "characters")
+    return blocks
+
+
 class DemoService:
     """Owns demo sessions, async provider/diagnostics jobs, and reviews."""
 
@@ -2546,27 +2606,53 @@ class DemoService:
         if (not isinstance(body, dict)
                 or not set(body) <= {
                     "message_sha256", "sections", "content",
+                    "document_text", "document_blocks",
                     "reviewer_label"}
-                or "message_sha256" not in body
-                or "sections" not in body):
+                or "message_sha256" not in body):
             raise ValueError("feedback edit body has unexpected fields")
+        has_document = "document_text" in body
+        if has_document and ("sections" in body or "content" in body):
+            raise ValueError(
+                "document_text cannot be combined with sections or "
+                "content")
+        if not has_document and "sections" not in body:
+            raise ValueError("feedback edit body has unexpected fields")
+        if "document_blocks" in body and not has_document:
+            raise ValueError(
+                "document_blocks requires document_text")
         digest = body["message_sha256"]
         if (not isinstance(digest, str)
                 or len(digest) != 64 or any(
                     ch not in "0123456789abcdef" for ch in digest)):
             raise ValueError("message_sha256 must be a sha256 hex digest")
-        submitted = body["sections"]
-        if (not isinstance(submitted, dict)
-                or set(submitted) != set(FULL_FEEDBACK_SECTION_KEYS)):
-            raise ValueError(
-                "sections must contain exactly assessment_summary, "
-                "observed_strengths, review_focus, next_steps")
+        document = None
+        blocks = None
         texts = {}
-        for key in FULL_FEEDBACK_SECTION_KEYS:
-            text = _strict_text(submitted[key], f"sections.{key}", 2000)
-            if not text.strip():
-                raise ValueError(f"sections.{key} must be nonempty")
-            texts[key] = text
+        if has_document:
+            document = _strict_text(
+                body["document_text"], "document_text", 32768)
+            if not document.strip():
+                raise ValueError("document_text must be nonempty")
+            if "document_blocks" in body:
+                blocks = _validated_document_blocks(
+                    body["document_blocks"])
+                if _document_blocks_text(blocks) != document:
+                    raise ValueError(
+                        "document_text must equal the canonical "
+                        "serialization of document_blocks")
+        else:
+            submitted = body["sections"]
+            if (not isinstance(submitted, dict)
+                    or set(submitted) != set(FULL_FEEDBACK_SECTION_KEYS)):
+                raise ValueError(
+                    "sections must contain exactly assessment_summary, "
+                    "observed_strengths, review_focus, next_steps")
+            for key in FULL_FEEDBACK_SECTION_KEYS:
+                text = _strict_text(
+                    submitted[key], f"sections.{key}", 2000)
+                if not text.strip():
+                    raise ValueError(f"sections.{key} must be nonempty")
+                texts[key] = text
         content = body.get("content")
         if content is None and "content" in body:
             raise ValueError("content must not be null")
@@ -2595,14 +2681,26 @@ class DemoService:
                         and section.get("title")):
                     titles[section["kind"]] = section["title"]
             edited = copy.deepcopy(preview)
-            edited["sections"] = [
-                {"kind": kind, "title": titles[kind],
-                 "text": texts[kind]}
-                for kind in FULL_FEEDBACK_SECTION_KEYS]
-            edited["text"] = "\n\n".join(
-                s["text"] for s in edited["sections"] if s["text"])
-            if content is not None:
-                self._apply_feedback_content(edited, content)
+            if document is not None:
+                edited["document_text"] = document
+                edited["document_edited"] = True
+                edited["text"] = document
+                if blocks is not None:
+                    edited["document_blocks"] = copy.deepcopy(blocks)
+                else:
+                    edited.pop("document_blocks", None)
+            else:
+                edited.pop("document_text", None)
+                edited.pop("document_edited", None)
+                edited.pop("document_blocks", None)
+                edited["sections"] = [
+                    {"kind": kind, "title": titles[kind],
+                     "text": texts[kind]}
+                    for kind in FULL_FEEDBACK_SECTION_KEYS]
+                edited["text"] = "\n\n".join(
+                    s["text"] for s in edited["sections"] if s["text"])
+                if content is not None:
+                    self._apply_feedback_content(edited, content)
             prior = meta.get("feedback_edit")
             meta["feedback_edit"] = {
                 "preview": copy.deepcopy(edited),

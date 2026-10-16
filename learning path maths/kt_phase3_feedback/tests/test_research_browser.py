@@ -223,11 +223,15 @@ class ResearchBrowserTests(unittest.TestCase):
         overview = "document.querySelector('#scenario-tab-overview')"
         b.wait(f"{overview}.textContent.includes('What changed')")
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
-        b.wait(f"{pane}.textContent.includes('Applied feedback plan')")
-        kt_dd = (f"[...{pane}.querySelectorAll('.feedback-plan dt')]"
-                 ".find((n) => n.textContent === "
-                 "'KT used for review-focus selection')")
-        self.assertEqual(b.js(f"{kt_dd}.nextElementSibling.textContent"), "No")
+        b.wait(f"{pane}.textContent.includes('Review evidence')")
+        ev = (f"{pane}.querySelector('.end-review-evidence')"
+              ".textContent")
+        self.assertTrue(b.js(
+            f"{ev}.includes('Review topics chosen by')"))
+        self.assertTrue(b.js(f"{ev}.includes('Application rules')"))
+        self.assertTrue(b.js(
+            f"{ev}.includes('KT estimates do not select review "
+            "topics')"))
         # A replay with observed errors shows the full planning block.
         b.js("document.querySelector('#scenario-search').value='Every answer incorrect';"
              "document.querySelector('#scenario-search').dispatchEvent(new Event('input'))")
@@ -244,14 +248,17 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#scenario-version').options.length === 2"
                " && document.querySelector('#scenario-version').value !== ''")
         b.wait(f"{overview}.textContent.includes('What changed')")
-        b.wait(f"{pane}.textContent.includes('Multiple incorrect answers')")
-        self.assertTrue(b.js(f"{pane}.textContent.includes('Multiple assessed items')"))
-        self.assertTrue(b.js(f"{pane}.textContent.includes('Percentages \\u2014 0 correct, 10 incorrect of 10')"))
-        self.assertTrue(b.js(f"{pane}.textContent.includes('1 of 5')"))
-        self.assertTrue(b.js(f"{pane}.textContent.includes('Tied candidates')"))
-        self.assertTrue(b.js(f"{pane}.textContent.includes('review_percentage_amount')"))
-        self.assertTrue(b.js(f"{pane}.querySelector('.decision-table')"
-                             ".textContent.includes('Multiple incorrect answers')"))
+        b.wait(f"{ev}.includes('Multiple incorrect answers')")
+        self.assertTrue(b.js(
+            f"{ev}.includes('0 correct, 10 incorrect of 10 assessed')"))
+        self.assertIsNone(b.js(
+            f"{pane}.querySelector('.decision-table')"))
+        self.assertIsNone(b.js(
+            f"{pane}.querySelector('.compare')"))
+        self.assertFalse(b.js(
+            f"{pane}.textContent.includes('Shared feedback draft')"))
+        self.assertFalse(b.js(
+            f"{pane}.textContent.includes('All candidates')"))
         b.viewport(390, 844)
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])
@@ -364,7 +371,10 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
         self.assertEqual(b.js("document.querySelectorAll('#scenario-ws-tabs .tab').length"), 6)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
-        self.assertEqual(b.js("document.querySelectorAll('#scenario-tab-feedback .compare .col').length"), 2)
+        b.wait("Boolean(document.querySelector("
+               "'#scenario-tab-feedback .saved-end-feedback'))")
+        self.assertFalse(b.js("Boolean(document.querySelector("
+            "'#scenario-tab-feedback .release-card'))"))
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=research]').click()")
         research_text = "document.querySelector('#scenario-tab-research').textContent"
         self.assertTrue(b.js(f"{research_text}.includes('predictively evaluated on real ViLLE data')"))
@@ -1030,8 +1040,11 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('.scenario-row').click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
-        b.wait("document.querySelectorAll('#scenario-tab-feedback .compare .col').length === 2")
+        b.wait("Boolean(document.querySelector("
+               "'#scenario-tab-feedback .saved-end-feedback'))")
         self.assertFalse(b.js("Boolean(document.querySelector('#scenario-tab-feedback .release-card'))"))
+        self.assertFalse(b.js("Boolean(document.querySelector("
+            "'#scenario-tab-feedback .compare'))"))
         self.assertEqual(b.errors, [])
 
     def test_shared_feedback_draft_has_no_teacher_card_or_audience_select(self):
@@ -1054,7 +1067,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(
             f"{release}.textContent.includes('Shared feedback — teacher preview and release')"))
         feedback = "document.querySelector('#tab-feedback')"
-        b.wait(f"{feedback}.textContent.includes('Shared feedback draft (baseline vs selected)')")
+        b.wait(f"{feedback}.textContent.includes('Review evidence')")
         self.assertFalse(b.js(f"{feedback}.textContent.includes('teacher end draft')"))
         research_dd = ("document.querySelector('#tab-feedback "
                        "details[data-disclosure-key=feedback-research]')")
@@ -1065,8 +1078,11 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(f"Boolean({edit_dd})"))
         self.assertFalse(b.js(f"{edit_dd}.open"))
         b.js(f"{research_dd}.open = true")
-        self.assertEqual(b.js(
-            "document.querySelectorAll('#tab-feedback .compare .col').length"), 2)
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-feedback .compare')"))
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".end-review-evidence'))"))
         b.js(f"{edit_dd}.open = true")
         time.sleep(2.3)
         self.assertTrue(b.js(f"{research_dd}.open"))
@@ -1496,7 +1512,7 @@ class ResearchBrowserTests(unittest.TestCase):
              "btns.find((n) => n.textContent === 'Save edited draft')"
              ".click()")
         b.wait(f"{release}.textContent.includes('Edited draft saved')")
-        b.wait(f"{strip}.textContent.includes('Teacher-edited draft')")
+        b.wait(f"{strip}.textContent.includes('teacher-edited')")
         self.assertEqual(b.errors, [])
 
     def test_finnish_practice_english_render_edit_poll_and_release(self):
@@ -1582,6 +1598,10 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertFalse(b.js(f"{research_dd}.open"))
             self.assertFalse(b.js(f"{edit_dd}.open"))
             b.js(f"{edit_dd}.open = true")
+            adv_dd = ("document.querySelector('#tab-feedback "
+                      "details[data-disclosure-key="
+                      "\"feedback-editing-advanced\"]')")
+            b.js(f"{adv_dd}.open = true")
             field = "document.querySelector('#tab-feedback textarea.edit-section')"
             b.js(f"{field}.value='Finnish fixture edit.'; "
                  f"{field}.dispatchEvent(new Event('input')); {field}.focus()")
@@ -1727,7 +1747,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(
             "document.querySelector('#tab-feedback .release-card input.score')"))
         self.assertTrue(b.js(
-            f"{release}.textContent.includes('Scores and source assessment records are preserved')"))
+            f"{release}.textContent.includes('Scores, answer keys and practice tasks are application-owned')"))
         self.assertFalse(b.js(
             f"{release}.textContent.includes('are fixed')"))
         self.assertFalse(b.js(f"{approve}.disabled"))
@@ -1772,7 +1792,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("const btns=[...document.querySelectorAll('#tab-feedback .release-card button')]; "
              "btns.find((n) => n.textContent === 'Save edited draft').click()")
         b.wait(f"{release}.textContent.includes('Edited draft saved')")
-        b.wait(f"{release}.textContent.includes('Teacher-edited draft')")
+        b.wait(f"{release}.textContent.includes('teacher-edited')")
         self.assertFalse(b.js(f"{approve}.disabled"))
         edited = b.js(
             "document.querySelector('#tab-feedback .feedback-preview')"
@@ -1862,6 +1882,9 @@ class ResearchBrowserTests(unittest.TestCase):
         edit_dd = ("document.querySelector('#tab-feedback "
                    "details[data-disclosure-key=feedback-editing]')")
         b.js(f"{edit_dd}.open = true")
+        b.js("document.querySelector('#tab-feedback "
+             "details[data-disclosure-key="
+             "\"feedback-editing-advanced\"]').open = true")
         self.assertEqual(b.js(
             "document.querySelectorAll('#tab-feedback "
             "textarea.edit-section').length"), 4)
@@ -1883,12 +1906,12 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertTrue(b.js(f"Boolean({expr})"), expr)
         self.assertEqual(b.js(
             "document.querySelectorAll('#tab-feedback "
-            "[data-disclosure-key=\"feedback-editing\"] > details.raw')"
-            ".length"), 5)
+            "[data-disclosure-key=\"feedback-editing-advanced\"] "
+            "> details.raw').length"), 5)
         self.assertTrue(b.js(
             "![...document.querySelectorAll('#tab-feedback "
-            "[data-disclosure-key=\"feedback-editing\"] > details.raw')]"
-            ".some((d) => d.open)"))
+            "[data-disclosure-key=\"feedback-editing-advanced\"] "
+            "> details.raw')].some((d) => d.open)"))
         self.assertEqual(b.js(
             "document.querySelector('#tab-feedback textarea"
             "[data-content-path=\"review_examples.1.prompt\"]').value"),

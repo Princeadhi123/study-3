@@ -216,6 +216,22 @@ stored deterministic baseline through the same variant layout — a
 reference for comparing the Aitta or edited wording, never part of
 the preview being approved and never student-facing.
 
+End feedback editing defaults to a single document-style editor that covers
+all displayed wording — narrative, worked-card steps and reasoning
+questions, and practice instructions — as formatted blocks (headings,
+paragraphs, bullet and numbered lists), while the score table and totals
+stay fixed outside the editable text. The document is stored and released
+as a safe block model plus its canonical plain-text serialization — never
+as markup — so pasted or typed formatting cannot inject HTML; the saved
+document reaches the student verbatim once approved and the educator is
+responsible for checking the mathematical content before approval. A
+collapsed "Advanced
+field-by-field editor" remains for troubleshooting: merely expanding it only
+inspects the fields; typing into a structured field explicitly switches the
+next save back to the legacy per-field payload (which clears any document
+override), and "Use single editor" returns to the document without losing
+either buffer.
+
 The dashboard polls approximately every two seconds. Unchanged payloads skip
 redraws; expanded sections and unsaved review edits are preserved across real
 updates.

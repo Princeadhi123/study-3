@@ -847,6 +847,8 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "document.querySelector('.end-deterministic-comparison')"
             ".textContent")
         self.assertIn(det_marker, comparison)
+        self.assertIn("Deterministic template version", comparison)
+        self.assertIn(det["template_version"], comparison)
         self.assertIn("not the preview being approved", comparison)
         self.assertNotIn(AUTHORED[0][0][0], comparison)
         # The removed "Original question wording" disclosures are gone
@@ -866,16 +868,153 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         for host_text in (preview_text, comparison):
             self.assertIn("Simplify: 3x + 2x", host_text)
             self.assertNotIn("Sievennä", host_text)
-        # Opening the comparison changes neither the preview hash nor
-        # the approval payload, and stays open across poll refreshes.
+        # Opening the comparison alone changed neither the preview hash
+        # nor the approval payload.
         hash_after = (self.service.teacher_session(sid)
                       ["feedback_delivery"]["preview_sha256"])
         self.assertEqual(hash_before, hash_after)
+        # One canonical wording-source row: the fixture generator is not
+        # capture-wrapped, so confirm Aitta via offline execution
+        # metadata on the stored provider job.
+        with self.service.lock:
+            meta2 = self.service._load_meta(sid)
+            execs = meta2["provider_job"].setdefault("executions", {})
+            execs.setdefault("student", {})["generator"] = {
+                "capture_file": "aitta_full_test_attempt_1.json",
+                "reused": False,
+                "original_call_latency_ms": 17731.54,
+                "automatic_retry": {"attempts": 2, "max_attempts": 3,
+                                    "stop_reason": "success"},
+                "metadata": {"status": "completed"}}
+            self.service._save_meta(meta2)
+        release_card = ("document.querySelector('#tab-feedback "
+                        ".release-card')")
+        b.wait(f"{release_card}.textContent.includes('Aitta-generated')")
+        card_text = b.js(f"{release_card}.textContent")
+        self.assertFalse(b.js(
+            f"{release_card}.querySelector('.end-wording-source')"
+            " === null"))
+        self.assertIn("Worked explanations", card_text)
+        # header strip only — generation details sit inside the card
+        strip_text = b.js(
+            "document.querySelector('#tab-feedback .release-card "
+            ".release-status').textContent")
+        self.assertNotIn("Selection provenance", strip_text)
+        self.assertNotIn("Aitta provenance", strip_text)
+        # Pure helper coverage: deterministic, unconfirmed provider,
+        # teacher-edited variants and partial section authoring.
+        cases = b.js(
+            "(() => ({"
+            "det: endFeedbackSource("
+            "{trace:{phrasing_source:'deterministic'}},"
+            "{preview_source:'deterministic'},{}),"
+            "edited: endFeedbackSource("
+            "{trace:{phrasing_source:'injected_generator_full_sections'}},"
+            "{preview_source:'teacher_edited'},"
+            "{capture_file:'aitta_full_x.json',"
+            "metadata:{status:'completed'}}),"
+            "unknown: endFeedbackSource({},"
+            "{preview_source:'teacher_edited'},{}),"
+            "unconf: endFeedbackSource("
+            "{trace:{phrasing_source:'injected_generator_full_sections'}},"
+            "{},{}),"
+            "partial: endFeedbackSource("
+            "{trace:{phrasing_source:'injected_generator_full_sections',"
+            "section_sources:{assessment_summary:'provider',"
+            "next_steps:'rules'}}},{},{}),"
+            "openingOnly: endFeedbackSource("
+            "{trace:{phrasing_source:'injected_generator_opening_only'}},"
+            "{},{}),"
+            "editedPartial: endFeedbackSource("
+            "{trace:{phrasing_source:'injected_generator_opening_only'}},"
+            "{preview_source:'teacher_edited'},"
+            "{capture_file:'aitta_full_x.json',"
+            "metadata:{status:'completed'}})}))()")
+        self.assertEqual(cases["det"]["label"], "Deterministic")
+        self.assertEqual(cases["edited"]["label"],
+                         "Aitta-generated, then teacher-edited")
+        self.assertEqual(cases["unknown"]["label"],
+                         "Teacher-edited (original source unavailable)")
+        self.assertEqual(cases["unconf"]["label"], "AI-generated")
+        self.assertTrue(cases["partial"]["partial"])
+        self.assertTrue(cases["openingOnly"]["partial"])
+        self.assertEqual(cases["editedPartial"]["label"],
+                         "Aitta-generated, then teacher-edited")
+        self.assertTrue(cases["editedPartial"]["partial"])
+        self.assertFalse(cases["det"]["partial"])
+        # A saved teacher edit flips the canonical label via polling;
+        # hashes and release semantics are unchanged.
+        detail = self.service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        sections = {s["kind"]: s["text"] for s in preview["sections"]}
+        sections["assessment_summary"] = "Teacher-reviewed wording."
+        saved = self.service.save_feedback_edit(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"],
+            "sections": sections})
+        self.assertTrue(saved["saved"])
+        b.wait(f"{release_card}.textContent.includes("
+               "'Aitta-generated, then teacher-edited')")
+        card_text = b.js(f"{release_card}.textContent")
+        self.assertIn("Last edited", card_text)
+        self.assertEqual(b.js(
+            f"{release_card}.textContent.split('teacher-edited')"
+            ".length - 1"), 1)
+        # Research keeps review evidence and generation metadata but
+        # drops the old comparison columns and raw dumps.
+        research = ("document.querySelector('#tab-feedback "
+                    "details[data-disclosure-key=feedback-research]')")
+        research_text = b.js(f"{research}.textContent")
+        self.assertIn("Review evidence", research_text)
+        self.assertIn("Review topics chosen by", research_text)
+        self.assertIn("Application rules", research_text)
+        self.assertIn("Topic selection is separate from feedback "
+                      "wording", research_text)
+        self.assertIn("Generation details", research_text)
+        self.assertIn("Aitta provenance", research_text)
+        self.assertIn("17731.54 ms", research_text)
+        self.assertIn("2 of 3", research_text)
+        self.assertNotIn("Shared feedback draft", research_text)
+        self.assertNotIn("All candidates", research_text)
+        self.assertNotIn("Provider executions", research_text)
+        self.assertIsNone(b.js(
+            f"{research}.querySelector('.compare')"))
+        self.assertIsNone(b.js(
+            f"{research}.querySelector('.decision-table')"))
+        # Generation details live inside the release card directly
+        # after the deterministic comparison and before the editing
+        # and approval controls — one instance, collapsed by default.
+        compare = ("document.querySelector('#tab-feedback "
+                   ".end-deterministic-comparison')")
+        self.assertTrue(b.js(
+            f"{research}.closest('.release-card') === {release_card}"))
+        self.assertTrue(b.js(
+            f"{compare}.nextElementSibling === {research}"))
+        self.assertTrue(b.js(
+            f"{research}.compareDocumentPosition("
+            "document.querySelector('#tab-feedback "
+            "details[data-disclosure-key=feedback-editing]'))"
+            " & Node.DOCUMENT_POSITION_FOLLOWING"))
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            "details[data-disclosure-key=feedback-research]')"
+            ".length"), 1)
+        self.assertFalse(b.js(f"{research}.open"))
+        # Both disclosures stay open across a real poll redraw —
+        # bump a harmless meta field so the poll payload differs.
+        b.js(f"{research}.open = true")
+        with self.service.lock:
+            meta3 = self.service._load_meta(sid)
+            meta3["label"] = meta3.get("label", "") + " (redraw)"
+            self.service._save_meta(meta3)
         b.js("window.__detT0 = Date.now()")
         b.wait("Date.now() - window.__detT0 > 3000")
         self.assertTrue(b.js(
             "document.querySelector('.end-deterministic-comparison')"
             ".open"))
+        self.assertTrue(b.js(f"{research}.open"))
+        self.assertTrue(b.js(
+            f"{compare}.nextElementSibling === {research}"))
         # Release and confirm the shared student renderer also has no
         # original-wording disclosures and shows the English question.
         detail = self.service.teacher_session(sid)
@@ -899,6 +1038,384 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         student_text = b.js("document.body.textContent")
         self.assertIn("Simplify: 3x + 2x", student_text)
         self.assertNotIn("Sievennä", student_text)
+        self.assertEqual(b.errors, [])
+
+    def test_single_document_editor_roundtrip(self):
+        created = self.service.create_session(
+            feedback_variant="worked_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] == "ready"),
+            "provider job did not reach ready")
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback .feedback-preview')")
+        # Default editor: one document textarea; advanced editor stays
+        # collapsed.
+        b.js("document.querySelector("
+             "'#tab-feedback details[data-disclosure-key"
+             "=\"feedback-editing\"]').open = true")
+        doc = ("document.querySelector('#tab-feedback "
+               ".edit-document')")
+        b.wait(f"Boolean({doc})")
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback "
+            ".edit-document').length"), 1)
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback "
+            "details[data-disclosure-key=feedback-editing-advanced]')"
+            ".open"))
+        # The document is one contenteditable body rendered as real
+        # blocks: headings, paragraphs, lists — the displayed English
+        # wording with no scores or research internals inside.
+        self.assertTrue(b.js(f"{doc}.isContentEditable"))
+        self.assertTrue(b.js(f"Boolean({doc}.querySelector('h3'))"))
+        self.assertTrue(b.js(f"Boolean({doc}.querySelector('p'))"))
+        self.assertTrue(
+            b.js(f"Boolean({doc}.querySelector('ul,ol'))"))
+        self.assertFalse(b.js(f"Boolean({doc}.querySelector("
+            "'.assessment-results,.score'))"))
+        doc_text = b.js(f"{doc}.textContent")
+        for needle in ("10% means one tenth of the whole amount.",
+                       "Explain your reasoning:",
+                       "Simplify: 3x + 2x"):
+            self.assertIn(needle, doc_text)
+        for absent in ("preview_sha256", "capture_file",
+                       "correct out of"):
+            self.assertNotIn(absent, doc_text)
+        # Template identity is shown separately from authorship and
+        # presentation; the worked-first preview carries its template
+        # version into research generation details.
+        card_text = b.js(
+            "document.querySelector('#tab-feedback .release-card')"
+            ".textContent")
+        self.assertIn("Base feedback template", card_text)
+        self.assertIn("Worked-first", card_text)
+        self.assertIn("Structured feedback cards", card_text)
+        gen_text = b.js(
+            "document.querySelector('#tab-feedback "
+            ".end-generation-details').textContent")
+        self.assertIn("Template version", gen_text)
+        self.assertIn(
+            "phase3_student_feedback_worked_first_full_v1", gen_text)
+        # Pure helper: stored template version wins over the recorded
+        # variant; unknown versions and missing data are truthful.
+        cases = json.loads(b.js(
+            "JSON.stringify(["
+            "feedbackTemplateLabel({template_version:"
+            "'phase3_student_feedback_template_v9'},'worked_first'),"
+            "feedbackTemplateLabel({template_version:'tpl_unknown_0'},"
+            "'worked_first'),"
+            "feedbackTemplateLabel({},'worked_first'),"
+            "feedbackTemplateLabel(null,'question_first'),"
+            "feedbackTemplateLabel({},null)])"))
+        self.assertEqual(cases, [
+            "Question-first",
+            "Recorded template (unrecognized version)",
+            "Worked-first",
+            "Question-first",
+            "Historical / unspecified"])
+        # DOM -> blocks keeps BR line breaks, nested block boundaries
+        # and inline text, while dropping ignored/control nodes.
+        fixture = b.js(
+            "(()=>{const host=document.createElement('div');"
+            "const p=document.createElement('p');"
+            "p.appendChild(document.createTextNode('Line one'));"
+            "p.appendChild(document.createElement('br'));"
+            "p.appendChild(document.createTextNode('line two'));"
+            "host.appendChild(p);"
+            "const wrap=document.createElement('section');"
+            "const inner=document.createElement('div');"
+            "inner.textContent='Inner block';"
+            "const btn=document.createElement('button');"
+            "btn.textContent='ignore me';"
+            "inner.appendChild(btn);"
+            "wrap.appendChild(inner);"
+            "const span=document.createElement('span');"
+            "span.textContent='span tail';"
+            "wrap.appendChild(span);"
+            "host.appendChild(wrap);"
+            "return JSON.stringify(documentBlocksFromDom(host))})()")
+        parsed = json.loads(fixture)
+        self.assertEqual(parsed[0],
+                         {"kind": "paragraph",
+                          "text": "Line one\nline two"})
+        self.assertEqual(parsed[1],
+                         {"kind": "paragraph", "text": "Inner block"})
+        self.assertEqual(parsed[2],
+                         {"kind": "paragraph", "text": "span tail"})
+        # Plain stored text also parses singleton and blank-separated
+        # bullets into real list blocks.
+        parsed_text = json.loads(b.js(
+            "JSON.stringify(parseDocumentTextBlocks({sections: []}, "
+            f"{json.dumps('Intro.\n\n- one\n\n- two\n\n1. a\n\n2. b')}))"))
+        self.assertEqual(parsed_text[1],
+                         {"kind": "unordered_list",
+                          "items": ["one", "two"]})
+        self.assertEqual(parsed_text[2],
+                         {"kind": "ordered_list",
+                          "items": ["a", "b"]})
+        # Edit a paragraph in place; the edit marks the draft unsaved.
+        b.js(f"const para=[...{doc}.querySelectorAll('p,li,h3')]"
+             ".find((n) => n.textContent.includes("
+             "'10% means one tenth')); "
+             "para.textContent='A teacher-edited tenth is "
+             "one tenth of the whole amount.'; "
+             f"{doc}.dispatchEvent(new Event('input'))")
+        approve = ("document.querySelector('#tab-feedback "
+                   ".release-card button.primary')")
+        self.assertTrue(b.js(f"{approve}.disabled"))
+        # Realistic typing at the caret plus Enter splits the block.
+        b.js(f"{doc}.focus(); "
+             f"const t=[...{doc}.childNodes]; "
+             "const r=document.createRange(); "
+             f"r.selectNodeContents({doc}.querySelector('p')); "
+             "r.collapse(false); const s=window.getSelection(); "
+             "s.removeAllRanges(); s.addRange(r)")
+        b.command("Input.insertText", {"text": " Typed inline."})
+        for ev_type in ("rawKeyDown", "char", "keyUp"):
+            params = {"type": ev_type, "key": "Enter",
+                      "code": "Enter", "windowsVirtualKeyCode": 13,
+                      "nativeVirtualKeyCode": 13}
+            if ev_type == "char":
+                params["text"] = "\r"
+                params["unmodifiedText"] = "\r"
+            b.command("Input.dispatchKeyEvent", params)
+        b.command("Input.insertText", {"text": "New paragraph line."})
+        # Diagnostic: record the real contenteditable DOM after Enter
+        # (artifact only; never a data source).
+        Path(os.environ.get(
+            "BROWSER_SCREENSHOTS",
+            tempfile.gettempdir())
+            ).mkdir(parents=True, exist_ok=True)
+        (Path(os.environ.get("BROWSER_SCREENSHOTS",
+                             tempfile.gettempdir()))
+         / "end_document_editor_dom.html").write_text(
+            b.js(f"{doc}.outerHTML"), encoding="utf-8")
+        # HTML pasted by a teacher lands as literal text, never markup.
+        b.js("const dt=new DataTransfer(); "
+             "dt.setData('text/html','<img src=y onerror=alert(2)>'); "
+             "dt.setData('text/plain','<img src=y onerror=alert(2)>'); "
+             f"{doc}.dispatchEvent(new ClipboardEvent('paste', "
+             "{clipboardData: dt, bubbles: true, cancelable: true}))")
+        self.assertFalse(
+            b.js(f"Boolean({doc}.querySelector('img'))"))
+        self.assertIn("<img src=y", b.js(f"{doc}.textContent"))
+        # Select backwards across two blocks, then force a real poll
+        # redraw by changing the session label server-side; the
+        # buffer and the exact anchor/focus offsets must survive.
+        b.js(f"const s=window.getSelection(); "
+             f"const parts=[...{doc}.children]; "
+             "const textAt=(el,i)=>{const w=document.createTreeWalker("
+             "el,NodeFilter.SHOW_TEXT);let n=w.nextNode();"
+             "while(i--)n=n.nextNode();return n};"
+             "s.setBaseAndExtent(textAt(parts[2],0),"
+             "textAt(parts[2],0).textContent.length,"
+             "textAt(parts[0],0),1)")
+        grab = (f"(()=>{{const s=window.getSelection();"
+                f"const off=(n,o)=>{{const r=document.createRange();"
+                f"r.setStart({doc},0);r.setEnd(n,o);"
+                "return r.toString().length};"
+                "return JSON.stringify({anchor:off(s.anchorNode,"
+                "s.anchorOffset),focus:off(s.focusNode,"
+                "s.focusOffset)})})()")
+        before = b.js(grab)
+        b.js(f"window.__oldDoc = {doc}")
+        meta = self.service._load_meta(sid)
+        meta["label"] = meta["label"] + " (edited)"
+        self.service._save_meta(meta)
+        # The label change makes the next poll payload differ, so the
+        # pane actually redraws and the old editor node disconnects.
+        b.wait("!window.__oldDoc.isConnected", timeout=15)
+        time.sleep(0.3)
+        self.assertEqual(b.js(grab), before)
+        doc_text = b.js(f"{doc}.textContent")
+        self.assertIn("Typed inline.", doc_text)
+        self.assertIn("New paragraph line.", doc_text)
+        # Enter must have produced a real block boundary, not merged
+        # text in the same paragraph.
+        live_blocks = json.loads(b.js(
+            f"JSON.stringify(documentBlocksFromDom({doc}))"))
+        live_paras = [blk["text"] for blk in live_blocks
+                      if blk["kind"] == "paragraph"]
+        self.assertTrue(any(t.startswith("New paragraph line.")
+                            for t in live_paras))
+        self.assertTrue(any(t.endswith("Typed inline.")
+                            for t in live_paras))
+        # A caret on a fresh empty paragraph is an element boundary;
+        # it must restore to that empty block (not the previous word's
+        # end) after a forced poll redraw.
+        b.js(f"{{ {doc}.focus(); const sel2=window.getSelection(); "
+             f"const r=document.createRange(); "
+             f"r.selectNodeContents({doc}); r.collapse(false); "
+             f"sel2.removeAllRanges(); sel2.addRange(r) }}")
+        for ev_type in ("rawKeyDown", "char", "keyUp"):
+            params = {"type": ev_type, "key": "Enter",
+                      "code": "Enter", "windowsVirtualKeyCode": 13,
+                      "nativeVirtualKeyCode": 13}
+            if ev_type == "char":
+                params["text"] = "\r"
+                params["unmodifiedText"] = "\r"
+            b.command("Input.dispatchKeyEvent", params)
+        empty_anchor = b.js(
+            "window.getSelection().anchorNode.nodeType === 1 ? "
+            "'element' : 'text'")
+        b.js(f"window.__oldDoc = {doc}")
+        meta = self.service._load_meta(sid)
+        meta["label"] = meta["label"] + "!"
+        self.service._save_meta(meta)
+        b.wait("!window.__oldDoc.isConnected", timeout=15)
+        time.sleep(0.3)
+        anchor_kind = b.js(
+            "window.getSelection().anchorNode.nodeType === 1 ? "
+            "'element' : 'text'")
+        self.assertEqual(anchor_kind, empty_anchor)
+        self.assertFalse(b.js(
+            "window.getSelection().anchorNode.textContent.trim()"))
+        # Opening the advanced editor only inspects; it must not switch
+        # the save mode or lock the document.
+        adv = ("document.querySelector('#tab-feedback "
+               "details[data-disclosure-key="
+               "\"feedback-editing-advanced\"]')")
+        b.js(f"{adv}.open = true")
+        self.assertTrue(b.js(f"{doc}.isContentEditable"))
+        self.assertIn("single document", b.js(
+            "document.querySelector('#tab-feedback "
+            ".feedback-editor-mode').textContent"))
+        # Typing in a structured field explicitly selects structured
+        # mode; 'Use single editor' returns without losing the buffer.
+        sec = ("document.querySelector('#tab-feedback "
+               "textarea.edit-section')")
+        b.js(f"{sec}.value='Structured wording.'; "
+             f"{sec}.dispatchEvent(new Event('input'))")
+        self.assertFalse(b.js(f"{doc}.isContentEditable"))
+        self.assertIn("advanced structured fields", b.js(
+            "document.querySelector('#tab-feedback "
+            ".feedback-editor-mode').textContent"))
+        use_doc = ("[...document.querySelectorAll('#tab-feedback "
+                   "button')].find((n) => n.textContent === "
+                   "'Use single editor')")
+        b.js(f"{use_doc}.click()")
+        self.assertTrue(b.js(f"{doc}.isContentEditable"))
+        self.assertIn("Typed inline.", b.js(f"{doc}.textContent"))
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            b.js("window.getSelection().removeAllRanges(); "
+                 f"{doc}.scrollIntoView({{block: 'center'}})")
+            b.screenshot("end_document_editor_desktop.png")
+        # Save the document draft.
+        save = ("[...document.querySelectorAll('#tab-feedback "
+                ".release-card button')].find((n) => n.textContent === "
+                "'Save edited draft')")
+        b.js(f"{save}.click()")
+        b.wait(f"{approve} && !{approve}.disabled", timeout=30)
+        # Preview renders the saved blocks formatted once; old
+        # structured cards are not duplicated underneath.
+        preview_text = b.js(
+            "document.querySelector('#tab-feedback .feedback-preview')"
+            ".textContent")
+        self.assertIn("A teacher-edited tenth is", preview_text)
+        self.assertIn("<img src=y onerror=alert(2)>", preview_text)
+        self.assertIn("Typed inline.", preview_text)
+        self.assertIn("New paragraph line.", preview_text)
+        # The Enter split produced two distinct paragraph nodes.
+        paras = ("[...document.querySelectorAll('#tab-feedback "
+                 ".feedback-preview .feedback-document p')]")
+        self.assertTrue(b.js(
+            f"Boolean({paras}.find((n) => n.textContent.startsWith("
+            "'New paragraph line.')))"))
+        self.assertTrue(b.js(
+            f"Boolean({paras}.find((n) => n.textContent.endsWith("
+            "'Typed inline.')))"))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback .feedback-preview "
+            "img, #tab-feedback .feedback-preview script')"))
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback .feedback-preview "
+            ".feedback-document').length"), 1)
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-feedback .feedback-preview "
+            ".feedback-section').length"), 0)
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".feedback-preview .feedback-document h3'))"))
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".feedback-preview .feedback-document ul, #tab-feedback "
+            ".feedback-preview .feedback-document ol'))"))
+        self.assertIn("Explain your reasoning:", preview_text)
+        card_after = b.js(
+            "document.querySelector('#tab-feedback .release-card')"
+            ".textContent")
+        self.assertIn("Wording source", card_after)
+        self.assertIn("teacher-edited", card_after)
+        # Editing changes wording source and presentation, not the
+        # underlying base template.
+        self.assertIn("Worked-first", card_after)
+        self.assertIn("Teacher-edited formatted document", card_after)
+        # Approve and confirm the student sees the exact document with
+        # fixed scores.
+        b.js(f"{approve}.click()")
+        b.wait("document.querySelector('#tab-feedback .release-card')"
+               ".textContent.includes('Already released')", timeout=30)
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("document.body.textContent.includes("
+               "'A teacher-edited tenth is')", timeout=30)
+        student_text = b.js("document.body.textContent")
+        self.assertIn("A teacher-edited tenth is one tenth of the "
+                      "whole amount.", student_text)
+        self.assertIn("<img src=y onerror=alert(2)>", student_text)
+        self.assertIn("New paragraph line.", student_text)
+        self.assertFalse(b.js("Boolean(document.querySelector('img'))"))
+        # Released student view keeps the formatted block structure.
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#end-summary "
+            ".feedback-document h3'))"))
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#end-summary "
+            ".feedback-document ul, #end-summary "
+            ".feedback-document ol'))"))
+        self.assertTrue(b.js(
+            "document.body.textContent.includes('of 40')"))
+        # Mobile width keeps the open editor inside the viewport.
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.js("if (document.querySelector('#pin-input')) {"
+             f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)};"
+             "document.querySelector('#unlock-form').requestSubmit() }")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback .edit-document')")
+        b.js("document.querySelector('#tab-feedback "
+             "details[data-disclosure-key=\"feedback-editing\"]')"
+             ".open = true")
+        b.viewport(390, 844)
+        overflow = b.js(
+            "document.documentElement.scrollWidth - "
+            "document.documentElement.clientWidth")
+        self.assertLessEqual(overflow, 0)
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            b.screenshot("end_document_editor_mobile.png")
+        b.viewport(1440, 1100)
         self.assertEqual(b.errors, [])
 
 

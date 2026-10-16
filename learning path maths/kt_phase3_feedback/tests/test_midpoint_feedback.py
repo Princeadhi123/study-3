@@ -1029,6 +1029,24 @@ class MidpointBrowserTests(unittest.TestCase):
                             ["student_message"]["sections"]):
                 if section["kind"] in seeded:
                     section["text"] = seeded[section["kind"]]
+            # Seed realistic sanitized execution metadata on the ready
+            # phrasing job (the fixture adapter is not capture-wrapped).
+            block = meta["checkpoints"]["midpoint"]
+            block["phrasing_job"]["prompt_version"] = PROMPT_VERSION
+            block["phrasing_job"].setdefault(
+                "execution", {}).update({
+                    "capture_file": "aitta_midpoint_test.json",
+                    "reused": False,
+                    "original_call_latency_ms": 8098.209,
+                    "automatic_retry": {"attempts": 1,
+                                        "max_attempts": 3,
+                                        "stop_reason": "success"},
+                    "metadata": {
+                        "status": "completed",
+                        "model_version": MODEL,
+                        "prompt_version":
+                            "aitta_midpoint_recorded_fixture_v0",
+                        "usage": {"total_tokens": 512}}})
             self.service._save_meta(meta)
         finnish_labels = ["Jaollisuus, tekij\xe4t, alkuluvut",
                           "Murtolukujen kerto- ja jakolasku",
@@ -1076,6 +1094,26 @@ class MidpointBrowserTests(unittest.TestCase):
         for expected in AUTHORED.values():
             self.assertNotIn(expected, gen)
         self.assertIn("not fact-verified", gen)
+        # Generation details show human-readable rows only.
+        for needle in ("Generation status", "Ready",
+                       "New provider call", MODEL,
+                       "8.10 seconds", "1 of 3", "512"):
+            self.assertIn(needle, gen)
+        for absent in ("Draft version",
+                       "Execution record", "aitta_midpoint_test.json"):
+            self.assertNotIn(absent, gen)
+        # Recorded versions sit directly in the generation details;
+        # the deterministic reference version stays inside its own
+        # comparison dropdown instead.
+        self.assertIn("Template version", gen)
+        self.assertIn(MESSAGE_VERSION, gen)
+        self.assertIn("Prompt version", gen)
+        # The recorded execution prompt wins over the job field.
+        self.assertIn("aitta_midpoint_recorded_fixture_v0", gen)
+        self.assertNotIn(PROMPT_VERSION, gen)
+        self.assertNotIn("Deterministic reference version", gen)
+        self.assertFalse(b.js(
+            "document.querySelector('.midpoint-version-details')"))
         self.assertFalse(b.js(
             "document.querySelector("
             "'.midpoint-deterministic-comparison') === null"))
@@ -1087,6 +1125,8 @@ class MidpointBrowserTests(unittest.TestCase):
         comparison = b.js(
             "document.querySelector("
             "'.midpoint-deterministic-comparison').textContent")
+        self.assertIn("Deterministic template version", comparison)
+        self.assertIn(STUDENT_MESSAGE_VERSION, comparison)
         self.assertIn(deterministic_text, comparison)
         self.assertIn("Deterministic midpoint - comparison", comparison)
         for name in english_names:
@@ -1113,7 +1153,10 @@ class MidpointBrowserTests(unittest.TestCase):
         with self.service.lock:
             meta = self.service._load_meta(sid)
             block = meta["checkpoints"]["midpoint"]
-            queued = (block.get("phrasing_job") or {}).get("queued_at")
+            saved_draft = block.get("provider_draft")
+            saved_draft_version = block.get("provider_draft_version")
+            saved_job = dict(block.get("phrasing_job") or {})
+            queued = saved_job.get("queued_at")
             block["provider_draft"] = None
             block["provider_draft_version"] = None
             block["phrasing_job"] = {"status": "pending",
@@ -1147,14 +1190,103 @@ class MidpointBrowserTests(unittest.TestCase):
             ".textContent")
         self.assertIn("queued or in progress", pending_text)
         self.assertNotIn("No Aitta draft was produced", pending_text)
-        # Timed-out open failure explains itself to the teacher.
+        # Pending jobs show only the recorded baseline template
+        # version; no prompt version is invented without a saved record.
+        self.assertIn("Template version", pending_text)
+        self.assertIn(STUDENT_MESSAGE_VERSION, pending_text)
+        self.assertNotIn("Prompt version", pending_text)
+        # A reused ready capture reports 'Reused saved response' without
+        # implying a fresh provider call.
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            block = meta["checkpoints"]["midpoint"]
+            block["provider_draft"] = saved_draft
+            block["provider_draft_version"] = saved_draft_version
+            reused_job = dict(saved_job)
+            reused_job["status"] = "ready"
+            reused_job.setdefault("execution", {})["reused"] = True
+            block["phrasing_job"] = reused_job
+            self.service._save_meta(meta)
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.js("if (document.querySelector('#pin-input')) {"
+             f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)};"
+             "document.querySelector('#unlock-form').requestSubmit() }")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback "
+               ".midpoint-provider-draft')")
+        b.wait("document.querySelector('.midpoint-provider-draft')"
+               ".textContent.includes('Reused saved response')")
+        # A recorded Aitta draft without a draft version shows no
+        # Template version rather than borrowing the baseline's.
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            meta["checkpoints"]["midpoint"]["provider_draft_version"] \
+                = None
+            self.service._save_meta(meta)
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.js("if (document.querySelector('#pin-input')) {"
+             f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)};"
+             "document.querySelector('#unlock-form').requestSubmit() }")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.js("document.querySelector('[data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback "
+               ".midpoint-provider-draft')")
+        no_version = b.js(
+            "document.querySelector('.midpoint-provider-draft')"
+            ".textContent")
+        self.assertNotIn("Template version", no_version)
+        self.assertIn("aitta_midpoint_recorded_fixture_v0",
+                      no_version)
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            meta["checkpoints"]["midpoint"]["provider_draft_version"] \
+                = saved_draft_version
+            self.service._save_meta(meta)
+        # A transport failure_kind wins over a 'transport_failure'
+        # rejection_code — it is not a validation rejection.
         with self.service.lock:
             meta = self.service._load_meta(sid)
             meta["checkpoints"]["midpoint"]["phrasing_job"] = {
                 "status": "fallback", "reason": "provider_error",
-                "execution": {"metadata": {"transport": {
-                    "stage": "open_failed", "failure_kind": "timeout",
-                    "http_status": None}}}}
+                "execution": {"metadata": {
+                    "rejection_code": "transport_failure",
+                    "transport": {"stage": "body_read_failed",
+                                  "failure_kind": "network_error",
+                                  "http_status": None}}}}
+            self.service._save_meta(meta)
+        b.wait("document.querySelector('.midpoint-provider-draft')"
+               ".textContent.includes('network error')", timeout=30)
+        self.assertNotIn("Response rejected by validation",
+                         b.js("document.querySelector("
+                              "'.midpoint-provider-draft').textContent"))
+        # Timed-out open failure explains itself to the teacher; a
+        # retained rejected draft stays in its own collapsed details.
+        rejected_markup = "<img src=x onerror=alert(1)>"
+        with self.service.lock:
+            meta = self.service._load_meta(sid)
+            meta["checkpoints"]["midpoint"]["phrasing_job"] = {
+                "status": "fallback", "reason": "provider_error",
+                "execution": {
+                    "reused": False,
+                    "automatic_retry": {"attempts": 3,
+                                        "max_attempts": 3,
+                                        "stop_reason":
+                                            "attempts_exhausted"},
+                    "rejected_draft": {"content": rejected_markup},
+                    "metadata": {"transport": {
+                        "stage": "open_failed", "failure_kind":
+                            "timeout", "http_status": None}}}}
             self.service._save_meta(meta)
         # Re-selecting the same row is a no-op, so reload the page to
         # refetch the detail payload.
@@ -1178,7 +1310,27 @@ class MidpointBrowserTests(unittest.TestCase):
             "document.querySelector('.midpoint-provider-draft')"
             ".textContent")
         self.assertIn("timed out", fail_text)
+        self.assertIn("3 of 3", fail_text)
+        self.assertIn("Attempts exhausted", fail_text)
         self.assertNotIn("queued or in progress", fail_text)
+        # Rejected wording sits in its own collapsed details as plain
+        # text — no markup is interpreted.
+        rej = ("document.querySelector('#tab-feedback "
+               "details[data-disclosure-key=midpoint-rejected-wording]')")
+        self.assertTrue(b.js(f"Boolean({rej})"))
+        self.assertFalse(b.js(f"{rej}.open"))
+        self.assertIn("Rejected provider wording (unvalidated)",
+                      b.js(f"{rej}.textContent"))
+        self.assertEqual(b.js(
+            f"{rej}.querySelector('pre').textContent"),
+            rejected_markup)
+        self.assertFalse(b.js(
+            f"Boolean({rej}.querySelector('img'))"))
+        # Rejected wording and job internals never reach the student
+        # snapshot payload.
+        snap = json.dumps(self.service.snapshot(sid, token))
+        self.assertNotIn("rejected_draft", snap)
+        self.assertNotIn(rejected_markup, snap)
         self.assertEqual(b.errors, [])
 
 

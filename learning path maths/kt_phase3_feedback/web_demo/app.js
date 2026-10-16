@@ -343,6 +343,26 @@ function feedbackVariantLabel(variant) {
   return "Historical / unspecified";
 }
 
+const TEMPLATE_VERSION_LABELS = {
+  "phase3_student_feedback_worked_first_full_v1": "Worked-first",
+  "phase3_student_feedback_template_v9": "Question-first",
+  "phase3_student_feedback_template_v8": "Assessment review (concise)",
+  "phase3_student_feedback_template_v7": "Assessment worked review",
+  "phase3_student_feedback_template_v5": "Two-topic feedback",
+  "phase3_student_feedback_template_v3":
+    "Single-topic feedback with practice",
+  "phase3_student_feedback_template_v1": "Single-topic feedback"};
+
+function feedbackTemplateLabel(preview, variant) {
+  const version = preview && preview.template_version;
+  if (version) {
+    return TEMPLATE_VERSION_LABELS[version]
+      || "Recorded template (unrecognized version)";
+  }
+  return feedbackVariantLabel(variant).replace(
+    / \/ (current version|full Aitta narrative)$/, "");
+}
+
 function selectionProvenance(review, job, selExec) {
   if (!review) {
     return (job && job.status === "pending")
@@ -417,6 +437,423 @@ function aittaProvenance(review, genExec) {
     return "Injected opening generator - hosted provenance unavailable";
   }
   return "Deterministic feedback";
+}
+
+/* Canonical serialization for feedback document blocks; must match
+   the backend `_document_blocks_text` exactly. */
+function serializeDocumentBlocks(blocks) {
+  return (blocks || []).map((block) =>
+    block.kind === "unordered_list"
+      ? block.items.map((t) => `- ${t}`).join("\n")
+      : block.kind === "ordered_list"
+        ? block.items.map((t, i) => `${i + 1}. ${t}`).join("\n")
+        : block.text).join("\n\n");
+}
+
+function isDocumentBlock(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  if (value.kind === "heading" || value.kind === "paragraph") {
+    return typeof value.text === "string"
+      && Object.keys(value).length === 2;
+  }
+  if (value.kind === "unordered_list"
+      || value.kind === "ordered_list") {
+    return Array.isArray(value.items)
+      && value.items.every((t) => typeof t === "string")
+      && Object.keys(value).length === 2;
+  }
+  return false;
+}
+
+const DOCUMENT_HEADING_RE =
+  /^Worked review of your assessment answer|^Practice for |^Related practice|^Separate practice/;
+
+/* Parses stored plaintext document_text into safe display blocks. */
+function parseDocumentTextBlocks(payload, text) {
+  const titles = new Set(((payload && payload.sections) || [])
+    .map((s) => s && s.title).filter(Boolean));
+  const blocks = [];
+  for (const chunk of String(text).split(/\n\s*\n/)) {
+    const lines = chunk.split("\n");
+    if (lines.every((line) => line.startsWith("- "))) {
+      const prev = blocks[blocks.length - 1];
+      const items = lines.map((l) => l.slice(2));
+      if (prev && prev.kind === "unordered_list") {
+        prev.items.push(...items);
+      } else {
+        blocks.push({kind: "unordered_list", items});
+      }
+      continue;
+    }
+    if (lines.every((line) => /^\d+\. /.test(line))) {
+      const prev = blocks[blocks.length - 1];
+      const items = lines.map((l) => l.replace(/^\d+\. /, ""));
+      if (prev && prev.kind === "ordered_list") {
+        prev.items.push(...items);
+      } else {
+        blocks.push({kind: "ordered_list", items});
+      }
+      continue;
+    }
+    const trimmed = chunk.trim();
+    if (lines.length === 1
+        && (titles.has(trimmed) || DOCUMENT_HEADING_RE.test(trimmed))) {
+      blocks.push({kind: "heading", text: trimmed});
+      continue;
+    }
+    blocks.push({kind: "paragraph", text: chunk});
+  }
+  return blocks;
+}
+
+/* Derives the editable document blocks for a preview payload: stored
+   blocks when present, parsed stored plaintext next, otherwise a walk
+   of the rendered preview keeping only displayed semantic content
+   (no scores, provenance, audit details or controls). */
+function feedbackDocumentBlocks(payload) {
+  if (payload && Array.isArray(payload.document_blocks)
+      && payload.document_blocks.length
+      && payload.document_blocks.every(isDocumentBlock)) {
+    return JSON.parse(JSON.stringify(payload.document_blocks));
+  }
+  if (payload && typeof payload.document_text === "string") {
+    return parseDocumentTextBlocks(payload, payload.document_text);
+  }
+  const host = document.createElement("div");
+  renderStructuredFeedback(host, payload);
+  const blocks = [];
+  const SKIP_CLASSES = ["meta", "warn", "boundary-note", "mono",
+                        "assessment-results", "score"];
+  const HEADINGS = new Set(["H1", "H2", "H3", "H4", "H5", "H6"]);
+  const listItems = (node) => [...node.children]
+    .filter((li) => li.tagName === "LI")
+    .map((li) => li.textContent.trim()).filter(Boolean);
+  const walk = (node) => {
+    for (const child of node.children) {
+      if (child.tagName === "SUMMARY"
+          || SKIP_CLASSES.some((c) => child.classList.contains(c))) {
+        continue;
+      }
+      if (child.tagName === "DETAILS") {
+        if (child.classList.contains("worked-hint")
+            || child.classList.contains("worked-solution")) {
+          walk(child);
+        }
+        continue;
+      }
+      const text = child.textContent.trim();
+      if (HEADINGS.has(child.tagName)) {
+        if (text) blocks.push({kind: "heading", text});
+        continue;
+      }
+      if (child.tagName === "UL") {
+        const items = listItems(child);
+        if (items.length) {
+          blocks.push({kind: "unordered_list", items});
+        }
+        continue;
+      }
+      if (child.tagName === "OL") {
+        const items = listItems(child);
+        if (items.length) {
+          blocks.push({kind: "ordered_list", items});
+        }
+        continue;
+      }
+      if (child.tagName === "LI") {
+        if (text) {
+          blocks.push({kind: "unordered_list", items: [text]});
+        }
+        continue;
+      }
+      if (["P", "DT", "DD"].includes(child.tagName)) {
+        if (text) blocks.push({kind: "paragraph", text});
+        continue;
+      }
+      walk(child);
+    }
+  };
+  walk(host);
+  return blocks;
+}
+
+function feedbackDocumentText(payload) {
+  if (payload && typeof payload.document_text === "string") {
+    return payload.document_text;
+  }
+  return serializeDocumentBlocks(feedbackDocumentBlocks(payload));
+}
+
+/* Renders document blocks using only known elements and textContent;
+   never interprets markup. */
+function renderFeedbackDocument(host, blocks) {
+  for (const block of blocks || []) {
+    if (block.kind === "heading") {
+      const h = el("h3", null, "feedback-document-heading");
+      h.textContent = block.text;
+      host.appendChild(h);
+    } else if (block.kind === "unordered_list"
+               || block.kind === "ordered_list") {
+      const list = document.createElement(
+        block.kind === "ordered_list" ? "ol" : "ul");
+      for (const item of block.items) {
+        const li = document.createElement("li");
+        li.textContent = item;
+        list.appendChild(li);
+      }
+      host.appendChild(list);
+    } else {
+      const p = document.createElement("p");
+      p.className = "feedback-document-para";
+      p.textContent = block.text;
+      host.appendChild(p);
+    }
+  }
+}
+
+/* Parses the rich editor DOM back into allowlisted blocks. BR becomes
+   a newline inside block text, nested block containers keep their own
+   boundaries, inline markup flattens to text, and ignored or control
+   nodes are dropped at any depth. Whitespace inside block text is
+   preserved; only block boundaries are normalized. */
+const DOM_IGNORE_TAGS = new Set(["SCRIPT", "STYLE", "IMG", "IFRAME",
+                                 "BUTTON", "INPUT", "SELECT", "TEXTAREA",
+                                 "DETAILS", "SUMMARY", "TEMPLATE",
+                                 "OBJECT", "EMBED", "VIDEO", "AUDIO",
+                                 "CANVAS", "SVG", "LINK", "META"]);
+const DOM_HEADING_TAGS = new Set(
+  ["H1", "H2", "H3", "H4", "H5", "H6"]);
+const DOM_INLINE_TAGS = new Set(
+  ["SPAN", "B", "I", "EM", "STRONG", "A", "SMALL", "CODE", "MARK",
+   "SUB", "SUP", "U", "S", "Q", "CITE", "TIME", "KBD", "SAMP", "VAR",
+   "ABBR", "FONT", "WBR"]);
+
+function domInlineText(node) {
+  let text = "";
+  for (const child of node.childNodes) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      text += child.textContent;
+    } else if (child.nodeType === Node.ELEMENT_NODE) {
+      if (DOM_IGNORE_TAGS.has(child.tagName)) continue;
+      if (child.tagName === "BR") {
+        text += "\n";
+      } else {
+        text += domInlineText(child);
+      }
+    }
+  }
+  return text;
+}
+
+function documentBlocksFromDom(root) {
+  const blocks = [];
+  const push = (block) => {
+    if (block.kind === "paragraph" && !block.text.trim()
+        && !blocks.length) {
+      return;  // leading blank paragraph carries no content
+    }
+    blocks.push(block);
+  };
+  const visit = (node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        push({kind: "paragraph", text: child.textContent});
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE
+          || DOM_IGNORE_TAGS.has(child.tagName)) {
+        continue;
+      }
+      const text = domInlineText(child);
+      if (DOM_HEADING_TAGS.has(child.tagName)) {
+        if (text.trim()) push({kind: "heading", text});
+      } else if (child.tagName === "UL" || child.tagName === "OL") {
+        const items = [...child.children]
+          .filter((li) => li.tagName === "LI")
+          .map((li) => domInlineText(li))
+          .filter((item) => item.trim());
+        if (items.length) {
+          push({kind: child.tagName === "OL"
+                ? "ordered_list" : "unordered_list",
+                items});
+        }
+      } else if (child.tagName === "LI") {
+        if (text.trim()) {
+          push({kind: "unordered_list", items: [text]});
+        }
+      } else if (child.tagName === "BR") {
+        push({kind: "paragraph", text: ""});
+      } else if (child.tagName === "P" || child.tagName === "DIV") {
+        // Inline runs accumulate into one paragraph; nested block
+        // children (e.g. Enter-split <div> inside <p>) keep their own
+        // boundaries instead of being concatenated.
+        let pending = "";
+        const flush = () => {
+          if (pending !== "") {
+            push({kind: "paragraph", text: pending});
+            pending = "";
+          }
+        };
+        for (const part of child.childNodes) {
+          if (part.nodeType === Node.TEXT_NODE) {
+            pending += part.textContent;
+          } else if (part.nodeType === Node.ELEMENT_NODE
+                     && !DOM_IGNORE_TAGS.has(part.tagName)) {
+            if (part.tagName === "BR") {
+              pending += "\n";
+            } else if (DOM_INLINE_TAGS.has(part.tagName)) {
+              pending += domInlineText(part);
+            } else {
+              flush();
+              visit({childNodes: [part]});
+            }
+          }
+        }
+        flush();
+        if (!pending && !child.childNodes.length) {
+          push({kind: "paragraph", text: ""});
+        }
+      } else if (DOM_INLINE_TAGS.has(child.tagName)) {
+        push({kind: "paragraph", text});
+      } else {
+        // Nested block container: keep each child's own boundary.
+        visit(child);
+      }
+    }
+  };
+  visit(root);
+  return blocks;
+}
+
+function setFeedbackEditorEnabled(field, enabled) {
+  field.contentEditable = enabled ? "true" : "false";
+  field.setAttribute("aria-disabled", enabled ? "false" : "true");
+  field.classList.toggle("edit-disabled", !enabled);
+}
+
+/* Text-offset bookmark for the contenteditable editor: captures anchor
+   and focus as character offsets over the editor's rendered text so a
+   selected range (including backward selections) survives a redraw.
+   Element boundaries are handled via Range.toString, so caret on a
+   fresh empty paragraph still resolves. */
+function domPathTo(root, node) {
+  const path = [];
+  let n = node;
+  while (n && n !== root) {
+    path.unshift(
+      [...n.parentNode.childNodes].indexOf(n));
+    n = n.parentNode;
+  }
+  return n === root ? path : null;
+}
+
+function domNodeAtPath(root, path) {
+  let n = root;
+  for (const index of path || []) {
+    if (!n || index >= n.childNodes.length) return null;
+    n = n.childNodes[index];
+  }
+  return n;
+}
+
+function documentSelectionOffsets(root) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount
+      || !root.contains(sel.anchorNode)
+      || !root.contains(sel.focusNode)) {
+    return null;
+  }
+  const endpoint = (node, nodeOffset) => ({
+    offset: (() => {
+      const range = document.createRange();
+      range.setStart(root, 0);
+      range.setEnd(node, nodeOffset);
+      return range.toString().length;
+    })(),
+    path: domPathTo(root, node),
+    domOffset: nodeOffset,
+    nodeType: node.nodeType});
+  return {anchor: endpoint(sel.anchorNode, sel.anchorOffset),
+          focus: endpoint(sel.focusNode, sel.focusOffset)};
+}
+
+function documentTextPoint(root, offset) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let remaining = offset, node = walker.nextNode(), last = null;
+  while (node) {
+    last = node;
+    if (remaining <= node.textContent.length) break;
+    remaining -= node.textContent.length;
+    node = walker.nextNode();
+  }
+  if (!last) return null;
+  return {node: last,
+          offset: Math.min(remaining, last.textContent.length)};
+}
+
+function restoreDocumentSelection(root, bookmark) {
+  const point = (endpoint) => {
+    // Prefer the recorded DOM path when the same structure exists —
+    // a text offset cannot distinguish an empty paragraph boundary
+    // from the end of the previous block.
+    const viaPath = domNodeAtPath(root, endpoint.path);
+    if (viaPath && viaPath.nodeType === endpoint.nodeType) {
+      const max = endpoint.nodeType === Node.TEXT_NODE
+        ? viaPath.textContent.length : viaPath.childNodes.length;
+      return {node: viaPath,
+              offset: Math.min(endpoint.domOffset, max)};
+    }
+    return documentTextPoint(root, endpoint.offset);
+  };
+  const anchor = point(bookmark.anchor);
+  const focus = point(bookmark.focus);
+  if (!anchor || !focus) return;
+  const sel = window.getSelection();
+  if (sel.setBaseAndExtent) {
+    sel.setBaseAndExtent(anchor.node, anchor.offset,
+                         focus.node, focus.offset);
+    return;
+  }
+  const range = document.createRange();
+  range.setStart(anchor.node, anchor.offset);
+  range.setEnd(focus.node, focus.offset);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function endFeedbackSource(review, delivery, execution) {
+  const trace = (review && review.trace) || {};
+  const source = trace.phrasing_source;
+  const sectionSources = Object.values(trace.section_sources || {});
+  const providerAuthored =
+    source === "injected_generator_full_sections"
+    || source === "injected_generator_opening_only"
+    || String(trace.guardrails_version || "")
+       .startsWith("provider_full_narrative_shape_checked_")
+    || sectionSources.includes("provider");
+  const deterministic = source === "deterministic"
+    || (delivery && delivery.preview_source === "deterministic");
+  let base = null;
+  if (providerAuthored) {
+    base = hostedConfirmed(execution || {}, "aitta_")
+      ? "Aitta-generated" : "AI-generated";
+  } else if (deterministic) {
+    base = "Deterministic";
+  }
+  const partial = providerAuthored
+    && (source === "injected_generator_opening_only"
+        || (sectionSources.includes("provider")
+            && sectionSources.some((v) => v !== "provider")));
+  if (delivery && delivery.preview_source === "teacher_edited") {
+    return {
+      label: base
+        ? `${base}, then teacher-edited`
+        : "Teacher-edited (original source unavailable)",
+      partial};
+  }
+  return {label: base || "Recorded wording", partial};
 }
 
 function renderSelectionDecision(audience, review, baseline,
@@ -940,6 +1377,12 @@ function renderStructuredFeedback(container, payload) {
       `Overall: ${payload.total.correct} of ` +
       `${payload.total.out_of} correct on this assessment.`,
       "score"));
+  }
+  if (typeof payload.document_text === "string") {
+    const doc = el("div", null, "feedback-document");
+    renderFeedbackDocument(doc, feedbackDocumentBlocks(payload));
+    container.appendChild(doc);
+    return;
   }
   (payload.sections || []).forEach((section) => {
     const box = el("div", null, "feedback-section");
@@ -2237,6 +2680,8 @@ function createDetailView(root, options = {}) {
   function editDraftFor(sid, delivery) {
     if (!editDrafts.has(sid)) {
       editDrafts.set(sid, {hash: null, texts: {}, content: null,
+                           document: null, document_blocks: null,
+                           mode: "document",
                            dirty: false,
                            saving: false, note: null, stale: false,
                            awaitingPreview: false, savedAt: null});
@@ -2251,6 +2696,9 @@ function createDetailView(root, options = {}) {
           draft.awaitingPreview = false;
           draft.texts = current;
           draft.content = contentProjection(preview);
+          draft.document_blocks = feedbackDocumentBlocks(preview);
+          draft.document = serializeDocumentBlocks(
+            draft.document_blocks);
           draft.note = `Edited draft saved (${draft.savedAt}).`;
         } else if (delivery.edited_at && draft.savedAt
                    && delivery.edited_at > draft.savedAt) {
@@ -2262,6 +2710,9 @@ function createDetailView(root, options = {}) {
         draft.hash = delivery.preview_sha256;
         draft.texts = current;
         draft.content = contentProjection(preview);
+        draft.document_blocks = feedbackDocumentBlocks(preview);
+        draft.document = serializeDocumentBlocks(
+          draft.document_blocks);
       } else if (delivery.preview_sha256
                  && draft.hash !== delivery.preview_sha256) {
         draft.stale = true;
@@ -2312,9 +2763,48 @@ function createDetailView(root, options = {}) {
     const job = detail.provider_job;
     const selReview = end.student_review || end.baseline_student;
     const strip = el("div", null, "release-status");
+    const genExec = (((job || {}).executions || {}).student || {})
+      .generator || {};
+    const wording = endFeedbackSource(selReview, delivery, genExec);
+    const srcRow = kv("Wording source", wording.label);
+    srcRow.classList.add("end-wording-source");
+    strip.appendChild(srcRow);
+    if (wording.partial) {
+      strip.appendChild(el("p",
+        "AI authored selected wording; remaining text is " +
+        "application-owned.", "meta"));
+    }
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
-    strip.appendChild(kv("Feedback variant",
-      feedbackVariantLabel(detail.feedback_variant)));
+    const templateRow = kv("Base feedback template",
+      feedbackTemplateLabel(preview, detail.feedback_variant));
+    templateRow.classList.add("end-feedback-template");
+    strip.appendChild(templateRow);
+    strip.appendChild(kv("Current presentation",
+      preview && preview.document_blocks
+        ? "Teacher-edited formatted document"
+        : preview && typeof preview.document_text === "string"
+          ? "Teacher-edited document"
+          : "Structured feedback cards"));
+    const workedExamples = (preview && preview.review_examples) || [];
+    if (preview && typeof preview.document_text === "string") {
+      strip.appendChild(kv("Worked explanations",
+        "Included in teacher-edited document"));
+    } else if (workedExamples.length) {
+      const providerCount = workedExamples.filter(
+        (e) => e.explanation_source === "provider").length;
+      const anyEdited = workedExamples.some((e) => e.teacher_edited);
+      let expl;
+      if (providerCount === workedExamples.length) {
+        expl = hostedConfirmed(genExec, "aitta_")
+          ? "Aitta-generated" : "AI-generated";
+      } else if (providerCount) {
+        expl = "Mixed AI and application explanations";
+      } else {
+        expl = "Application-owned";
+      }
+      if (anyEdited) expl += " with teacher edits";
+      strip.appendChild(kv("Worked explanations", expl));
+    }
     const activities = preview && preview.practice_activities;
     if (activities && activities.length) {
       activities.forEach((activity, i) => {
@@ -2332,9 +2822,6 @@ function createDetailView(root, options = {}) {
               ? statusLabel(end.recommendation_job.status) : "—"));
       strip.appendChild(kv("Practice selection", practiceStatus));
     }
-    if (delivery.preview_source === "teacher_edited") {
-      strip.appendChild(kv("Preview source", "Teacher-edited draft"));
-    }
     if (selReview) {
       const selectedOriginals = selReview.selected_candidates || [];
       if (selectedOriginals.length) {
@@ -2351,13 +2838,6 @@ function createDetailView(root, options = {}) {
           ? focusLabel(applied, selReview.selected_candidate_id)
           : "Recorded candidate not found"));
       }
-      const studentExecs = (job.executions || {}).student || {};
-      strip.appendChild(kv("Selection provenance",
-        selectionProvenance(selReview, job,
-                            studentExecs.selector || {})));
-      const aitta = aittaProvenance(
-        selReview, studentExecs.generator || {});
-      if (aitta) strip.appendChild(kv("Aitta provenance", aitta));
       if ((selReview.trace || {}).guardrails_version
           && delivery.preview_source !== "teacher_edited") {
         strip.appendChild(kv("Feedback safeguards",
@@ -2378,16 +2858,6 @@ function createDetailView(root, options = {}) {
       strip.appendChild(el("p",
         "Aitta narrative is shape-checked, not fact-verified; " +
         "educator review is required.", "warn"));
-      if ((selReview.trace || {}).generation_context_version) {
-        strip.appendChild(kv("Aitta input",
-          "answered assessment, descriptive concept graph, checked " +
-          "review cards, practice context, and available experimental " +
-          "KT estimates."));
-        strip.appendChild(el("p",
-          "Deterministic feedback is a reference, not a hallucination " +
-          "detector. Check claims against the recorded evidence.",
-          "boundary-note"));
-      }
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;
@@ -2446,6 +2916,10 @@ function createDetailView(root, options = {}) {
         "Deterministic feedback is a reference, not a hallucination " +
         "detector. Compare claims against the recorded evidence. " +
         "This comparison is not the preview being approved.", "meta"));
+      if (delivery.deterministic_preview.template_version) {
+        inner.appendChild(kv("Deterministic template version",
+          delivery.deterministic_preview.template_version));
+      }
       renderStructuredFeedback(inner, delivery.deterministic_preview);
       compare.appendChild(inner);
       card.appendChild(compare);
@@ -2457,24 +2931,16 @@ function createDetailView(root, options = {}) {
     const draft = releaseDraftFor(selected);
     const edit = editDraftFor(selected, delivery);
     if (delivery.preview_source === "teacher_edited") {
-      card.appendChild(kv("Preview source",
-        `Teacher-edited draft (saved ${delivery.edited_at || "—"}, ` +
-        `${delivery.edit_reviewer_label || "anonymous"})`));
-    } else {
-      const sourceLabel = {
-        injected_generator_full_sections: "Aitta",
-        injected_generator_opening_only: "Aitta",
-        deterministic: "Deterministic fallback"};
-      card.appendChild(kv("Wording source",
-        sourceLabel[delivery.preview_source] || "Recorded wording"));
+      card.appendChild(kv("Last edited",
+        `${delivery.edited_at || "—"} by ` +
+        `${delivery.edit_reviewer_label || "anonymous"}`));
     }
     const editStatus = el("p", edit.note || null, "meta");
     const sectionInputs = {};
     const contentInputs = [];
     card.appendChild(el("p",
-      "All learner-facing wording — section titles, narratives, " +
-      "skill labels, worked review cards and practice cards — is " +
-      "editable. Scores and source assessment records are preserved.",
+      "Scores, answer keys and practice tasks are application-owned. " +
+      "End feedback still requires educator approval.",
       "boundary-note"));
     if (edit.dirty && edit.stale) {
       card.appendChild(el("p",
@@ -2485,6 +2951,82 @@ function createDetailView(root, options = {}) {
     const editBox = el("details", null, "raw");
     editBox.dataset.disclosureKey = "feedback-editing";
     editBox.appendChild(el("summary", "Edit full feedback package"));
+    const docWrap = el("span", "Edit full feedback");
+    docWrap.id = `${prefix}edit-document-label`;
+    const docField = document.createElement("div");
+    docField.id = `${prefix}edit-document`;
+    docField.className = "edit-document";
+    docField.contentEditable = "true";
+    docField.setAttribute("role", "textbox");
+    docField.setAttribute("aria-multiline", "true");
+    docField.setAttribute("aria-labelledby", docWrap.id);
+    docField.tabIndex = 0;
+    setFeedbackEditorEnabled(docField,
+      !(edit.saving || edit.awaitingPreview
+        || edit.mode === "structured"));
+    if (edit.document_blocks === null
+        || edit.document_blocks === undefined) {
+      edit.document_blocks = feedbackDocumentBlocks(preview);
+      edit.document = serializeDocumentBlocks(edit.document_blocks);
+    }
+    renderFeedbackDocument(docField, edit.document_blocks);
+    docWrap.htmlFor = docField.id;
+    const syncDocument = () => {
+      const blocks = documentBlocksFromDom(docField);
+      edit.document_blocks = blocks;
+      edit.document = serializeDocumentBlocks(blocks);
+      edit.dirty = true;
+      button.disabled = true;
+      if (edit.document.length > 32768) {
+        editStatus.textContent =
+          `Document exceeds 32768 characters ` +
+          `(${edit.document.length}); shorten it before saving.`;
+      } else if (!edit.stale && !edit.note) {
+        editStatus.textContent =
+          "Unsaved edits — save the edited draft before releasing.";
+      }
+    };
+    docField.addEventListener("beforeinput", (ev) => {
+      if (ev.inputType && !/^(insertText|insertParagraph|insertLineBreak|deleteContent|deleteByCut|deleteByDrag|insertFromPaste|insertFromDrop|historyUndo|historyRedo|insertCompositionText|deleteCompositionText|insertReplacementText)/.test(ev.inputType)) {
+        ev.preventDefault();
+      }
+    });
+    docField.addEventListener("paste", (ev) => {
+      ev.preventDefault();
+      const text = (ev.clipboardData
+                    || window.clipboardData).getData("text/plain");
+      if (text) {
+        document.execCommand("insertText", false, text);
+      }
+    });
+    docField.addEventListener("drop", (ev) => {
+      ev.preventDefault();
+      const text = ev.dataTransfer
+        && ev.dataTransfer.getData("text/plain");
+      if (text) {
+        document.execCommand("insertText", false, text);
+      }
+    });
+    docField.addEventListener("compositionstart", () => {
+      docField.dataset.composing = "1";
+    });
+    docField.addEventListener("compositionend", () => {
+      delete docField.dataset.composing;
+    });
+    docField.addEventListener("input", syncDocument);
+    editBox.appendChild(docWrap);
+    editBox.appendChild(docField);
+    editBox.appendChild(el("p",
+      "You are editing all displayed feedback wording, including " +
+      "mathematical explanations; check it before approval. Scores " +
+      "remain locked.", "meta"));
+    const advanced = el("details", null, "raw feedback-editor-advanced");
+    advanced.dataset.disclosureKey = "feedback-editing-advanced";
+    advanced.appendChild(
+      el("summary", "Advanced field-by-field editor"));
+    advanced.appendChild(el("p",
+      "Advanced edits use the structured original, not the " +
+      "free-form document.", "meta"));
     (preview.sections || []).forEach((section) => {
       const field = document.createElement("textarea");
       field.id = `${prefix}edit-${section.kind}`;
@@ -2502,6 +3044,11 @@ function createDetailView(root, options = {}) {
       field.addEventListener("input", () => {
         edit.texts[section.kind] = field.value;
         edit.dirty = true;
+        edit.mode = "structured";
+        setFeedbackEditorEnabled(docField, false);
+        modeNote.textContent =
+          "Saving the advanced structured fields on next save; the " +
+          "document stays unchanged until you use it.";
         button.disabled = true;
         wrap.textContent = `${section.title} (unsaved edits)`;
         if (!edit.stale && !edit.note) {
@@ -2509,8 +3056,8 @@ function createDetailView(root, options = {}) {
             "Unsaved edits — save the edited draft before releasing.";
         }
       });
-      editBox.appendChild(wrap);
-      editBox.appendChild(field);
+      advanced.appendChild(wrap);
+      advanced.appendChild(field);
       sectionInputs[section.kind] = field;
     });
     const contentField = (target, path, labelText, fallbackValue, rows) => {
@@ -2533,6 +3080,11 @@ function createDetailView(root, options = {}) {
       field.addEventListener("input", () => {
         contentPathSet(edit.content, path, field.value);
         edit.dirty = true;
+        edit.mode = "structured";
+        setFeedbackEditorEnabled(docField, false);
+        modeNote.textContent =
+          "Saving the advanced structured fields on next save; the " +
+          "document stays unchanged until you use it.";
         button.disabled = true;
         if (!edit.stale && !edit.note) {
           editStatus.textContent =
@@ -2544,7 +3096,10 @@ function createDetailView(root, options = {}) {
       contentInputs.push(field);
     };
     const subSection = (parent, key, titleText) => {
-      const box = el("details", null, "raw");
+      const box = el("details", null,
+        "raw feedback-editor-section"
+        + (parent.classList.contains("feedback-editor-section")
+           ? " feedback-editor-subsection" : ""));
       box.dataset.disclosureKey = key;
       box.appendChild(el("summary", titleText));
       parent.appendChild(box);
@@ -2561,7 +3116,7 @@ function createDetailView(root, options = {}) {
            ? normalizeDisplayText(reviewCard.for_subtopic_name)
            : englishSkillName(reviewCard.for_subtopic_name))
         : "";
-      const cardBox = subSection(editBox, `edit-review-card:${i}`,
+      const cardBox = subSection(advanced, `edit-review-card:${i}`,
         `Worked review card ${i + 1}${subtopic ? ` — ${subtopic}` : ""}`);
       if (Array.isArray(reviewCard.steps) && reviewCard.steps.length) {
         contentField(cardBox, `review_examples.${i}.steps`,
@@ -2665,7 +3220,7 @@ function createDetailView(root, options = {}) {
            ? normalizeDisplayText(practiceCard.topic_label)
            : englishSkillName(practiceCard.topic_label))
         : "";
-      const cardBox = subSection(editBox, `edit-practice-card:${i}`,
+      const cardBox = subSection(advanced, `edit-practice-card:${i}`,
         `Practice card ${i + 1}${topic ? ` — ${topic}` : ""}`);
       if (practiceCard.relationship
           && Object.hasOwn(practiceCard.relationship, "message")) {
@@ -2734,7 +3289,7 @@ function createDetailView(root, options = {}) {
           EDIT_FIELD_LABELS.notice, practiceCard.notice);
       }
     });
-    const advGlobal = subSection(editBox, "edit-advanced-labels",
+    const advGlobal = subSection(advanced, "edit-advanced-labels",
       "Advanced headings, skill labels & notices");
     (preview.sections || []).forEach((section) => {
       contentField(advGlobal, `section_titles.${section.kind}`,
@@ -2752,6 +3307,25 @@ function createDetailView(root, options = {}) {
       contentField(advGlobal, "worked_review_notice",
         "Worked review notice", preview.worked_review_notice || "");
     }
+    const useDoc = el("button", "Use single editor", "ghost");
+    useDoc.type = "button";
+    useDoc.addEventListener("click", () => {
+      edit.mode = "document";
+      setFeedbackEditorEnabled(docField,
+        !(edit.saving || edit.awaitingPreview));
+      modeNote.textContent =
+        "Saving the single document below on next save.";
+      advanced.open = false;
+    });
+    advanced.appendChild(useDoc);
+    editBox.appendChild(advanced);
+    const modeNote = el("p",
+      edit.mode === "document"
+        ? "Saving the single document below on next save."
+        : "Saving the advanced structured fields on next save; " +
+          "the document stays unchanged until you use it.",
+      "meta feedback-editor-mode");
+    editBox.appendChild(modeNote);
     card.appendChild(editBox);
     const rebindBtn = el("button",
       "Use latest revision with my edits", "secondary");
@@ -2781,18 +3355,37 @@ function createDetailView(root, options = {}) {
         sections[s.kind] = sectionInputs[s.kind].value;
       });
       const contentPayload = buildContentPayload(preview, edit.content);
+      const isDocument = edit.mode === "document";
       edit.texts = sections;
+      if (isDocument) {
+        edit.document_blocks = documentBlocksFromDom(docField);
+        edit.document =
+          serializeDocumentBlocks(edit.document_blocks);
+        if (!edit.document.trim()) {
+          editStatus.textContent =
+            "The document is empty; add feedback text before saving.";
+          return;
+        }
+      }
       edit.dirty = true;
       edit.saving = true;
       saveBtn.disabled = true;
       button.disabled = true;
+      setFeedbackEditorEnabled(docField, false);
       Object.values(sectionInputs).forEach((f) => { f.disabled = true; });
       contentInputs.forEach((f) => { f.disabled = true; });
       let failed = false;
       try {
-        const body = {message_sha256: baseHash, sections: sections,
-                      reviewer_label: draft.label || "anonymous"};
-        if (contentPayload) body.content = contentPayload;
+        const body = isDocument
+          ? {message_sha256: baseHash,
+             document_text: edit.document,
+             document_blocks: edit.document_blocks,
+             reviewer_label: draft.label || "anonymous"}
+          : {message_sha256: baseHash, sections: sections,
+             reviewer_label: draft.label || "anonymous"};
+        if (!isDocument && contentPayload) {
+          body.content = contentPayload;
+        }
         const res = await api(
           `/api/teacher/sessions/${sid}/feedback-edits`, {body});
         edit.hash = res.preview_sha256;
@@ -2944,10 +3537,6 @@ function createDetailView(root, options = {}) {
       card.appendChild(box);
       card.appendChild(kv("Wording source",
         aittaActive ? "Aitta" : "Deterministic fallback"));
-      const version = aittaActive
-        ? midpoint.provider_draft_version
-        : midpoint.student_message_version;
-      if (version) card.appendChild(kv("Message version", version));
       if (aittaActive && baseline) {
         const compare = el("details", null,
           "raw midpoint-deterministic-comparison");
@@ -2956,6 +3545,10 @@ function createDetailView(root, options = {}) {
         compare.appendChild(el("summary",
           "Deterministic midpoint - comparison"));
         const inner = el("div");
+        if (midpoint.student_message_version) {
+          inner.appendChild(kv("Deterministic template version",
+            midpoint.student_message_version));
+        }
         renderMidpointDraftMessage(inner, baseline, null);
         compare.appendChild(inner);
         card.appendChild(compare);
@@ -2978,57 +3571,125 @@ function createDetailView(root, options = {}) {
     box.appendChild(el("summary", "Midpoint generation details"));
     const inner = el("div");
     inner.appendChild(el("p",
-      "Aitta wording is shown automatically when ready; shape-checked " +
-      "only, not fact-verified. Rejected wording and execution " +
-      "details are not student-facing.", "warn"));
-    renderMidpointDraftJob(inner, midpoint, job);
+      "Aitta wording is shown automatically when ready. Counts and " +
+      "the topic table are application-owned; wording is " +
+      "shape-checked, not fact-verified.", "warn"));
+    renderMidpointDraftJob(inner, job);
+    renderMidpointVersionDetails(inner, midpoint, job, aittaActive);
     if (!aittaActive) {
       renderMidpointDraftMessage(inner, draft, job);
     }
     const rejected = (job && job.execution
       && job.execution.rejected_draft) || null;
     if (rejected) {
-      inner.appendChild(el("p",
-        "Retained rejected provider wording (unvalidated):",
-        "meta small"));
+      const rej = el("details", null, "raw");
+      rej.dataset.disclosureKey = "midpoint-rejected-wording";
+      rej.appendChild(el("summary",
+        "Rejected provider wording (unvalidated)"));
       const pre = el("pre", null, "mono");
       pre.textContent = rejected.content || "";
-      inner.appendChild(pre);
-    }
-    if (job && job.execution) {
-      inner.appendChild(jsonDetails(
-        "Execution record", job.execution,
-        "midpoint-provider-execution"));
+      rej.appendChild(pre);
+      inner.appendChild(rej);
     }
     box.appendChild(inner);
     card.appendChild(box);
   }
 
-  function renderMidpointDraftJob(inner, midpoint, job) {
+  const MIDPOINT_JOB_STATUS = {
+    ready: "Ready", pending: "Queued or in progress",
+    fallback: "Deterministic fallback", unavailable: "Unavailable",
+    not_requested: "Not requested"};
+  const MIDPOINT_REASON_LABELS = {
+    provider_error: "Provider request failed",
+    demo_call_budget_exhausted: "Call budget exhausted",
+    demo_provider_queue_capacity: "Provider queue full",
+    interrupted_by_restart: "Interrupted by server restart",
+    rules_mode_no_providers: "Rules-only session",
+    midpoint_provider_not_configured: "Midpoint provider not " +
+      "configured",
+    service_closing: "Server shutting down"};
+  const MIDPOINT_RETRY_STOP = {
+    attempts_exhausted: "Attempts exhausted",
+    budget_exhausted: "Call budget exhausted",
+    non_retryable: "Non-retryable failure",
+    retry_after_too_long: "Requested wait too long",
+    shutdown: "Stopped during shutdown"};
+
+  /* Optional collapsed version identifiers from saved records only —
+     never invents or hardcodes prompt/message version constants. */
+  /* Recorded version identifiers inline in the generation details —
+     saved records only, no invented constants. The deterministic
+     reference version lives inside its own comparison dropdown. */
+  function renderMidpointVersionDetails(inner, midpoint, job,
+                                        aittaActive) {
+    const selected = aittaActive
+      ? midpoint.provider_draft_version
+      : midpoint.student_message_version;
+    if (selected) {
+      inner.appendChild(kv("Template version", selected));
+    }
+    const prompt = (job && job.execution
+                    && job.execution.metadata
+                    && job.execution.metadata.prompt_version)
+      || (job && job.prompt_version) || null;
+    if (prompt) inner.appendChild(kv("Prompt version", prompt));
+  }
+
+  function renderMidpointDraftJob(inner, job) {
     if (!job) return;
-    inner.appendChild(kv("Draft status", job.status));
-    if (job.reason) inner.appendChild(kv("Reason", job.reason));
-    if (job.prompt_version) {
-      inner.appendChild(kv("Prompt version", job.prompt_version));
-    }
-    if (midpoint.provider_draft_version) {
-      inner.appendChild(kv("Draft version",
-        midpoint.provider_draft_version));
-    }
+    inner.appendChild(kv("Generation status",
+      MIDPOINT_JOB_STATUS[job.status] || String(job.status)));
     const exec = job.execution || {};
-    if (exec.capture_file) {
-      inner.appendChild(kv("Capture", exec.capture_file));
-    }
-    if (exec.reused !== undefined && exec.reused !== null) {
+    const gmeta = exec.metadata || {};
+    const transport = gmeta.transport || {};
+    const model = exec.model_version || gmeta.model_version;
+    if (model) inner.appendChild(kv("Model", model));
+    if (exec.reused === true || exec.reused === false) {
       inner.appendChild(kv("Generation source",
-        exec.reused ? "reused capture" : "new provider call"));
+        exec.reused ? "Reused saved response" : "New provider call"));
     }
-    if (exec.automatic_retry
-        && exec.automatic_retry.attempts !== undefined) {
+    if (Number.isFinite(exec.original_call_latency_ms)) {
+      inner.appendChild(kv("Call duration",
+        `${(exec.original_call_latency_ms / 1000).toFixed(2)} ` +
+        "seconds"));
+    }
+    const retry = exec.automatic_retry;
+    if (retry && Number.isFinite(retry.attempts)) {
       inner.appendChild(kv("Attempts in this run",
-        exec.automatic_retry.attempts + " of "
-        + exec.automatic_retry.max_attempts));
+        `${retry.attempts} of ${retry.max_attempts || 3}`));
+      if (retry.stop_reason && retry.stop_reason !== "success") {
+        inner.appendChild(kv("Retry outcome",
+          MIDPOINT_RETRY_STOP[retry.stop_reason]
+          || String(retry.stop_reason)));
+      }
     }
+    const usage = gmeta.usage || {};
+    if (Number.isFinite(usage.total_tokens)) {
+      inner.appendChild(kv("Tokens used", usage.total_tokens));
+    }
+    const failure = (() => {
+      if (transport.failure_kind === "timeout") {
+        return "Provider request timed out";
+      }
+      const parts = [
+        FAILURE_KIND_LABELS.has(transport.failure_kind)
+          ? String(transport.failure_kind).replaceAll("_", " ")
+          : null,
+        Number.isFinite(transport.http_status)
+          ? `HTTP ${transport.http_status}` : null]
+        .filter(Boolean);
+      if (parts.length) return parts.join(", ");
+      if (gmeta.rejection_code
+          && gmeta.rejection_code !== "transport_failure") {
+        return "Response rejected by validation";
+      }
+      if (job.reason) {
+        return MIDPOINT_REASON_LABELS[job.reason]
+          || "Generation unavailable";
+      }
+      return null;
+    })();
+    if (failure) inner.appendChild(kv("Failure", failure));
   }
 
   function renderMidpointDraftMessage(inner, draft, job) {
@@ -3075,29 +3736,87 @@ function createDetailView(root, options = {}) {
   function renderFeedbackContent() {
     const pane = $("#tab-feedback");
     const active = document.activeElement;
+    const composing = active && pane.contains(active)
+      && active.classList.contains("edit-document")
+      && active.dataset.composing === "1";
+    if (composing) {
+      return;  // never tear down the editor mid-IME composition
+    }
     const focusedId = (active && pane.contains(active) && active.id
       && (active.id === `${prefix}release-reviewer`
           || active.classList.contains("edit-section")
-          || active.classList.contains("edit-content")))
+          || active.classList.contains("edit-content")
+          || active.classList.contains("edit-document")))
       ? active.id : null;
-    const caret = focusedId
+    const richCaret = (focusedId
+        && active.classList.contains("edit-document"))
+      ? documentSelectionOffsets(active) : null;
+    const caret = (focusedId && richCaret === null
+        && typeof active.setSelectionRange === "function")
       ? {start: active.selectionStart, end: active.selectionEnd}
       : null;
     pane.replaceChildren();
     renderMidpointCard(pane);
     if (!detail.read_only && detail.feedback_delivery) {
       renderReleaseCard(pane);
+    } else if (detail.read_only) {
+      const savedReview =
+        (detail.checkpoints.end || {}).student_review;
+      if (savedReview && savedReview.message) {
+        const saved = el("div", null,
+          "card-inner saved-end-feedback");
+        saved.appendChild(el("h4", "Saved end feedback"));
+        saved.appendChild(kv("Base feedback template",
+          feedbackTemplateLabel(savedReview.message,
+                                detail.feedback_variant)));
+        const shown = el("div", null, "feedback-preview");
+        renderStructuredFeedback(shown, {
+          sections: savedReview.message.sections
+            || (savedReview.message.text
+                ? [{text: savedReview.message.text}] : []),
+          review_examples: savedReview.review_examples});
+        saved.appendChild(shown);
+        const savedBaseline =
+          (detail.checkpoints.end || {}).baseline_student;
+        if (savedBaseline && savedBaseline.message) {
+          const compare = el("details", null,
+            "raw end-deterministic-comparison");
+          compare.dataset.disclosureKey =
+            "end-deterministic-comparison";
+          compare.appendChild(el("summary",
+            "Deterministic end feedback - comparison"));
+          const inner = el("div");
+          if (savedBaseline.message.template_version) {
+            inner.appendChild(kv("Deterministic template version",
+              savedBaseline.message.template_version));
+          }
+          renderStructuredFeedback(inner, {
+            sections: savedBaseline.message.sections
+              || (savedBaseline.message.text
+                  ? [{text: savedBaseline.message.text}] : []),
+            review_examples: savedBaseline.review_examples});
+          compare.appendChild(inner);
+          saved.appendChild(compare);
+        }
+        pane.appendChild(saved);
+      }
     }
     if (focusedId) {
-      const input = document.getElementById(focusedId);
-      if (input) {
+      requestAnimationFrame(() => {
+        const input = document.getElementById(focusedId);
+        if (!input) return;
         input.focus();
-        input.setSelectionRange(caret.start, caret.end);
-      }
+        if (richCaret !== null
+            && input.classList.contains("edit-document")) {
+          restoreDocumentSelection(input, richCaret);
+        } else if (caret) {
+          input.setSelectionRange(caret.start, caret.end);
+        }
+      });
     }
     const research = el("details", null, "raw");
     research.dataset.disclosureKey = "feedback-research";
-    research.appendChild(el("summary", "Research details"));
+    research.appendChild(el("summary", "End-point generation details"));
     const card = el("div", null, "card-inner");
     research.appendChild(card);
     const end = detail.checkpoints.end || {};
@@ -3108,44 +3827,56 @@ function createDetailView(root, options = {}) {
       card.appendChild(kv("Finished",
         detail.provider_job.finished_at || "—"));
     }
-    ["student"].forEach((audience) => {
-      const review = end[`${audience}_review`];
-      const baseline = end[`baseline_${audience}`];
-      if (!baseline && !review) return;
-      card.appendChild(el("h3",
-        "Shared feedback draft (baseline vs selected)"));
-      card.appendChild(renderSelectionDecision(
-        audience, review, baseline,
-        detail.provider_job.executions, detail.provider_job));
-      const wrap = el("div", null, "compare");
-      [baseline, review].forEach((r, i) => {
-        const col = el("div", null, "col");
-        col.appendChild(el("h4",
-          i === 0 ? "Deterministic baseline" : "Selected draft"));
-        if (r) {
-          const which = i === 0 ? "baseline" : "selected";
-          col.appendChild(el("p",
-            `candidate: ${r.selected_candidate_id}`, "mono small"));
-          (r.message.sections || []).forEach((s) =>
-            col.appendChild(el("p", s.text, "sec")));
-          if (!r.message.sections?.length) col.appendChild(el("p", r.message.text, "draft-text"));
-          col.appendChild(jsonDetails("Trace", r.trace,
-            `${audience}:${which}:trace`));
-          const cand = el("details", null, "raw");
-          cand.dataset.disclosureKey =
-            `${audience}:${which}:candidates`;
-          cand.appendChild(el("summary",
-            `All candidates (${(r.candidates || []).length})`));
-          (r.candidates || []).forEach((c) => {
-            cand.appendChild(el("pre",
-              JSON.stringify(c, null, 2), "mono"));
-          });
-          col.appendChild(cand);
+    const review = end.student_review;
+    if (review || end.baseline_student) {
+      const ev = el("div", null, "card-inner end-review-evidence");
+      ev.appendChild(el("h4", "Review evidence"));
+      const applied = ((review || end.baseline_student)
+        .candidates || []).find(
+        (c) => c.candidate_id
+               === (review || end.baseline_student)
+                  .selected_candidate_id);
+      const originals = (review && review.selected_candidates)
+        || (applied && applied.review_candidates)
+        || (applied ? [applied] : []);
+      originals.forEach((c) => {
+        ev.appendChild(el("h5", focusLabel(c, c.candidate_id)));
+        const focus = c.focus || null;
+        if (focus) {
+          ev.appendChild(kv("Observed",
+            `${focus.correct === undefined ? "—" : focus.correct} ` +
+            `correct, ${focus.incorrect} incorrect of ` +
+            `${focus.out_of} assessed`));
         }
-        wrap.appendChild(col);
+        const planning = c.planning || null;
+        if (planning && planning.error_pattern) {
+          ev.appendChild(kv("Error pattern",
+            ERROR_PATTERN_LABELS[planning.error_pattern]
+            || String(planning.error_pattern)));
+        }
+        if (planning && planning.assessment_coverage) {
+          ev.appendChild(kv("Assessment coverage",
+            COVERAGE_LABELS[planning.assessment_coverage]
+            || String(planning.assessment_coverage)));
+        }
       });
-      card.appendChild(wrap);
-    });
+      const selSource = ((((review || end.baseline_student) || {})
+        .trace) || {}).selection_source || null;
+      ev.appendChild(kv("Review topics chosen by",
+        selSource === "rules" || selSource === "rules_single_candidate"
+          ? "Application rules"
+          : (selSource === "injected_selector"
+             ? "Provider selection (recorded)"
+             : "Recorded selection (source unavailable)")));
+      ev.appendChild(el("p",
+        "Topic selection is separate from feedback wording."
+        + ((selSource === "rules"
+            || selSource === "rules_single_candidate")
+           ? " Review topics are selected by deterministic rules; " +
+             "KT estimates do not select review topics."
+           : ""), "meta"));
+      card.appendChild(ev);
+    }
     const recommendation = end.recommendation;
     if (recommendation) {
       const evidenceBox = el("details", null, "raw");
@@ -3192,14 +3923,76 @@ function createDetailView(root, options = {}) {
       evidenceBox.appendChild(inner);
       card.appendChild(evidenceBox);
     }
-    if (detail.provider_job.executions) {
-      card.appendChild(jsonDetails(
-        "Provider executions (provenance, metadata, latency)",
-        detail.provider_job.executions, "executions"));
+    const genExec = (((detail.provider_job.executions || {})
+      .student) || {}).generator || {};
+    const gmeta = genExec.metadata || {};
+    const gen = el("div", null, "card-inner end-generation-details");
+    gen.appendChild(el("h4", "Generation details"));
+    const aitta = aittaProvenance(review, genExec);
+    if (aitta) gen.appendChild(kv("Aitta provenance", aitta));
+    const tpl = ((detail.feedback_delivery || {}).preview) || {};
+    if (tpl.template_version) {
+      gen.appendChild(kv("Template version", tpl.template_version));
     }
+    if (gmeta.prompt_version) {
+      gen.appendChild(kv("Prompt version", gmeta.prompt_version));
+    }
+    const model = genExec.model_version || gmeta.model_version;
+    if (model) gen.appendChild(kv("Model", model));
+    if (gmeta.status || typeof genExec.capture_file === "string") {
+      gen.appendChild(kv("Capture",
+        captureProvenanceKind(genExec, gmeta.status === "failed")));
+    }
+    if (Number.isFinite(genExec.original_call_latency_ms)) {
+      gen.appendChild(kv("Call duration",
+        `${genExec.original_call_latency_ms} ms`));
+    }
+    const retry = genExec.automatic_retry;
+    if (retry && Number.isFinite(retry.attempts)) {
+      gen.appendChild(kv("Attempts in this run",
+        `${retry.attempts} of ${retry.max_attempts || 3} ` +
+        `(${retry.stop_reason || "recorded"})`));
+    }
+    const usage = gmeta.usage || {};
+    if (Number.isFinite(usage.total_tokens)) {
+      gen.appendChild(kv("Tokens used", usage.total_tokens));
+    }
+    if (gmeta.status === "failed") {
+      const transport = gmeta.transport || {};
+      const detailText = [
+        FAILURE_KIND_LABELS.has(transport.failure_kind)
+          ? transport.failure_kind : null,
+        FAILURE_STAGE_LABELS.has(gmeta.failure_stage)
+          ? gmeta.failure_stage : null]
+        .filter(Boolean).join(", ");
+      gen.appendChild(kv("Failure",
+        detailText || "provider call failed"));
+    }
+    if (review && (review.trace || {}).generation_context_version) {
+      gen.appendChild(kv("Aitta input",
+        "answered assessment, descriptive concept graph, checked " +
+        "review cards and practice context; experimental KT " +
+        "estimates may be included when available."));
+      gen.appendChild(el("p",
+        "Deterministic feedback is a reference, not a hallucination " +
+        "detector. Check claims against the recorded evidence.",
+        "meta"));
+    }
+    if (gen.childElementCount > 1) card.appendChild(gen);
     const rejected = rejectedDraftDetails(detail.provider_job);
     if (rejected) card.appendChild(rejected);
-    pane.appendChild(research);
+    // With a live release card, generation details belong with the
+    // preview — directly after the deterministic comparison, before
+    // the edit and approval controls. Otherwise append at the end.
+    const releaseCard = pane.querySelector(".release-card");
+    if (releaseCard && releaseCard.querySelector(".feedback-preview")) {
+      const anchor = releaseCard.querySelector(
+        ".end-deterministic-comparison")
+        || releaseCard.querySelector(".feedback-preview");
+      anchor.after(research);
+    } else {
+      pane.appendChild(research);
+    }
   }
 
   /* ---------- review tab with per-session draft state ---------- */
