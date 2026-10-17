@@ -400,6 +400,13 @@ details.raw.ui-disclosure[data-disclosure-key="feedback-research"] > summary { f
 .replay-toolbar > .control-field { flex: 1 1 20rem; }
 .replay-toolbar button { font-size: .8rem; }
 .run-history { background: #fff; border: 1px solid var(--line); border-radius: 9px; padding: .8rem 1rem; margin-bottom: 1rem; }
+@media (min-width: 821px) {
+  .scenario-browser { position: sticky; top: 1rem; display: flex; flex-direction: column;
+                      max-height: calc(100vh - 2rem); max-height: calc(100dvh - 2rem); }
+  .scenario-browser > .meta { flex: 0 0 auto; }
+  .scenario-browser > .scenario-list { min-height: 0; max-height: none; flex: 0 1 auto; overflow: auto;
+    grid-auto-rows: max-content; align-content: start; }
+}
 .run-history summary, .run-record > summary { cursor: pointer; font-size: .8rem; font-weight: 600; padding: .4rem 0; }
 .run-record { border-top: 1px solid var(--line); margin-top: .6rem; padding: .5rem 0; }
 .run-cases { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: .5rem; max-height: 20rem; overflow: auto; }

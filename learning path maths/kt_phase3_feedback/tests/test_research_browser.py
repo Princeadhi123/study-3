@@ -264,6 +264,107 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
+    def test_scenario_sidebar_sticky_desktop(self):
+        bank = load_research_bank("warm")[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            source, report = write_capture(self.root / "warm_capture")
+        self.service.close(wait=True)
+        self.service = DemoService(
+            root=self.root / "warm_data", bank=make_bank(),
+            taxonomy=make_taxonomy(make_bank()),
+            diagnostics=fake_diagnostics(bank),
+            replay_report=report, replay_source=source,
+            replay_bank_mode="warm", review_mode="legacy_single")
+        self.addCleanup(self.service.close, wait=True)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        b.viewport(1440, 900)
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 54")
+        sidebar = "document.querySelector('.scenario-browser')"
+        slist = "document.querySelector('.scenario-list')"
+        # Long list overflows its own container inside a viewport-capped
+        # sticky sidebar.
+        self.assertTrue(b.js(f"{slist}.scrollHeight > {slist}.clientHeight"))
+        self.assertEqual(b.js(
+            f"getComputedStyle({sidebar}).position"), "sticky")
+        self.assertLessEqual(b.js(
+            f"{sidebar}.getBoundingClientRect().height"), 868)
+        # Select a scenario and open its feedback tab; the sidebar stays
+        # pinned while the long detail pane scrolls underneath.
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#scenario-ws-tabs "
+             "[data-tab=feedback]').click()")
+        pane = "document.querySelector('#scenario-tab-feedback')"
+        b.wait(f"{pane}.childElementCount > 0")
+        b.js("window.scrollTo(0, 900)")
+        self.assertGreater(b.js("window.scrollY"), 0)
+        rect = b.js(f"({{t: {sidebar}.getBoundingClientRect().top,"
+                    f" b: {sidebar}.getBoundingClientRect().bottom}})")
+        self.assertAlmostEqual(rect["t"], 16, delta=1)
+        self.assertLessEqual(rect["b"], 884)
+        self.assertLessEqual(b.js(
+            f"{slist}.getBoundingClientRect().bottom"), 884)
+        # Scrolling the list itself does not move the document.
+        scroll_y = b.js("window.scrollY")
+        b.js(f"{slist}.scrollTop = {slist}.scrollHeight")
+        self.assertEqual(b.js("window.scrollY"), scroll_y)
+        self.assertGreater(b.js(f"{slist}.scrollTop"), 0)
+        # Selecting a row near the bottom rebuilds the list but keeps
+        # the scroll position and the active row in view.
+        rows = b.js(f"{slist}.children.length")
+        b.js(f"{slist}.children[{rows - 1}].click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        self.assertGreater(b.js(f"{slist}.scrollTop"), 0)
+        active = ("[...document.querySelectorAll('.scenario-row')]"
+                  ".find((n) => n.classList.contains('active'))")
+        self.assertTrue(b.js(f"Boolean({active})"))
+        self.assertTrue(b.js(
+            f"{active}.getBoundingClientRect().top >= "
+            f"{slist}.getBoundingClientRect().top - 1"))
+        self.assertTrue(b.js(
+            f"{active}.getBoundingClientRect().bottom <= "
+            f"{slist}.getBoundingClientRect().bottom + 1"))
+        # Rows keep their intrinsic card height: no compressed content
+        # clipped inside a row and no overlap between neighbours.
+        self.assertEqual(b.js(
+            f"[...{slist}.querySelectorAll('.scenario-row')]"
+            ".filter((r) => r.scrollHeight > r.clientHeight + 1)"
+            ".length"), 0)
+        self.assertEqual(b.js(
+            "(() => { const rows = "
+            "[...document.querySelectorAll('.scenario-row')];"
+            "return rows.slice(1).filter((row, i) =>"
+            " row.getBoundingClientRect().top <"
+            " rows[i].getBoundingClientRect().bottom - 1).length;})()"),
+            0)
+        b.js(f"{pane}.scrollIntoView({{block:'start'}})")
+        b.screenshot("scenario-sidebar-sticky-desktop.png")
+        # Still contained at a shorter viewport.
+        b.viewport(1440, 650)
+        b.js(f"window.scrollTo(0, {sidebar}.offsetTop + 400)")
+        self.assertAlmostEqual(b.js(
+            f"{sidebar}.getBoundingClientRect().top"), 16, delta=1)
+        self.assertLessEqual(b.js(
+            f"{sidebar}.getBoundingClientRect().bottom"), 634)
+        self.assertLessEqual(b.js(
+            f"{slist}.getBoundingClientRect().bottom"), 634)
+        # Mobile: static sidebar, original capped list, no page overflow.
+        b.viewport(390, 844)
+        self.assertEqual(b.js(
+            f"getComputedStyle({sidebar}).position"), "static")
+        self.assertLessEqual(b.js(
+            f"{slist}.getBoundingClientRect().height"), 320)
+        self.assert_no_overflow()
+        b.screenshot("scenario-sidebar-mobile.png")
+        b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
     def test_selected_filtered_all_replays_and_shared_detail_views(self):
         b = self.browser
         self.navigate("/teacher")

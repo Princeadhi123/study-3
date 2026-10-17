@@ -267,6 +267,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       filteredIds = rows.map((row) => row.id);
       replayFiltered.disabled = !rows.length;
       count.textContent = `${rows.length} of ${library.scenarios.length} scenarios`;
+      const scrollTop = list.scrollTop;
       list.replaceChildren();
       if (!rows.length) list.append(notice("No cases match. Try a broader search or clear the filters."));
       rows.forEach((row) => {
@@ -280,6 +281,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
           el("span", row.selection_differences ? `${row.selection_differences} end selection(s) differ` : "End selections match baseline", "case-tag"));
         list.append(item);
       });
+      list.scrollTop = scrollTop;
     }
     [search, group, difference, order].forEach((node) => node.addEventListener("input", renderCases));
     renderCases();
