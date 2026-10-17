@@ -546,6 +546,270 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(1440, 1100)
         self.assertEqual(b.errors, [])
 
+    def test_answers_scores_modules_and_filters(self):
+        b = self.browser
+        ev = "document.querySelector('#tab-evidence')"
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        # A live 'alternating' simulation produces a mixed-correctness
+        # evidence payload; the library scenarios are all- or
+        # none-correct by construction.
+        b.js("document.querySelector('#sim-profile').value = 'alternating';"
+             " document.querySelector('#sim-form').requestSubmit()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=evidence]').click()")
+        b.wait(f"{ev}.querySelectorAll('.qrow').length === 40")
+        mixed = b.js("fetch('/api/teacher/sessions/'"
+                     " + document.querySelector('#ws-export').href"
+                     ".match(/sessions\\/([^/]+)/)[1]).then(r => r.json())")
+        # Observed totals are three stat cards taken from the recorded total.
+        total = mixed["checkpoints"]["end"]["evidence"]["total"]
+        stats = b.js(f"[...{ev}.querySelectorAll('.ui-stats .ui-stat')]"
+                     ".map(n => n.textContent)")
+        self.assertEqual(len(stats), 3)
+        self.assertIn(f"Answered{total['out_of']}", stats)
+        self.assertIn(f"Correct{total['correct']}", stats)
+        self.assertIn(f"Incorrect{total['incorrect']}", stats)
+        # Topic results are a separate section with an accessible table.
+        topic = (f"[...{ev}.querySelectorAll('.ui-section')]"
+                 ".find(s => s.textContent.includes('Topic results'))")
+        self.assertTrue(b.js(f"Boolean({topic})"))
+        self.assertTrue(b.js(f"Boolean({topic}.querySelector('thead'))"))
+        self.assertTrue(b.js(f"Boolean({topic}.querySelector('tbody'))"))
+        self.assertTrue(b.js(f"[...{topic}.querySelectorAll('thead th')]"
+                             ".every(th => th.scope === 'col')"))
+        self.assertEqual(b.js(f"{topic}.querySelectorAll('tbody tr').length"),
+                         len(mixed["checkpoints"]["end"]["evidence"]["subtopics"]))
+        # Each qrow has a structured summary, labelled answer blocks and a
+        # keyed nested meta disclosure; the totals/table stay unfiltered.
+        first = mixed["question_responses"][0]
+        row0 = f"{ev}.querySelector('.qrow')"
+        self.assertEqual(b.js(f"{row0}.dataset.disclosureKey"),
+                         f"q:{first['question_id']}")
+        self.assertEqual(b.js(f"{row0}.querySelector('.qrow-num').textContent"),
+                         f"#{first['position']}")
+        badge = ("Correct" if first["correct"] else "Incorrect")
+        self.assertEqual(
+            b.js(f"{row0}.querySelector('.qrow-badge').textContent"), badge)
+        self.assertTrue(b.js(
+            f"{row0}.querySelector('.qrow-badge').classList.contains("
+            f"'{'correct' if first['correct'] else 'incorrect'}')"))
+        self.assertTrue(b.js(f"Boolean({row0}.querySelector('.qrow-skill'))"))
+        self.assertTrue(b.js(f"Boolean({row0}.querySelector('.qrow-subtopic'))"))
+        b.js(f"{row0}.querySelector('summary').click()")
+        self.assertTrue(b.js(f"{row0}.open"))
+        self.assertEqual(
+            b.js(f"[...{row0}.querySelectorAll('.qrow-answer-label')]"
+                 ".map(n => n.textContent)"),
+            ["Student answer", "Correct answer"])
+        self.assertIn(
+            b.js("englishOptionText("
+                 f"{json.dumps(first['options'][first['selected_index']])})"),
+            b.js(f"{row0}.querySelectorAll('.qrow-answer-value')[0].textContent"))
+        self.assertIn(
+            b.js("englishOptionText("
+                 f"{json.dumps(first['options'][first['answer_index']])})"),
+            b.js(f"{row0}.querySelectorAll('.qrow-answer-value')[1].textContent"))
+        meta_key = f"q:{first['question_id']}:meta"
+        self.assertTrue(b.js(
+            f"Boolean({row0}.querySelector("
+            f"'details[data-disclosure-key=\"{meta_key}\"]'))"))
+        self.assertIn("Question reference",
+                      b.js(f"{row0}.querySelector('.qrow-meta').textContent"))
+        # Filter controls: outcome buttons are pressed-state toggles, the
+        # skill select is labelled, and the status line is live.
+        btns = (f"[...{ev}.querySelectorAll('.evidence-filter-btn')]")
+        self.assertEqual(b.js(f"{btns}.map(n => n.textContent)"),
+                         ["All", "Incorrect", "Correct"])
+        self.assertEqual(b.js(f"{btns}.map(n => n.getAttribute('aria-pressed'))"),
+                         ["true", "false", "false"])
+        self.assertTrue(b.js(
+            f"Boolean({ev}.querySelector('.evidence-skill-filter select'))"))
+        self.assertEqual(b.js(
+            f"{ev}.querySelector('.evidence-filter-status')"
+            ".getAttribute('aria-live')"), "polite")
+        self.assertEqual(b.js(
+            f"{ev}.querySelector('.evidence-filter-status').textContent"),
+            "Showing 40 of 40 questions")
+        # Outcome filter hides rows in place; totals and topic rows are
+        # untouched and the visible count reflects only shown rows.
+        b.js(f"{btns}.find(n => n.dataset.outcome === 'incorrect').click()")
+        incorrect = total["incorrect"]
+        self.assertEqual(b.js(
+            f"{ev}.querySelector('.evidence-filter-status').textContent"),
+            f"Showing {incorrect} of 40 questions")
+        self.assertEqual(b.js(
+            f"[...{ev}.querySelectorAll('.qrow')]"
+            ".filter(n => !n.hidden).length"), incorrect)
+        self.assertTrue(b.js(
+            f"[...{ev}.querySelectorAll('.qrow')].filter(n => !n.hidden)"
+            ".every(n => n.querySelector('.qrow-badge').textContent === 'Incorrect')"))
+        self.assertEqual(b.js(f"{topic}.querySelectorAll('tbody tr').length"),
+                         len(mixed["checkpoints"]["end"]["evidence"]["subtopics"]))
+        self.assertIn(f"Correct{total['correct']}",
+                      b.js(f"[...{ev}.querySelectorAll('.ui-stat')]"
+                           ".map(n => n.textContent)"))
+        # The opened row survives being hidden and shown again.
+        b.js(f"{btns}.find(n => n.dataset.outcome === 'all').click()")
+        self.assertTrue(b.js(f"{row0}.open"))
+        # Intersecting outcome + skill narrows further; an impossible
+        # combination shows the explicit empty message.
+        skills = sorted({str(r["skill_id"]) for r in mixed["question_responses"]})
+        sel = f"{ev}.querySelector('.evidence-skill-filter select')"
+        self.assertEqual(b.js(f"[...{sel}.options].map(o => o.value)"),
+                         [""] + skills)
+        b.js(f"{sel}.value = {json.dumps(skills[0])};"
+             f" {sel}.dispatchEvent(new Event('change'))")
+        b.js(f"{btns}.find(n => n.dataset.outcome === 'incorrect').click()")
+        expected = sum(1 for r in mixed["question_responses"]
+                       if not r["correct"] and str(r["skill_id"]) == skills[0])
+        self.assertEqual(b.js(
+            f"{ev}.querySelector('.evidence-filter-status').textContent"),
+            f"Showing {expected} of 40 questions")
+        self.assertEqual(b.js(
+            f"[...{ev}.querySelectorAll('.qrow')]"
+            ".filter(n => !n.hidden).length"), expected)
+        empty_combo = next(
+            ((outcome, skill)
+             for outcome in ("correct", "incorrect") for skill in skills
+             if not any((r["correct"] == (outcome == "correct"))
+                        and str(r["skill_id"]) == skill
+                        for r in mixed["question_responses"])),
+            None)
+        if empty_combo:
+            outcome, skill = empty_combo
+            b.js(f"{sel}.value = {json.dumps(skill)};"
+                 f" {sel}.dispatchEvent(new Event('change'))")
+            b.js(f"{btns}.find(n => n.dataset.outcome === '{outcome}').click()")
+            self.assertEqual(b.js(
+                f"{ev}.querySelector('.evidence-filter-status').textContent"),
+                "Showing 0 of 40 questions")
+            self.assertFalse(b.js(
+                f"{ev}.querySelector('.evidence-filter-empty').hidden"))
+            self.assertIn("No questions match",
+                          b.js(f"{ev}.querySelector('.evidence-filter-empty')"
+                               ".textContent"))
+        # A changed-detail rerender preserves a non-default filter and
+        # the open question disclosure.
+        b.js(f"{sel}.value = {json.dumps(skills[0])};"
+             f" {sel}.dispatchEvent(new Event('change'))")
+        b.js(f"{btns}.find(n => n.dataset.outcome === 'incorrect').click()")
+        self.assertEqual(b.js(
+            f"{ev}.querySelector('.evidence-filter-status').textContent"),
+            f"Showing {expected} of 40 questions")
+        original_detail = self.service.teacher_session
+        def marked(session_id):
+            view = copy.deepcopy(original_detail(session_id))
+            view["description"] = "Evidence refresh marker"
+            return view
+        self.service.teacher_session = marked
+        try:
+            b.wait("document.querySelector('#tab-overview')"
+                   ".textContent.includes('Evidence refresh marker')")
+            self.assertTrue(b.js(f"{row0}.open"))
+            self.assertTrue(b.js(
+                f"Boolean({row0}.querySelector('details[data-disclosure-key"
+                f"=\"{meta_key}\"]'))"))
+            self.assertEqual(b.js(f"{sel}.value"), skills[0])
+            self.assertEqual(b.js(
+                f"{btns}.map(n => n.getAttribute('aria-pressed'))"),
+                ["false", "true", "false"])
+            self.assertEqual(b.js(
+                f"{ev}.querySelector('.evidence-filter-status').textContent"),
+                f"Showing {expected} of 40 questions")
+        finally:
+            self.service.teacher_session = original_detail
+        b.wait("!document.querySelector('#tab-overview')"
+               ".textContent.includes('Evidence refresh marker')")
+        # Filter and disclosure state are isolated per selected session.
+        b.js(f"{sel}.value = ''; {sel}.dispatchEvent(new Event('change'))")
+        b.js("document.querySelector('#sim-seed').value = '7';"
+             " document.querySelector('#sim-form').requestSubmit()")
+        b.wait(f"{btns}.map(n => n.getAttribute('aria-pressed'))"
+               ".join() === 'true,false,false'"
+               f" && !{ev}.querySelector('.qrow').open"
+               f" && {ev}.querySelectorAll('.qrow').length === 40")
+        b.js("[...document.querySelectorAll('.session-row')]"
+             ".find(n => !n.classList.contains('active')).click()")
+        b.wait(f"{ev}.querySelector('.evidence-filter-status')"
+               f".textContent === 'Showing {incorrect} of 40 questions'"
+               f" && {row0}.open")
+        # The shared scenario detail view gets the same modules, and an
+        # impossible filter combination shows the explicit empty message.
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        sev = "document.querySelector('#scenario-tab-evidence')"
+        b.js("document.querySelector('#scenario-search').value = "
+             "'Every answer incorrect'; document.querySelector("
+             "'#scenario-search').dispatchEvent(new Event('input'))")
+        b.wait("document.querySelectorAll('.scenario-row').length === 1")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait(f"{sev}.querySelectorAll('.qrow').length === 40")
+        sbtns = (f"[...{sev}.querySelectorAll('.evidence-filter-btn')]")
+        b.js(f"{sbtns}.find(n => n.dataset.outcome === 'correct').click()")
+        self.assertEqual(b.js(
+            f"{sev}.querySelector('.evidence-filter-status').textContent"),
+            "Showing 0 of 40 questions")
+        self.assertFalse(b.js(
+            f"{sev}.querySelector('.evidence-filter-empty').hidden"))
+        self.assertIn("No questions match",
+                      b.js(f"{sev}.querySelector('.evidence-filter-empty')"
+                           ".textContent"))
+        # A partial detail renders the waiting text and notice, no cards.
+        b.js("const host = document.querySelector('#ws-detail')"
+             ".cloneNode(true); host.id = 'fixture-ws';"
+             " host.querySelectorAll('[id]').forEach(n => n.id = 'fx-' + n.id);"
+             " host.hidden = false; document.body.appendChild(host);"
+             " window.__fxView = createDetailView(host, {prefix: 'fx-'});"
+             " window.__fxDetail = null;")
+        partial = copy.deepcopy(mixed)
+        partial["session_id"] = "fixture-partial"
+        partial["checkpoints"]["end"]["evidence"] = None
+        partial["question_responses"] = []
+        partial["response_notice"] = "Individual answers cannot be shown."
+        b.js(f"window.__fxDetail = {json.dumps(partial)};"
+             " window.__fxView.update(window.__fxDetail)")
+        fx = "document.querySelector('#fx-tab-evidence')"
+        self.assertIn("End evidence appears once all 40 answers are in.",
+                      b.js(f"{fx}.textContent"))
+        self.assertIn("Individual answers cannot be shown.",
+                      b.js(f"{fx}.textContent"))
+        self.assertIsNone(b.js(f"{fx}.querySelector('.ui-stat')"))
+        self.assertIsNone(b.js(f"{fx}.querySelector('.qrow')"))
+        # No horizontal overflow at desktop or 390px; filter UI lives only
+        # inside the teacher evidence tab.
+        b.js("document.querySelector('#fixture-ws').remove()")
+        self.assertIsNone(b.js("document.querySelector('#start-panel .qrow')"))
+        # Return to the live session's Answers & scores tab with filters
+        # reset so the capture shows the changed pane itself.
+        b.js("document.querySelector('[data-workspace=live]').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('#ws-tabs [data-tab=evidence]').click()")
+        b.wait(f"!{ev}.hidden")
+        b.js(f"{btns}.find(n => n.dataset.outcome === 'all').click()")
+        b.js(f"{sel}.value = ''; {sel}.dispatchEvent(new Event('change'))")
+        b.wait(f"{ev}.querySelector('.evidence-filter-status')"
+               ".textContent === 'Showing 40 of 40 questions'")
+        b.js(f"{ev}.scrollIntoView({{block:'start'}})")
+        self.assert_no_overflow()
+        b.screenshot("answers-scores-desktop.png")
+        # The expanded record keeps its two answer blocks inside the pane.
+        b.js(f"{row0}.open = true")
+        b.js(f"{row0}.scrollIntoView({{block:'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("answers-scores-expanded-desktop.png")
+        b.viewport(390, 844)
+        b.js(f"{ev}.scrollIntoView({{block:'start'}})")
+        self.assert_no_overflow()
+        b.screenshot("answers-scores-mobile.png")
+        b.js(f"{row0}.scrollIntoView({{block:'center'}})")
+        self.assert_no_overflow()
+        b.screenshot("answers-scores-expanded-mobile.png")
+        b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
     def test_workspace_and_assessment_journey(self):
         b = self.browser
         self.navigate("/teacher")
@@ -3191,21 +3455,35 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(f"{graph}.includes('pending formal educator review')"))
         self.assertTrue(b.js(f"{graph}.includes('observed correct')"))
         for topic in end["graph"]["topics"]:
-            self.assertTrue(b.js(
-                f"{graph}.includes(englishSkillName({json.dumps(topic['skill_name'])})"
-                f" + ' — ' + {topic['correct']} + '/' + {topic['out_of']}"
-                " + ' observed correct')"))
+            head = (f"[...document.querySelectorAll('#tab-graph "
+                    ".topic-head')].find(n => n.querySelector"
+                    "('.topic-name').textContent === "
+                    f"englishSkillName({json.dumps(topic['skill_name'])}))")
+            self.assertTrue(b.js(f"Boolean({head})"))
+            expected_count = ("Not yet assessed" if topic["out_of"] == 0
+                              else f"{topic['correct']}/{topic['out_of']} "
+                                   "observed correct")
+            self.assertEqual(b.js(
+                f"{head}.querySelector('.topic-count').textContent"),
+                expected_count)
         # Focus rows show the observed counts plus exactly one Review
         # focus badge — the old plain-text suffix is gone for good.
         for leaf in [s for t in end["graph"]["topics"] for s in t["subtopics"]
                      if s["subtopic_id"] in focus_subs]:
-            line = (f"{leaf['subtopic_name']}: {leaf['correct']} correct, "
-                    f"{leaf['incorrect']} incorrect of {leaf['out_of']}")
             li = ("[...document.querySelectorAll('#tab-graph "
-                  ".skill-topics li')].find(n => n.textContent.includes("
-                  f"{json.dumps(leaf['subtopic_name'] + ':')}))")
-            self.assertTrue(b.js(
-                f"{li}.textContent.includes({json.dumps(line)})"))
+                  ".skill-topics li')].find(n => n.querySelector("
+                  "'.subtopic-name').textContent === "
+                  f"{json.dumps(leaf['subtopic_name'])})")
+            self.assertTrue(b.js(f"Boolean({li})"))
+            if leaf["out_of"] == 0:
+                expected_items = ["Not yet assessed"]
+            else:
+                expected_items = [f"{leaf['correct']} correct",
+                                  f"{leaf['incorrect']} incorrect",
+                                  f"of {leaf['out_of']}"]
+            self.assertEqual(b.js(
+                f"[...{li}.querySelectorAll('.topic-count-item')]"
+                ".map(n => n.textContent)"), expected_items)
             self.assertFalse(b.js(
                 f"{li}.textContent.includes('selected review focus')"))
             self.assertEqual(b.js(
@@ -3217,8 +3495,9 @@ class ResearchBrowserTests(unittest.TestCase):
                          for s in t["subtopics"]
                          if s["subtopic_id"] not in focus_subs)
         nli = ("[...document.querySelectorAll('#tab-graph "
-               ".skill-topics li')].find(n => n.textContent.includes("
-               f"{json.dumps(non_focus['subtopic_name'] + ':')}))")
+               ".skill-topics li')].find(n => n.querySelector("
+               "'.subtopic-name').textContent === "
+               f"{json.dumps(non_focus['subtopic_name'])})")
         self.assertEqual(b.js(
             f"{nli}.querySelectorAll('.skill-badge').length"), 0)
         self.assertTrue(b.js(
@@ -3300,6 +3579,25 @@ class ResearchBrowserTests(unittest.TestCase):
                 f"{other_sel}.querySelector('summary').textContent"
                 f".includes({json.dumps(fragment)})"))
 
+        # Summaries are structured: number, topic path and subtopic are
+        # separate spans, with explicit result pills.
+        self.assertEqual(b.js(
+            f"{ex_sel}.querySelector('summary .task-num').textContent"),
+            f"#{ex_row['position']}")
+        self.assertEqual(b.js(
+            f"{ex_sel}.querySelector('summary .task-topic').textContent"),
+            b.js(f"englishSkillName({json.dumps(ex_ctx['skill_name'])})"))
+        self.assertEqual(b.js(
+            f"{ex_sel}.querySelector('summary .task-subtopic').textContent"),
+            ex_row["subtopic_name"])
+        result_pill = ("Incorrect" if not ex_row["correct"] else "Correct")
+        self.assertEqual(b.js(
+            f"{ex_sel}.querySelector('summary .skill-task-result')"
+            ".textContent"), result_pill)
+        self.assertTrue(b.js(
+            f"{ex_sel}.querySelector('summary .skill-task-result')"
+            f".classList.contains('is-{result_pill.lower()}')"))
+
         b.js("document.querySelector('#tab-graph "
              "details[data-disclosure-key=skill-map-assessed]').open = true")
         b.js(f"{ex_sel}.open = true")
@@ -3310,6 +3608,24 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(
             "document.querySelector('#tab-graph "
             "details[data-disclosure-key=skill-map-evidence-use]').open"))
+        # The expanded task separates the recorded answer into labelled
+        # blocks ahead of the descriptive context and feedback role.
+        self.assertEqual(b.js(
+            f"[...{ex_sel}.querySelectorAll('.qrow-answer-label')]"
+            ".map(n => n.textContent)"),
+            ["Student answer", "Correct answer"])
+        self.assertIn(
+            b.js("englishOptionText("
+                 f"{json.dumps(ex_row['options'][ex_row['selected_index']])})"),
+            b.js(f"{ex_sel}.querySelectorAll('.qrow-answer-value')"
+                 "[0].textContent"))
+        self.assertIn(
+            b.js("englishOptionText("
+                 f"{json.dumps(ex_row['options'][ex_row['answer_index']])})"),
+            b.js(f"{ex_sel}.querySelectorAll('.qrow-answer-value')"
+                 "[1].textContent"))
+        self.assertTrue(b.js(
+            f"{ex_sel}.textContent.includes('Feedback role')"))
         b.js(f"{ex_sel}.scrollIntoView({{block: 'center'}})")
         self.assert_no_overflow()
         b.screenshot("skill-map-live-desktop.png")
@@ -3671,7 +3987,7 @@ class ResearchBrowserTests(unittest.TestCase):
             number = expected_numbers[qid]
             self.assertEqual(int(c["num"]), number)
             self.assertTrue(
-                c["label"].startswith(f"Practice draft {number} · "))
+                c["label"].startswith(f"Practice draft {number}"))
             self.assertIn(
                 practice_by_qid[qid]["concept_label"], c["label"])
         groups = b.js(
@@ -3738,15 +4054,34 @@ class ResearchBrowserTests(unittest.TestCase):
             f"{summary_text(st)}.includes('Selected practice')"))
         self.assertFalse(b.js(
             f"{summary_text(ot)}.includes('Selected practice')"))
+        b.js(f"{ch}.open = true")
         b.js(f"{ch}.scrollIntoView({{block: 'center'}})")
         self.assert_no_overflow()
         b.screenshot("skill-map-practice-selected-desktop.png")
         b.viewport(390, 844)
-        b.js(f"{ch}.open = true")
         b.js(f"{ch}.scrollIntoView({{block: 'center'}})")
         self.assert_no_overflow()
         self.assertTrue(b.js(
             f"{summary_text(ch)}.includes('Selected practice')"))
+        # The expanded practice draft shows structured summary spans and
+        # descriptive/selection context only — never a learner answer,
+        # correctness, or a fake result.
+        self.assertTrue(b.js(
+            f"{ch}.querySelector('summary .task-num').textContent"
+            ".startsWith('Practice draft')"))
+        self.assertTrue(b.js(
+            f"Boolean({ch}.querySelector('summary .task-topic'))"))
+        self.assertTrue(b.js(
+            f"Boolean({ch}.querySelector('summary .task-subtopic'))"))
+        self.assertIsNone(b.js(f"{ch}.querySelector('.qrow-answers')"))
+        self.assertIsNone(b.js(f"{ch}.querySelector('.qrow-answer')"))
+        for fragment in ("Student answer", "Correct answer",
+                         "Incorrect", "Not answered"):
+            self.assertFalse(b.js(
+                f"{ch}.textContent.includes({json.dumps(fragment)})"))
+        self.assertTrue(b.js(f"{ch}.textContent.includes('Task requirement')"))
+        self.assertTrue(b.js(f"{ch}.textContent.includes('Selection')"))
+        self.assertTrue(b.js(f"{ch}.classList.contains('is-selected')"))
         b.screenshot("skill-map-practice-selected-mobile.png")
         b.viewport(1440, 1100)
 
@@ -3829,10 +4164,10 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(
             f"{summary_text(ch)}.includes('Not selected')"))
         # Bank-order numbering is stable across selection states.
-        self.assertTrue(b.js(
-            f"{ch}.querySelector('.skill-task-label').textContent"
-            ".startsWith('Practice draft "
-            f"{expected_numbers[chosen['question_id']]} ')"))
+        self.assertEqual(b.js(
+            f"{ch}.querySelector('.skill-task-label .task-num')"
+            ".textContent"),
+            f"Practice draft {expected_numbers[chosen['question_id']]}")
 
         # Terminal non-selection states stay honest.
         def terminal(status):

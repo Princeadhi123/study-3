@@ -46,5 +46,18 @@ const DemoUI = Object.freeze((() => {
     return box;
   }
 
-  return {heading, section, disclosure, stat};
+  /* Structured task-card summary: number label plus the topic and
+     subtopic path as separate spans; status badges are appended by the
+     caller after this node. */
+  function taskSummary(label, {topic = "", subtopic = ""} = {}) {
+    const wrapper = node("span", null, "skill-task-label");
+    wrapper.appendChild(node("span", label, "task-num"));
+    const path = node("span", null, "task-path");
+    if (topic) path.appendChild(node("span", topic, "task-topic"));
+    if (subtopic) path.appendChild(node("span", subtopic, "task-subtopic"));
+    wrapper.appendChild(path);
+    return wrapper;
+  }
+
+  return {heading, section, disclosure, stat, taskSummary};
 })());

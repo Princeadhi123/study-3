@@ -2266,6 +2266,9 @@ function createDetailView(root, options = {}) {
   // pane's last rendered scope so a session/checkpoint switch never
   // transfers another context's expand/collapse choices.
   const disclosureScopes = new Map();
+  // selected session -> {outcome, skill} evidence filters. Scoped per
+  // detail instance so the live and scenario views never share state.
+  const evidenceFilters = new Map();
   // `${selected}|${researchCp}` -> last inspected chart index, and
   // pane scope -> last chart scroll position; both keep a poll
   // re-render from disturbing what the teacher is looking at.
@@ -2487,58 +2490,210 @@ function createDetailView(root, options = {}) {
       "Recorded answers and topic results — observed performance, " +
       "not mastery.", {eyebrow: "Recorded evidence"}));
     const evidence = (detail.checkpoints.end || {}).evidence;
-    if (evidence) {
-      const totals = DemoUI.section("Observed results",
-        "Recorded correct and incorrect answers, grouped by subtopic.");
-      totals.appendChild(el("p",
-        `Observed totals: ${evidence.total.correct} correct / ` +
-        `${evidence.total.incorrect} incorrect of ${evidence.total.out_of}`,
-        "score"));
-      const table = el("table", null, "grid");
-      table.appendChild(el("caption", "Skill and subtopic observed counts"));
-      const head = el("tr");
-      ["Skill", "Subtopic", "Correct", "Incorrect", "Out of"]
-        .forEach((h) => head.appendChild(el("th", h)));
-      table.appendChild(head);
-      evidence.subtopics.forEach((row) => {
-        const tr = el("tr");
-        [englishSkillName(row.skill_name), row.subtopic_name,
-         row.correct, row.incorrect, row.out_of]
-          .forEach((v) => tr.appendChild(el("td", String(v))));
-        table.appendChild(tr);
-      });
-      totals.appendChild(table);
-      card.appendChild(totals);
-    } else {
-      card.appendChild(el("p",
-        "End evidence appears once all 40 answers are in."));
-    }
-    if (detail.response_notice) card.appendChild(el("p", detail.response_notice, "meta"));
-    if (detail.question_responses.length) {
-      const record = DemoUI.section("Per-question record (private)",
-        "Recorded answer for each question — private to this workspace.");
-      detail.question_responses.forEach((row) => {
-        const d = el("details", null, "qrow");
-        d.dataset.disclosureKey = `q:${row.question_id}`;
-        d.appendChild(el("summary",
-          `#${row.position} · ${skillNameForId(row.skill_id)} · ` +
-          `${row.correct ? "Correct" : "Incorrect"} · ${row.subtopic_name}`));
-        const inner = el("div", null, "qrow-body");
-        inner.appendChild(kv("Question", englishQuestionText(row)));
-        inner.appendChild(kv("Subtopic",
-          `${row.subtopic_name} (${row.subtopic_id})`));
-        inner.appendChild(kv("Chosen",
-          englishOptionText(row.options[row.selected_index])));
-        inner.appendChild(kv("Correct option",
-          englishOptionText(row.options[row.answer_index])));
-        inner.appendChild(kv("Answered at", row.answered_at || "Not recorded in the original scenario"));
-        inner.appendChild(kv("Question reference", row.question_id));
-        d.appendChild(inner);
-        record.appendChild(d);
-      });
-      card.appendChild(record);
-    }
+    card.appendChild(renderObservedTotals(evidence));
+    if (evidence) card.appendChild(renderTopicResults(evidence));
+    const rows = detail.question_responses || [];
+    if (detail.response_notice || rows.length)
+      card.appendChild(renderQuestionRecord(rows));
     pane.appendChild(card);
+  }
+
+  /* Recorded end evidence only: totals come straight from
+     evidence.total, never recomputed from the question rows. */
+  function renderObservedTotals(evidence) {
+    const section = DemoUI.section("Observed results",
+      "Recorded answers for this session.");
+    if (!evidence) {
+      section.appendChild(el("p",
+        "End evidence appears once all 40 answers are in."));
+      return section;
+    }
+    const total = evidence.total || {};
+    const stats = el("div", null, "ui-stats evidence-totals");
+    stats.appendChild(DemoUI.stat("Answered",
+      Number.isFinite(total.out_of) ? total.out_of : null));
+    stats.appendChild(DemoUI.stat("Correct",
+      Number.isFinite(total.correct) ? total.correct : null));
+    stats.appendChild(DemoUI.stat("Incorrect",
+      Number.isFinite(total.incorrect) ? total.incorrect : null));
+    section.appendChild(stats);
+    return section;
+  }
+
+  function renderTopicResults(evidence) {
+    const section = DemoUI.section("Topic results",
+      "Recorded correct and incorrect answers, grouped by subtopic.");
+    const scroll = el("div", null, "evidence-table-scroll");
+    const table = el("table", null, "grid evidence-topics");
+    table.appendChild(el("caption",
+      "Skill and subtopic observed counts"));
+    const head = el("tr");
+    ["Skill", "Subtopic", "Correct", "Incorrect", "Out of"]
+      .forEach((h) => {
+        const th = el("th", h);
+        th.scope = "col";
+        head.appendChild(th);
+      });
+    const thead = el("thead");
+    thead.appendChild(head);
+    table.appendChild(thead);
+    const body = el("tbody");
+    evidence.subtopics.forEach((row) => {
+      const tr = el("tr");
+      [englishSkillName(row.skill_name), row.subtopic_name,
+       row.correct, row.incorrect, row.out_of]
+        .forEach((v) => tr.appendChild(el("td", String(v))));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    scroll.appendChild(table);
+    section.appendChild(scroll);
+    return section;
+  }
+
+  function evidenceFilterState() {
+    let filters = evidenceFilters.get(selected);
+    if (!filters) {
+      filters = {outcome: "all", skill: ""};
+      evidenceFilters.set(selected, filters);
+    }
+    return filters;
+  }
+
+  /* Toggles qrow.hidden in place so open disclosures and focus survive
+     a filter change; totals and the topic table are never touched. */
+  function applyEvidenceFilters(record) {
+    const filters = evidenceFilterState();
+    const qrows = [...record.querySelectorAll(".qrow")];
+    let shown = 0;
+    qrows.forEach((qrow) => {
+      const visible =
+        (filters.outcome === "all" ||
+         qrow.dataset.outcome === filters.outcome)
+        && (!filters.skill || qrow.dataset.skill === filters.skill);
+      qrow.hidden = !visible;
+      if (visible) shown += 1;
+    });
+    const status = record.querySelector(".evidence-filter-status");
+    if (status)
+      status.textContent = `Showing ${shown} of ${qrows.length} questions`;
+    const empty = record.querySelector(".evidence-filter-empty");
+    if (empty) empty.hidden = shown !== 0;
+  }
+
+  function renderEvidenceFilters(record, filters, skillIds) {
+    const bar = el("div", null, "evidence-filters");
+    const group = el("div", null, "evidence-outcome-filters");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", "Filter questions by outcome");
+    [["all", "All"], ["incorrect", "Incorrect"], ["correct", "Correct"]]
+      .forEach(([value, label]) => {
+        const button = el("button", label,
+          "evidence-filter-btn" +
+          (filters.outcome === value ? " active" : ""));
+        button.type = "button";
+        button.dataset.outcome = value;
+        button.setAttribute("aria-pressed",
+          String(filters.outcome === value));
+        button.addEventListener("click", () => {
+          filters.outcome = value;
+          group.querySelectorAll(".evidence-filter-btn")
+            .forEach((other) => {
+              const on = other.dataset.outcome === value;
+              other.classList.toggle("active", on);
+              other.setAttribute("aria-pressed", String(on));
+            });
+          applyEvidenceFilters(record);
+        });
+        group.appendChild(button);
+      });
+    bar.appendChild(group);
+    const skillLabel = el("label", null, "evidence-skill-filter");
+    skillLabel.appendChild(el("span", "Skill", "evidence-skill-label"));
+    const select = el("select");
+    select.setAttribute("aria-label", "Filter questions by skill");
+    const every = el("option", "All skills");
+    every.value = "";
+    select.appendChild(every);
+    skillIds.forEach((skillId) => {
+      const option = el("option", skillNameForId(skillId));
+      option.value = skillId;
+      select.appendChild(option);
+    });
+    select.value = filters.skill;
+    select.addEventListener("change", () => {
+      filters.skill = select.value;
+      applyEvidenceFilters(record);
+    });
+    skillLabel.appendChild(select);
+    bar.appendChild(skillLabel);
+    return bar;
+  }
+
+  function renderQuestionRecord(rows) {
+    const record = DemoUI.section("Per-question record (private)",
+      "Recorded answer for each question — private to this workspace.");
+    if (detail.response_notice)
+      record.appendChild(el("p", detail.response_notice, "meta"));
+    if (!rows.length) return record;
+    const filters = evidenceFilterState();
+    const skillIds = [...new Set(rows.map((r) => String(r.skill_id)))];
+    if (filters.skill && !skillIds.includes(filters.skill))
+      filters.skill = "";
+    record.appendChild(renderEvidenceFilters(record, filters, skillIds));
+    const status = el("p", null, "evidence-filter-status meta small");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    record.appendChild(status);
+    const list = el("div", null, "evidence-record-list");
+    rows.forEach((row) => list.appendChild(renderQuestionResponse(row)));
+    record.appendChild(list);
+    const empty = el("p", "No questions match the current filters.",
+      "evidence-filter-empty meta");
+    empty.hidden = true;
+    record.appendChild(empty);
+    applyEvidenceFilters(record);
+    return record;
+  }
+
+  function renderQuestionResponse(row) {
+    const d = el("details", null, "qrow");
+    d.dataset.disclosureKey = `q:${row.question_id}`;
+    d.dataset.outcome = row.correct ? "correct" : "incorrect";
+    d.dataset.skill = String(row.skill_id);
+    const summary = el("summary", null, "qrow-summary");
+    summary.appendChild(el("span", `#${row.position}`, "qrow-num"));
+    const topic = el("span", null, "qrow-topic");
+    topic.appendChild(el("span", skillNameForId(row.skill_id), "qrow-skill"));
+    topic.appendChild(el("span", row.subtopic_name, "qrow-subtopic"));
+    summary.appendChild(topic);
+    summary.appendChild(el("span", row.correct ? "Correct" : "Incorrect",
+      `qrow-badge ${row.correct ? "correct" : "incorrect"}`));
+    d.appendChild(summary);
+    const inner = el("div", null, "qrow-body");
+    inner.appendChild(el("p", englishQuestionText(row), "qrow-question"));
+    const answers = el("div", null, "qrow-answers");
+    [["Student answer", row.options[row.selected_index],
+      row.correct ? "correct" : "incorrect"],
+     ["Correct answer", row.options[row.answer_index], "correct"]]
+      .forEach(([label, option, kind]) => {
+        const block = el("div", null, `qrow-answer ${kind}`);
+        block.appendChild(el("span", label, "qrow-answer-label"));
+        block.appendChild(el("span", englishOptionText(option),
+          "qrow-answer-value"));
+        answers.appendChild(block);
+      });
+    inner.appendChild(answers);
+    const meta = DemoUI.disclosure("Subtopic & reference",
+      `q:${row.question_id}:meta`, {className: "qrow-meta"});
+    meta.appendChild(kv("Subtopic",
+      `${row.subtopic_name} (${row.subtopic_id})`));
+    meta.appendChild(kv("Answered at",
+      row.answered_at || "Not recorded in the original scenario"));
+    meta.appendChild(kv("Question reference", row.question_id));
+    inner.appendChild(meta);
+    d.appendChild(inner);
+    return d;
   }
 
   function graphFor() {
@@ -2610,6 +2765,47 @@ function createDetailView(root, options = {}) {
     const resolved = skillNameForId(skillId);
     if (resolved !== skillId) return resolved;
     return fallbackName ? englishSkillName(fallbackName) : skillId;
+  }
+
+  /* One observed topic card: heading keeps the topic name separate
+     from the recorded correct count; each subtopic row carries its
+     name plus compact recorded counts — never derived mastery. */
+  function renderSkillTopic(topic, focusSubIds, provisional) {
+    const box = el("div", null, "topic");
+    const head = el("h4", null, "topic-head");
+    head.appendChild(el("span", englishSkillName(topic.skill_name),
+      "topic-name"));
+    head.appendChild(el("span",
+      topic.out_of === 0
+        ? "Not yet assessed"
+        : `${topic.correct}/${topic.out_of} observed correct`,
+      "topic-count"));
+    box.appendChild(head);
+    const list = el("ul");
+    (topic.subtopics || []).forEach((leaf) => {
+      const li = el("li");
+      li.appendChild(el("span", leaf.subtopic_name, "subtopic-name"));
+      const counts = el("span", null, "subtopic-counts");
+      if (leaf.out_of === 0) {
+        counts.appendChild(el("span", "Not yet assessed",
+          "topic-count-item muted"));
+      } else {
+        [`${leaf.correct} correct`, `${leaf.incorrect} incorrect`,
+         `of ${leaf.out_of}`].forEach((text, index) => {
+          counts.appendChild(el("span", text,
+            `topic-count-item ${["correct", "incorrect", "total"][index]}`));
+        });
+      }
+      li.appendChild(counts);
+      if (focusSubIds.has(leaf.subtopic_id)) {
+        li.appendChild(el("span", provisional
+          ? "Review focus (provisional)" : "Review focus",
+          "skill-badge is-focus"));
+      }
+      list.appendChild(li);
+    });
+    box.appendChild(list);
+    return box;
   }
 
   function renderGraphContent() {
@@ -2718,44 +2914,19 @@ function createDetailView(root, options = {}) {
     intro.appendChild(use);
     pane.appendChild(intro);
 
-    const observed = el("div", null, "card-inner skill-module");
-    observed.appendChild(el("h3", "Observed assessment"));
     const graph = graphFor();
+    const observed = DemoUI.section("Observed assessment",
+      graph
+        ? `Observed counts at ${graph.checkpoint} checkpoint — ` +
+          "recorded answers, not mastery scores."
+        : "Recorded answers grouped by topic.");
     if (!graph) {
       observed.appendChild(el("p",
         "Graph appears once a checkpoint is reached."));
     } else {
-      observed.appendChild(el("p",
-        `Observed counts at ${graph.checkpoint} checkpoint — recorded ` +
-        "answers, not mastery scores.", "meta"));
       const topics = el("div", null, "skill-topics");
-      (graph.topics || []).forEach((topic) => {
-        const box = el("div", null, "topic");
-        const heading = topic.out_of === 0
-          ? `${englishSkillName(topic.skill_name)} — not yet assessed`
-          : `${englishSkillName(topic.skill_name)} — ${topic.correct}/${topic.out_of} observed correct`;
-        box.appendChild(el("h4", heading));
-        const list = el("ul");
-        (topic.subtopics || []).forEach((leaf) => {
-          let line = leaf.out_of === 0
-            ? `${leaf.subtopic_name}: not yet assessed`
-            : `${leaf.subtopic_name}: ${leaf.correct} correct, ` +
-              `${leaf.incorrect} incorrect of ${leaf.out_of}`;
-          if (focusSubIds.has(leaf.subtopic_id)) {
-            const li = el("li");
-            li.appendChild(el("span", line));
-            li.appendChild(document.createTextNode(" "));
-            li.appendChild(el("span", selection.provisional
-              ? "Review focus (provisional)" : "Review focus",
-              "skill-badge is-focus"));
-            list.appendChild(li);
-          } else {
-            list.appendChild(el("li", line));
-          }
-        });
-        box.appendChild(list);
-        topics.appendChild(box);
-      });
+      (graph.topics || []).forEach((topic) => topics.appendChild(
+        renderSkillTopic(topic, focusSubIds, selection.provisional)));
       observed.appendChild(topics);
     }
     pane.appendChild(observed);
@@ -2879,9 +3050,9 @@ function createDetailView(root, options = {}) {
       const d = el("details", null, "skill-task");
       d.dataset.disclosureKey = `skill-task:${qid}`;
       const summary = el("summary");
-      summary.appendChild(el("span",
-        `#${row ? row.position : "—"} · ${topicName} · ${subName}`,
-        "skill-task-label"));
+      summary.appendChild(DemoUI.taskSummary(
+        `#${row ? row.position : "—"}`,
+        {topic: topicName, subtopic: subName}));
       const statusGroup = el("span", null, "skill-task-status");
       if (role.badge) {
         statusGroup.appendChild(el("span",
@@ -2907,6 +3078,20 @@ function createDetailView(root, options = {}) {
           list.appendChild(el("li", englishOptionText(option))));
         d.appendChild(list);
       }
+      if (row) {
+        const answers = el("div", null, "qrow-answers skill-task-answers");
+        [["Student answer", row.options[row.selected_index],
+          row.correct ? "correct" : "incorrect"],
+         ["Correct answer", row.options[row.answer_index], "correct"]]
+          .forEach(([label, option, kind]) => {
+            const block = el("div", null, `qrow-answer ${kind}`);
+            block.appendChild(el("span", label, "qrow-answer-label"));
+            block.appendChild(el("span", englishOptionText(option),
+              "qrow-answer-value"));
+            answers.appendChild(block);
+          });
+        d.appendChild(answers);
+      }
       d.appendChild(kv("Topic", topicName));
       d.appendChild(kv("Subtopic", subName));
       if (missingMapping) {
@@ -2921,13 +3106,6 @@ function createDetailView(root, options = {}) {
           ? ex.mathematical_task
           : "No descriptive context is bound to this task in the " +
             "current content map."));
-      if (row) {
-        d.appendChild(kv("Your answer",
-          englishOptionText(row.options[row.selected_index])));
-        d.appendChild(kv("Correct answer",
-          englishOptionText(row.options[row.answer_index])));
-      }
-      d.appendChild(kv("Result", result));
       d.appendChild(kv("Feedback role", role.text));
       return d;
     }
@@ -2940,10 +3118,9 @@ function createDetailView(root, options = {}) {
       item.dataset.practiceNumber = String(bankNumber);
       const topicName = taskTopicName(ex.skill_id, ex.skill_name);
       const summary = el("summary");
-      summary.appendChild(el("span",
-        `Practice draft ${bankNumber} · ${topicName} · ` +
-        `${ex.concept_label || "—"}`,
-        "skill-task-label"));
+      summary.appendChild(DemoUI.taskSummary(
+        `Practice draft ${bankNumber}`,
+        {topic: topicName, subtopic: ex.concept_label || "—"}));
       summary.appendChild(el("span", null, "skill-task-status"))
         .appendChild(el("span", sel.text,
           `skill-badge is-${sel.kind}`));
@@ -2962,10 +3139,9 @@ function createDetailView(root, options = {}) {
     }
 
     if (tasks.length) {
-      const module = el("div", null, "card-inner skill-module");
-      module.appendChild(el("p",
+      const module = DemoUI.section("Assessed tasks",
         "Every recorded task with its answer and feedback role — " +
-        "expand to inspect individual tasks.", "meta"));
+        "expand to inspect individual tasks.");
       const section = el("details", null, "skill-map-section");
       section.dataset.disclosureKey = "skill-map-assessed";
       section.appendChild(el("summary",
@@ -2983,14 +3159,13 @@ function createDetailView(root, options = {}) {
       content.appendChild(module);
     }
     if (practiceRows.length) {
-      const module = el("div", null, "card-inner skill-module");
-      module.appendChild(el("p",
+      const module = DemoUI.section("Practice drafts",
         "Separate possible practice drafts — not answered assessment " +
         "evidence and not automatically assigned to this learner. " +
         "Task requirements are not separately measured skills. " +
         "'Selected practice' marks the recorded practice " +
         "recommendation — it is not approval or release, and not " +
-        "evidence that a teacher-edited document includes it.", "meta"));
+        "evidence that a teacher-edited document includes it.");
       if (examples.editedDocument) {
         module.appendChild(el("p",
           "The current feedback is a teacher-edited document; whether " +
