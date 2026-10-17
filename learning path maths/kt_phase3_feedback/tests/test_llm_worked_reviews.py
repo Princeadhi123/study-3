@@ -1294,7 +1294,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertIn(
             "Why does dividing 50 into ten equal parts give 10%?",
             text)
-        self.assertIn(
+        self.assertNotIn(
             "AI-drafted explanation from the question and recorded "
             "answers; not independently verified. Teacher review "
             "required.", text)
@@ -1575,7 +1575,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertIn(
             "Explain your reasoning: Why does dividing 50 into ten "
             "equal parts give 10%?", text)
-        self.assertIn(
+        self.assertNotIn(
             "AI-drafted explanation from the question and recorded "
             "answers; not independently verified. Teacher review "
             "required.", text)

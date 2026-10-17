@@ -1361,6 +1361,23 @@ function buildContentPayload(preview, content) {
   return Object.keys(payload).length ? payload : undefined;
 }
 
+/* Display filter for notices: the two built-in assessment/practice
+   disclaimer paragraphs are suppressed at render time; every other
+   (including teacher-authored) notice value renders unchanged. Stored
+   records are not modified. */
+const HIDDEN_FEEDBACK_NOTICES = new Set([
+  "Synthetic demo activity only. This selection does not establish " +
+    "mastery or a validated optimal learning difficulty.",
+  "This revisits an answer from this assessment. A selected option " +
+    "does not establish why it was chosen. Explain the steps to " +
+    "your teacher before separate practice."]);
+
+function visibleFeedbackNotice(value) {
+  if (value == null) return "";
+  const normalized = String(value).replace(/\s+/g, " ").trim();
+  return HIDDEN_FEEDBACK_NOTICES.has(normalized) ? "" : value;
+}
+
 function renderStructuredFeedback(container, payload) {
   if (!payload) return;
   if (payload.total && Array.isArray(payload.skills)
@@ -1397,9 +1414,10 @@ function renderStructuredFeedback(container, payload) {
     (payload.review_example ? [payload.review_example] : []);
   const exampleNoticeCounts = new Map();
   examples.forEach((example) => {
-    if (example.notice) {
-      exampleNoticeCounts.set(example.notice,
-        (exampleNoticeCounts.get(example.notice) || 0) + 1);
+    const notice = visibleFeedbackNotice(example.notice);
+    if (notice) {
+      exampleNoticeCounts.set(notice,
+        (exampleNoticeCounts.get(notice) || 0) + 1);
     }
   });
   examples.forEach((example, exampleIndex) => {
@@ -1421,20 +1439,6 @@ function renderStructuredFeedback(container, payload) {
           ? "Teacher-edited worked review — verify before release"
           : "Teacher-edited worked review",
         "warn"));
-    }
-    if (example.explanation_source === "provider") {
-      box.appendChild(el("p",
-        example.teacher_edited
-          ? "Teacher-edited AI-drafted explanation — teacher " +
-            "wording, review before release."
-          : (example.explanation_input
-             === "question_and_recorded_answers_v1"
-             ? "AI-drafted explanation from the question and " +
-               "recorded answers; not independently verified. " +
-               "Teacher review required."
-             : "AI-drafted explanation; not independently verified. " +
-               "Teacher review required."),
-        "meta"));
     }
     let solutionHost = null;
     if (example.source === "incorrect_assessment_response") {
@@ -1546,9 +1550,10 @@ function renderStructuredFeedback(container, payload) {
     if (originalCard) {
       (solutionHost || box).appendChild(originalCard);
     }
-    if (example.notice
-        && exampleNoticeCounts.get(example.notice) === 1) {
-      box.appendChild(el("p", example.notice, "meta"));
+    const exampleNotice = visibleFeedbackNotice(example.notice);
+    if (exampleNotice
+        && exampleNoticeCounts.get(exampleNotice) === 1) {
+      box.appendChild(el("p", exampleNotice, "meta"));
     }
     container.appendChild(box);
   });
@@ -1557,22 +1562,25 @@ function renderStructuredFeedback(container, payload) {
       container.appendChild(el("p", notice, "meta"));
     }
   });
-  if (payload.worked_review_notice) {
-    container.appendChild(el("p", payload.worked_review_notice, "meta"));
+  const workedReviewNotice =
+    visibleFeedbackNotice(payload.worked_review_notice);
+  if (workedReviewNotice) {
+    container.appendChild(el("p", workedReviewNotice, "meta"));
   }
   const activities = payload.practice_activities ||
     (payload.practice ? [payload.practice] : []);
   const practiceNoticeCounts = new Map();
   activities.forEach((practice) => {
-    if (practice.notice) {
-      practiceNoticeCounts.set(practice.notice,
-        (practiceNoticeCounts.get(practice.notice) || 0) + 1);
+    const notice = visibleFeedbackNotice(practice.notice);
+    if (notice) {
+      practiceNoticeCounts.set(notice,
+        (practiceNoticeCounts.get(notice) || 0) + 1);
     }
   });
   activities.forEach((practice, index) => {
+    const notice = visibleFeedbackNotice(practice.notice);
     renderPracticeCard(container, practice, index,
-      !practice.notice
-      || practiceNoticeCounts.get(practice.notice) === 1,
+      !notice || practiceNoticeCounts.get(notice) === 1,
       payload.requires_educator_review);
   });
   practiceNoticeCounts.forEach((count, notice) => {
@@ -1662,8 +1670,9 @@ function renderPracticeCard(container, practice, index, showNotice,
   const originalCard = teacherOriginalDetails(
     practice, `practice-original-content:${index}`);
   if (originalCard) box.appendChild(originalCard);
-  if (practice.notice && showNotice !== false) {
-    box.appendChild(el("p", practice.notice, "meta"));
+  const practiceNotice = visibleFeedbackNotice(practice.notice);
+  if (practiceNotice && showNotice !== false) {
+    box.appendChild(el("p", practiceNotice, "meta"));
   }
   container.appendChild(box);
 }
@@ -2422,6 +2431,26 @@ function createDetailView(root, options = {}) {
             released: "Released to the student"}[status] || status;
   }
 
+  /* Derived end-feedback UI state: whether the current preview is the
+     version already released, or a changed draft still hidden behind
+     the previous release. Read-only views fall back to the recorded
+     status label. */
+  function endFeedbackUiState(delivery) {
+    const d = delivery || {};
+    const currentReleased = Boolean(d.preview_sha256
+      && d.released_preview_sha256 === d.preview_sha256);
+    const changedSinceRelease = Boolean(d.released_feedback
+      && d.preview_sha256
+      && d.released_preview_sha256 !== d.preview_sha256);
+    const label = currentReleased
+      ? "Released to the student"
+      : changedSinceRelease
+        ? "Updated draft — approval required; student sees previous " +
+          "release"
+        : releaseStatusLabel();
+    return {currentReleased, changedSinceRelease, label};
+  }
+
   function renderOverviewContent() {
     const pane = $("#tab-overview");
     pane.replaceChildren();
@@ -2880,7 +2909,7 @@ function createDetailView(root, options = {}) {
         "recorded questions, options, selected and correct answers and " +
         "this descriptive topic/subtopic graph. A configured variant " +
         "does not prove that call ran — check the wording source on " +
-        "the Feedback drafts tab.", "meta"));
+        "the Feedback tab.", "meta"));
       use.appendChild(el("p",
         "Task descriptions are shared once per subtopic in the " +
         "worked-first request and linked to assessment records by " +
@@ -3644,20 +3673,25 @@ function createDetailView(root, options = {}) {
 
   function renderReleaseCard(pane) {
     const delivery = detail.feedback_delivery;
+    const endState = endFeedbackUiState(delivery);
+    const currentReleased = endState.currentReleased;
     const card = el("div", null, "card-inner ui-section release-card");
-    card.appendChild(el("h3", "Shared feedback — teacher preview and release"));
+    card.appendChild(el("p", "After 40 answers", "eyebrow"));
+    card.appendChild(el("h3", "End feedback & practice"));
     card.appendChild(el("p",
-      "This approval releases feedback and practice only within this " +
-      "synthetic demo session. It does not certify the research bank or " +
-      "authorize real-learner delivery.",
-      "warn"));
-    const statusText = {
-      not_ready: "Not ready — the assessment is incomplete",
-      awaiting_teacher_review:
-        "Awaiting educator review — hidden from the student",
-      released: "Released to the student"}[delivery.status]
-      || delivery.status;
-    card.appendChild(kv("Release status", statusText));
+      currentReleased
+        ? "This version is released. No further approval is needed " +
+          "unless you edit it."
+        : endState.changedSinceRelease
+          ? "Updated end feedback needs approval. The student still " +
+            "sees the previous release."
+          : "Teacher approval is required before end feedback and " +
+            "practice are shown to the student.",
+      "boundary-note"));
+    card.appendChild(el("p",
+      "Synthetic demo only; approval does not authorize real-learner " +
+      "delivery.", "meta"));
+    card.appendChild(kv("Release status", endState.label));
     const released = delivery.released_feedback;
     if (released) {
       saveReleasedStudentSnapshot(detail, released, Boolean(detail.replay));
@@ -3781,8 +3815,9 @@ function createDetailView(root, options = {}) {
               (((preview && preview.review_examples) || []).some(
                 (e) => e.explanation_source === "provider")
                 ? " Worked explanations are AI-drafted and " +
-                  "shape-checked, not fact-verified; teacher review " +
-                  "is required."
+                  "shape-checked, not fact-verified" +
+                  (currentReleased ? "." : "; teacher review is " +
+                   "required.")
                 : "")));
       }
     }
@@ -3791,8 +3826,9 @@ function createDetailView(root, options = {}) {
                   .guardrails_version) || "")
            .startsWith("provider_full_narrative_shape_checked_")) {
       strip.appendChild(el("p",
-        "Aitta narrative is shape-checked, not fact-verified; " +
-        "educator review is required.", "warn"));
+        "AI wording is shape-checked, not independently " +
+        "fact-verified." +
+        (currentReleased ? "" : " Review before release."), "warn"));
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;
@@ -3836,7 +3872,27 @@ function createDetailView(root, options = {}) {
       return;
     }
     card.appendChild(el("h4",
-      "Current preview — exactly what approval would release"));
+      currentReleased
+        ? "Released end feedback"
+        : endState.changedSinceRelease
+          ? "Updated end feedback — not yet released"
+          : "End feedback preview — awaiting approval",
+      "fb-preview-heading"));
+    card.appendChild(el("p",
+      currentReleased ? "Student-visible version" : "Student preview",
+      "fb-preview-label"));
+    if (typeof preview.document_text !== "string"
+        && ((preview.practice_activities || []).length
+            || preview.practice)) {
+      card.appendChild(el("p",
+        currentReleased
+          ? "Practice below is included in this release."
+          : endState.changedSinceRelease
+            ? "Practice below belongs to the updated draft, not the " +
+              "previous release."
+            : "Practice below is released with end feedback after " +
+              "approval.", "meta fb-practice-note"));
+    }
     const shown = el("div", null, "feedback-preview");
     renderStructuredFeedback(shown, preview);
     card.appendChild(shown);
@@ -3867,6 +3923,10 @@ function createDetailView(root, options = {}) {
         && delivery.practice_hint) {
       card.appendChild(el("p", delivery.practice_hint, "meta"));
     }
+    card.appendChild(el("h4",
+      currentReleased ? "Release complete"
+                      : "Review & release end feedback",
+      "review-release-heading"));
     const draft = releaseDraftFor(selected);
     const edit = editDraftFor(selected, delivery);
     if (delivery.preview_source === "teacher_edited") {
@@ -3879,7 +3939,11 @@ function createDetailView(root, options = {}) {
     const contentInputs = [];
     card.appendChild(el("p",
       "Scores, answer keys and practice tasks are application-owned. " +
-      "End feedback still requires educator approval.",
+      (currentReleased
+        ? "This end-feedback version is already released. Edits " +
+          "require a new approval."
+        : "Approval applies only to end feedback and practice, never " +
+          "to the midpoint check-in."),
       "boundary-note"));
     if (edit.dirty && edit.stale) {
       card.appendChild(el("p",
@@ -4371,8 +4435,6 @@ function createDetailView(root, options = {}) {
     card.appendChild(labelWrap);
     card.appendChild(labelInput);
     const status = el("p", draft.note || null, "meta");
-    const currentReleased = delivery.released_preview_sha256 &&
-      delivery.released_preview_sha256 === delivery.preview_sha256;
     const multi = delivery.review_mode === "aligned_two_topic";
     if (delivery.integrated && !currentReleased) {
       card.appendChild(el("p",
@@ -4440,7 +4502,14 @@ function createDetailView(root, options = {}) {
 
   function renderMidpointCard(pane) {
     const card = el("div", null, "card-inner ui-section midpoint-feedback-card");
-    card.appendChild(el("h3", "Student midpoint check-in"));
+    card.appendChild(el("p", "After 20 answers", "eyebrow"));
+    card.appendChild(el("h3", "Midpoint check-in — automatic"));
+    card.appendChild(el("p",
+      "Shown directly to the student when ready. No teacher approval.",
+      "boundary-note"));
+    card.appendChild(el("p",
+      "Availability does not confirm that the student read it.",
+      "meta"));
     const midpoint = detail.checkpoints.midpoint || {};
     const job = midpoint.phrasing_job || null;
     const pending = Boolean(job && job.status === "pending");
@@ -4454,15 +4523,6 @@ function createDetailView(root, options = {}) {
       card.appendChild(el("p",
         "No saved midpoint message is available in this result."));
     } else {
-      card.appendChild(el("p",
-        "Current student-facing wording from the 20-question " +
-        "checkpoint, displayed with English topic labels. Aitta " +
-        "wording is used automatically when the hosted draft is " +
-        "ready; while it is being generated a waiting notice is " +
-        "shown, and the deterministic check-in takes over only if " +
-        "generation finishes without a draft. This record does not " +
-        "confirm that the student opened or read it.",
-        "meta"));
       if (pending) {
         // No wording is shown as current while the call is queued,
         // in flight, or between automatic retries.
@@ -4718,9 +4778,11 @@ function createDetailView(root, options = {}) {
       ? {start: active.selectionStart, end: active.selectionEnd}
       : null;
     pane.replaceChildren();
-    pane.appendChild(DemoUI.heading("Feedback drafts",
-      "Final feedback requires educator approval. The midpoint check-in " +
-      "is shown automatically when ready.", {eyebrow: "Feedback & release"}));
+    pane.appendChild(DemoUI.heading("Feedback",
+      "Midpoint is shown automatically. Only end feedback and " +
+      "practice require teacher approval.",
+      {eyebrow: "Student feedback"}));
+    pane.appendChild(feedbackStatusStrip());
     renderMidpointCard(pane);
     if (!detail.read_only && detail.feedback_delivery) {
       renderReleaseCard(pane);
@@ -4730,10 +4792,15 @@ function createDetailView(root, options = {}) {
       if (savedReview && savedReview.message) {
         const saved = el("div", null,
           "card-inner ui-section saved-end-feedback");
-        saved.appendChild(el("h4", "Saved end feedback"));
+        saved.appendChild(el("p", "Retained feedback · read-only",
+          "eyebrow"));
+        saved.appendChild(el("h4", "Saved end feedback",
+          "fb-preview-heading"));
         saved.appendChild(kv("Base feedback template",
           feedbackTemplateLabel(savedReview.message,
                                 detail.feedback_variant)));
+        saved.appendChild(el("p", "Student preview",
+          "fb-preview-label"));
         const shown = el("div", null, "feedback-preview");
         renderStructuredFeedback(shown, {
           sections: savedReview.message.sections
@@ -4961,6 +5028,73 @@ function createDetailView(root, options = {}) {
     } else {
       pane.appendChild(research);
     }
+    buildFeedbackNav(pane);
+  }
+
+  /* Compact release/wording summary at the top of the Feedback tab;
+     values come from the recorded delivery and provenance only. */
+  function feedbackStatusStrip() {
+    const strip = el("div", null, "feedback-status-strip");
+    strip.appendChild(el("span",
+      "Midpoint: automatic — no approval", "fb-pill"));
+    const endState = endFeedbackUiState(
+      detail.read_only ? null : detail.feedback_delivery);
+    strip.appendChild(el("span",
+      `End feedback: ${endState.label}`,
+      `fb-pill${endState.currentReleased ? " released" : ""}`));
+    const end = detail.checkpoints.end || {};
+    const srcReview = end.student_review || end.baseline_student;
+    const genExec = (((detail.provider_job || {}).executions || {})
+      .student || {}).generator || {};
+    const src = endFeedbackSource(srcReview,
+      detail.read_only ? null : (detail.feedback_delivery || null),
+      genExec);
+    strip.appendChild(el("span", `End wording: ${src.label}`,
+      "fb-pill"));
+    return strip;
+  }
+
+  /* Local "Feedback sections" navigation built from the rendered pane
+     DOM so no link can target a section that is not actually present
+     (e.g. no practice jump for an edited document or missing preview). */
+  function buildFeedbackNav(pane) {
+    const endState = endFeedbackUiState(
+      detail.read_only ? null : detail.feedback_delivery);
+    const targets = [
+      ["Midpoint (automatic)", ".midpoint-feedback-card h3"],
+      [detail.read_only ? "Saved end feedback" : "End feedback",
+       ".fb-preview-heading"],
+      ["End practice",
+       ".release-card > .feedback-preview .practice-activity, " +
+       ".saved-end-feedback > .feedback-preview .practice-activity"],
+      [endState.currentReleased ? "Release complete"
+                                : "Review & release",
+       ".review-release-heading"],
+    ];
+    const items = targets.map(([label, selector]) => ({
+      label, target: pane.querySelector(selector)}))
+      .filter((item) => item.target);
+    if (!items.length) return;
+    const nav = el("nav", null, "feedback-nav");
+    nav.setAttribute("aria-label", "Feedback sections");
+    nav.appendChild(el("span", "Feedback sections", "nav-label"));
+    items.forEach(({label, target}) => {
+      const button = el("button", label, "feedback-nav-btn");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        let node = target.parentElement;
+        while (node && node !== pane) {
+          if (node.tagName === "DETAILS") node.open = true;
+          node = node.parentElement;
+        }
+        target.setAttribute("tabindex", "-1");
+        target.scrollIntoView({block: "start"});
+        target.focus({preventScroll: true});
+      });
+      nav.appendChild(button);
+    });
+    const strip = pane.querySelector(".feedback-status-strip");
+    (strip || pane.firstChild).after(nav);
   }
 
   /* ---------- tabs ---------- */

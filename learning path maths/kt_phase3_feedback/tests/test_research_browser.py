@@ -483,9 +483,10 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#tab-feedback').childElementCount > 0")
         fb = "document.querySelector('#tab-feedback')"
         self.assertTrue(b.js(f"{fb}.textContent.includes("
-                             "'Final feedback requires educator approval.')"))
+                             "'Only end feedback and practice require "
+                             "teacher approval.')"))
         self.assertTrue(b.js(f"{fb}.textContent.includes("
-                             "'midpoint check-in is shown automatically')"))
+                             "'Midpoint is shown automatically')"))
         # Mobile captures scroll the target into view after the viewport change.
         b.viewport(390, 844)
         for tab, shot in (("overview", "summary-live-mobile.png"),
@@ -1220,10 +1221,13 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(b.js(rendered), expected)
         card_text = f"document.querySelector('{card}').textContent"
         self.assertTrue(b.js(
-            f"{card_text}.includes('Student midpoint check-in')"))
+            f"{card_text}.includes('Midpoint check-in — automatic')"))
+        self.assertTrue(b.js(
+            f"{card_text}.includes('Shown directly to the student when "
+            "ready. No teacher approval.')"))
         self.assertTrue(b.js(
             f"{card_text}.includes('does not confirm that the student "
-            "opened or read it')"))
+            "read it')"))
         self.assertTrue(b.js(
             f"{card_text}.includes('phase3_student_midpoint_v5')"))
         self.assertFalse(b.js(
@@ -1651,7 +1655,7 @@ class ResearchBrowserTests(unittest.TestCase):
         release = "document.querySelector('#tab-feedback .release-card')"
         b.wait(f"Boolean({release})")
         self.assertTrue(b.js(
-            f"{release}.textContent.includes('Shared feedback — teacher preview and release')"))
+            f"{release}.textContent.includes('End feedback & practice')"))
         feedback = "document.querySelector('#tab-feedback')"
         b.wait(f"{feedback}.textContent.includes('Review evidence')")
         self.assertFalse(b.js(f"{feedback}.textContent.includes('teacher end draft')"))
@@ -1687,6 +1691,456 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('#ws-tabs [data-tab=overview]').click()")
         self.assertFalse(b.js("document.querySelector('#tab-overview').hidden"))
         self.assertTrue(b.js("document.querySelector('#tab-feedback').hidden"))
+        self.assertEqual(b.errors, [])
+
+    def test_feedback_navigation_and_hierarchy(self):
+        import copy
+        from unittest import mock
+        import feedback_practice
+        from tests.test_demo_service import BoundRecommender
+        from tests.test_feedback_practice import make_graph, make_pool
+        bank = self.service.bank
+        pool = make_pool(("sA", "sB"))
+        b = self.browser
+        examples = dict(feedback_practice.REVIEW_EXAMPLES)
+        for sub in ("sub_sA", "sub_sB", "sub_sC", "sub_sD"):
+            examples[sub] = {
+                "prompt": "Browser worked prompt?",
+                "explanation": "Browser worked explanation."}
+        with mock.patch.object(feedback_practice,
+                               "load_current_practice_pool",
+                               return_value=copy.deepcopy(pool)), \
+             mock.patch.object(feedback_practice,
+                               "teacher_content_context",
+                               return_value=make_graph(pool)), \
+             mock.patch.dict(feedback_practice.REVIEW_EXAMPLES,
+                             examples, clear=True):
+            self.service.recommender = BoundRecommender(bank, pool)
+            result = self.service.simulate("alternating", 11)
+            sid = result["session_id"]
+            self.assertTrue(wait_for(
+                lambda: self.service._load_meta(sid)["provider_job"]
+                ["status"] in ("ready", "fallback")))
+            self.assertTrue(wait_for(
+                lambda: self.service._load_meta(sid)
+                ["checkpoints"]["end"]["recommendation_job"]["status"]
+                != "pending"))
+            self.navigate("/teacher")
+            b.wait("document.querySelector('#unlock-panel')")
+            b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('#session-list button')")
+            b.js("document.querySelector('#session-list button').click()")
+            b.wait("!document.querySelector('#ws-detail').hidden")
+            b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+            pane = "document.querySelector('#tab-feedback')"
+            release = f"{pane}.querySelector('.release-card')"
+            b.wait(f"Boolean({release})")
+            # Status strip: release state and recorded wording source.
+            strip = f"{pane}.querySelector('.feedback-status-strip')"
+            pills = b.js(
+                f"[...{strip}.querySelectorAll('.fb-pill')]"
+                ".map(n => n.textContent)")
+            self.assertIn("Midpoint: automatic — no approval", pills)
+            self.assertTrue(any(p.startswith("End feedback: ")
+                                for p in pills))
+            self.assertTrue(any(p.startswith("End wording: ")
+                                for p in pills))
+            self.assertFalse(any("null" in p for p in pills))
+            # Section nav is built from the rendered DOM: all four
+            # targets exist on this session and focus their heading.
+            nav = f"{pane}.querySelector('.feedback-nav')"
+            self.assertEqual(b.js(f"{nav}.getAttribute('aria-label')"),
+                             "Feedback sections")
+            labels = b.js(
+                f"[...{nav}.querySelectorAll('.feedback-nav-btn')]"
+                ".map(n => n.textContent)")
+            self.assertEqual(labels,
+                             ["Midpoint (automatic)", "End feedback",
+                              "End practice", "Review & release"])
+            for label, target in (
+                    ("Midpoint (automatic)",
+                     ".midpoint-feedback-card h3"),
+                    ("End feedback", ".fb-preview-heading"),
+                    ("End practice",
+                     ".feedback-preview .practice-activity"),
+                    ("Review & release", ".review-release-heading")):
+                b.js(f"[...{nav}.querySelectorAll('.feedback-nav-btn')]"
+                     f".find(n => n.textContent === '{label}').click()")
+                self.assertTrue(b.js(
+                    f"{pane}.querySelector('{target}')"
+                    " === document.activeElement"))
+            # Hierarchy: stage eyebrows, boundaries and labels sit
+            # outside the preview region; midpoint never claims it was
+            # read and carries no approval requirement.
+            midpoint = f"{pane}.querySelector('.midpoint-feedback-card')"
+            self.assertEqual(b.js(
+                f"{midpoint}.querySelector('.eyebrow').textContent"),
+                "After 20 answers")
+            self.assertTrue(b.js(
+                f"{midpoint}.textContent.includes('Midpoint check-in — "
+                "automatic')"))
+            self.assertTrue(b.js(
+                f"{midpoint}.textContent.includes('Shown directly to "
+                "the student when ready. No teacher approval.')"))
+            self.assertTrue(b.js(
+                f"{midpoint}.textContent.includes('does not confirm "
+                "that the student read it')"))
+            self.assertFalse(b.js(
+                f"{midpoint}.textContent.includes('approval is "
+                "required')"))
+            self.assertEqual(b.js(
+                f"{release}.querySelector('.eyebrow').textContent"),
+                "After 40 answers")
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('End feedback & "
+                "practice')"))
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('Teacher approval is "
+                "required before end feedback and practice are shown "
+                "to the student.')"))
+            self.assertEqual(b.js(
+                f"{release}.querySelector('.fb-preview-heading')"
+                ".textContent"),
+                "End feedback preview — awaiting approval")
+            self.assertEqual(b.js(
+                f"{pane}.querySelector('.fb-preview-label')"
+                ".textContent"), "Student preview")
+            self.assertIsNone(b.js(
+                f"{pane}.querySelector('.feedback-preview "
+                ".fb-preview-label')"))
+            self.assertTrue(b.js(
+                f"{pane}.textContent.includes('released with end "
+                "feedback after approval')"))
+            b.js(f"{pane}.scrollIntoView({{block:'start'}})")
+            self.assert_no_overflow()
+            b.screenshot("feedback-top-pending-desktop.png")
+            b.js(f"{pane}.querySelector('.review-release-heading')"
+                 ".scrollIntoView({block:'start'})")
+            b.screenshot("feedback-end-pending-desktop.png")
+            # A pending midpoint presents the waiting notice and keeps
+            # the 'when ready' boundary — it never claims shown/read.
+            original = self.service.teacher_session
+            self.addCleanup(
+                setattr, self.service, "teacher_session", original)
+            def pending_midpoint(sid_arg):
+                v = copy.deepcopy(original(sid_arg))
+                v["checkpoints"]["midpoint"]["phrasing_job"] = {
+                    "status": "pending"}
+                return v
+            self.service.teacher_session = pending_midpoint
+            b.wait(f"{midpoint}.textContent.includes('preparing the "
+                   "midpoint check-in')")
+            self.assertTrue(b.js(
+                f"{midpoint}.textContent.includes('when ready')"))
+            self.service.teacher_session = original
+            b.wait(f"Boolean({release}.querySelector('.fb-preview-"
+                   "heading'))")
+            # A released state updates the strip and card truthfully.
+            view = self.service.teacher_session(sid)
+            self.service.release_feedback(sid, {
+                "message_sha256":
+                    view["feedback_delivery"]["preview_sha256"],
+                "reviewer_label": "browser-reviewer"})
+            b.wait(f"{release}.textContent.includes('Released to the "
+                   "student')")
+            pills = b.js(
+                f"[...{strip}.querySelectorAll('.fb-pill')]"
+                ".map(n => n.textContent)")
+            self.assertIn("End feedback: Released to the student",
+                          pills)
+            self.assertEqual(b.js(
+                f"{release}.querySelector('.fb-preview-heading')"
+                ".textContent"), "Released end feedback")
+            self.assertEqual(b.js(
+                f"{release}.querySelector('.fb-preview-label')"
+                ".textContent"), "Student-visible version")
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('This version is "
+                "released. No further approval is needed unless you "
+                "edit it.')"))
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('Release complete')"))
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('Practice below is "
+                "included in this release.')"))
+            # Teacher-only chrome must not keep claiming approval is
+            # required once this version is released (authored warnings
+            # inside the preview are student content and may remain).
+            self.assertFalse(b.js(
+                f"{release}.textContent.includes('educator approval "
+                "required')"))
+            self.assertIn("Release complete", b.js(
+                f"[...{nav}.querySelectorAll('.feedback-nav-btn')]"
+                ".map(n => n.textContent)"))
+            b.js(f"{pane}.scrollIntoView({{block:'start'}})")
+            b.screenshot("feedback-top-released-desktop.png")
+            b.js(f"{pane}.querySelector('.review-release-heading')"
+                 ".scrollIntoView({block:'start'})")
+            b.screenshot("feedback-end-released-desktop.png")
+            # A changed draft after release is labelled as an updated,
+            # unreleased version and re-enables approval.
+            def changed_draft(sid_arg):
+                v = copy.deepcopy(original(sid_arg))
+                v["feedback_delivery"]["preview_sha256"] = (
+                    "changed-preview-hash")
+                return v
+            self.service.teacher_session = changed_draft
+            b.wait(f"{release}.textContent.includes('Updated end "
+                   "feedback — not yet released')")
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('needs approval. The "
+                "student still sees the previous release.')"))
+            self.assertTrue(b.js(
+                f"{release}.textContent.includes('belongs to the "
+                "updated draft, not the previous release.')"))
+            self.assertTrue(any(p.startswith(
+                "End feedback: Updated draft") for p in b.js(
+                f"[...{strip}.querySelectorAll('.fb-pill')]"
+                ".map(n => n.textContent)")))
+            self.assertFalse(b.js(
+                f"{release}.querySelector('button.primary').disabled"))
+            # A teacher-edited document cannot be parsed for practice:
+            # the End practice link disappears instead of jumping
+            # nowhere.
+            def edited_doc(sid_arg):
+                v = copy.deepcopy(original(sid_arg))
+                v["feedback_delivery"]["preview"]["document_text"] = (
+                    "Teacher-edited document wording.")
+                v["feedback_delivery"]["preview_sha256"] = (
+                    "edited-preview-hash")
+                return v
+            self.service.teacher_session = edited_doc
+            b.wait(f"{release}.textContent.includes('Teacher-edited "
+                   "document wording')")
+            self.assertNotIn("End practice", b.js(
+                f"[...{nav}.querySelectorAll('.feedback-nav-btn')]"
+                ".map(n => n.textContent)"))
+            self.assertIsNone(b.js(
+                f"{pane}.querySelector('.feedback-preview "
+                ".practice-activity')"))
+            self.service.teacher_session = original
+            b.wait(f"Boolean({pane}.querySelector('.feedback-preview "
+                   ".practice-activity'))")
+            # Read-only scenario view: saved label, no release controls,
+            # no approval-required eyebrow, no duplicate control ids.
+            b.js("document.querySelector('[data-workspace=library]').click()")
+            b.wait("document.querySelector('.scenario-row')")
+            b.js("document.querySelector('.scenario-row').click()")
+            b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+            b.js("document.querySelector('#scenario-ws-tabs "
+                 "[data-tab=feedback]').click()")
+            spane = "document.querySelector('#scenario-tab-feedback')"
+            b.wait(f"Boolean({spane}.querySelector('.saved-end-feedback'))")
+            self.assertIn("Saved end feedback", b.js(
+                f"[...{spane}.querySelectorAll('.feedback-nav-btn')]"
+                ".map(n => n.textContent)"))
+            self.assertNotIn("Review & release", b.js(
+                f"[...{spane}.querySelectorAll('.feedback-nav-btn')]"
+                ".map(n => n.textContent)"))
+            self.assertTrue(b.js(
+                f"{spane}.textContent.includes('Retained feedback · "
+                "read-only')"))
+            self.assertFalse(b.js(
+                f"{spane}.textContent.includes('educator approval "
+                "required')"))
+            self.assertTrue(b.js(
+                f"{spane}.querySelector('.feedback-status-strip')"
+                ".textContent.includes('Saved read-only feedback')"))
+            self.assertIsNone(b.js(
+                f"{spane}.querySelector('.review-release-heading')"))
+            self.assertEqual(b.js(
+                "document.querySelectorAll('#release-reviewer').length"),
+                1)
+            self.assertEqual(b.js(
+                "document.querySelectorAll('#scenario-release-reviewer')"
+                ".length"), 0)
+            b.viewport(390, 844)
+            b.js(f"{pane}.scrollIntoView({{block:'start'}})")
+            self.assert_no_overflow()
+            b.js("document.querySelector('[data-workspace=live]').click()")
+            b.wait(f"!{pane}.hidden")
+            b.js(f"{pane}.scrollIntoView({{block:'start'}})")
+            self.assert_no_overflow()
+            b.screenshot("feedback-top-released-mobile.png")
+            b.js(f"{pane}.querySelector('.review-release-heading')"
+                 ".scrollIntoView({block:'start'})")
+            self.assert_no_overflow()
+            b.screenshot("feedback-end-released-mobile.png")
+            b.viewport(1440, 1100)
+            self.assertEqual(b.errors, [])
+
+    def test_worked_review_provider_notice_hidden(self):
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        examples = [
+            {"source": "incorrect_assessment_response",
+             "explanation_source": "provider",
+             "explanation_input": "question_and_recorded_answers_v1",
+             "prompt": "What is 10 percent of 50?",
+             "options": ["5", "10", "15"],
+             "selected_answer": "10",
+             "correct_answer": "5",
+             "steps": ["Recorded step one.", "Recorded step two."],
+             "explanation": "Provider explanation wording."},
+            {"source": "incorrect_assessment_response",
+             "explanation_source": "provider",
+             "prompt": "What is 10 percent of 50?",
+             "options": ["5", "10", "15"],
+             "selected_answer": "10",
+             "correct_answer": "5",
+             "steps": ["Recorded step one."],
+             "explanation": "Provider explanation wording."},
+            {"source": "incorrect_assessment_response",
+             "explanation_source": "provider",
+             "teacher_edited": True,
+             "prompt": "What is 10 percent of 50?",
+             "options": ["5", "10", "15"],
+             "selected_answer": "10",
+             "correct_answer": "5",
+             "steps": ["Recorded step one."],
+             "explanation": "Teacher-edited wording."},
+        ]
+        rendered = b.js(
+            json.dumps(examples) + ".map((example) => {"
+            "  const host = document.createElement('div');"
+            "  renderStructuredFeedback(host, "
+            "    {review_examples: [example]});"
+            "  return host.textContent;})")
+        for index, text in enumerate(rendered):
+            self.assertNotIn("AI-drafted", text)
+            self.assertNotIn("not independently verified", text)
+            self.assertNotIn("Teacher review required", text)
+            self.assertNotIn("review before release", text)
+            self.assertIn("What is 10 percent of 50?", text)
+            self.assertIn("Recorded step one.", text)
+            self.assertIn("Correct answer:", text)
+        self.assertIn("Teacher-edited worked review", rendered[2])
+        self.assertEqual(b.errors, [])
+
+    def test_feedback_default_notices_hidden(self):
+        hidden_review = (
+            "This revisits an answer from this assessment. A selected "
+            "option does not establish why it was chosen. Explain the "
+            "steps to your teacher before separate practice.")
+        hidden_practice = (
+            "Synthetic demo activity only. This selection does not "
+            "establish mastery or a validated optimal learning "
+            "difficulty.")
+        custom_notice = "Teacher note: check this wording together."
+        custom_practice = "Teacher note: revisit this practice."
+        unavailable = (
+            "A checked worked solution is unavailable. Ask your "
+            "teacher to review this assessment question; no "
+            "replacement example has been invented.")
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        payload = {
+            "worked_review_notice": hidden_review,
+            "review_examples": [
+                {"source": "incorrect_assessment_response",
+                 "notice": hidden_review,
+                 "prompt": "Question one?",
+                 "options": ["a", "b"],
+                 "selected_answer": "b",
+                 "correct_answer": "a",
+                 "steps": ["Step one."]},
+                {"source": "incorrect_assessment_response",
+                 "notice": hidden_review,
+                 "prompt": "Question two?",
+                 "options": ["a", "b"],
+                 "selected_answer": "b",
+                 "correct_answer": "a",
+                 "steps": ["Step two."]},
+                {"source": "incorrect_assessment_response",
+                 "notice": custom_notice,
+                 "prompt": "Question three?",
+                 "options": ["a", "b"],
+                 "selected_answer": "b",
+                 "correct_answer": "a",
+                 "steps": ["Step three."]},
+                {"source": "incorrect_assessment_response",
+                 "notice": custom_notice,
+                 "prompt": "Question four?",
+                 "options": ["a", "b"],
+                 "selected_answer": "b",
+                 "correct_answer": "a",
+                 "steps": ["Step four."]},
+                {"prompt": "Question five?",
+                 "notice": unavailable}],
+            "practice_activities": [
+                {"status": "selected",
+                 "notice": hidden_practice,
+                 "topic_label": "sA",
+                 "instruction": "Solve it on paper.",
+                 "question": {"skill_name": "sA",
+                              "concept_name": "sA",
+                              "text": "Practice one?",
+                              "options": ["x", "y"]}},
+                {"status": "selected",
+                 "notice": custom_practice,
+                 "topic_label": "sB",
+                 "instruction": "Solve it aloud.",
+                 "question": {"skill_name": "sB",
+                              "concept_name": "sB",
+                              "text": "Practice two?",
+                              "options": ["x", "y"]}},
+                {"status": "selected",
+                 "notice": custom_practice,
+                 "topic_label": "sB",
+                 "instruction": "Solve it aloud.",
+                 "question": {"skill_name": "sB",
+                              "concept_name": "sB",
+                              "text": "Practice three?",
+                              "options": ["x", "y"]}}]}
+        result = b.js(
+            "const payload = " + json.dumps(payload) + ";"
+            "const before = JSON.stringify(payload);"
+            "const host = document.createElement('div');"
+            "renderStructuredFeedback(host, payload);"
+            "const practiceHost = document.createElement('div');"
+            "renderPracticeCard(practiceHost, "
+            + json.dumps({"status": "selected",
+                          "notice": hidden_practice,
+                          "topic_label": "sC",
+                          "instruction": "Hidden notice card.",
+                          "question": {"skill_name": "sC",
+                                       "concept_name": "sC",
+                                       "text": "Practice four?",
+                                       "options": ["x", "y"]}})
+            + ", 0, true, false);"
+            "const customHost = document.createElement('div');"
+            "renderPracticeCard(customHost, "
+            + json.dumps({"status": "selected",
+                          "notice": custom_notice,
+                          "topic_label": "sC",
+                          "instruction": "Custom notice card.",
+                          "question": {"skill_name": "sC",
+                                       "concept_name": "sC",
+                                       "text": "Practice five?",
+                                       "options": ["x", "y"]}})
+            + ", 0, true, false);"
+            "return {main: host.textContent,"
+            " practice: practiceHost.textContent,"
+            " custom: customHost.textContent,"
+            " unchanged: JSON.stringify(payload) === before};")
+        for text in (result["main"], result["practice"],
+                     result["custom"]):
+            self.assertNotIn(hidden_review, text)
+            self.assertNotIn(hidden_practice, text)
+        main = result["main"]
+        self.assertIn("Question one?", main)
+        self.assertIn("Step two.", main)
+        self.assertIn("Solve it on paper.", main)
+        self.assertIn(unavailable, main)
+        self.assertEqual(main.count(custom_notice), 1)
+        self.assertEqual(main.count(custom_practice), 1)
+        self.assertNotIn(hidden_practice, result["practice"])
+        self.assertIn("Practice four?", result["practice"])
+        self.assertIn(custom_notice, result["custom"])
+        self.assertTrue(result["unchanged"])
         self.assertEqual(b.errors, [])
 
     def test_integrated_feedback_practice_flow(self):
@@ -1747,7 +2201,7 @@ class ResearchBrowserTests(unittest.TestCase):
             self.assertTrue(b.js(f"{card}.textContent.includes('Pool practice prompt 1?')"))
             self.assertTrue(b.js(f"{card}.textContent.includes('Skill sA')"))
             self.assertTrue(b.js(f"{card}.textContent.includes('Concept sA')"))
-            self.assertTrue(b.js(f"{card}.textContent.includes('does not establish mastery')"))
+            self.assertFalse(b.js(f"{card}.textContent.includes('does not establish mastery')"))
             self.assertTrue(b.js(
                 f"{card}.textContent.includes('does not practise the review focus')"))
             self.assertFalse(b.js(f"{card}.textContent.includes('p_correct')"))
