@@ -12,17 +12,21 @@
 <header class="masthead">
   <div class="masthead-inner">
     <div class="brand"><span class="brand-mark" aria-hidden="true">el</span><div><span class="eyebrow">MATHEMATICS / RESEARCH PROTOTYPE</span><h1>Evidence Lab<span class="phase-tag">Phase 03</span></h1></div></div>
-    <nav class="topnav" aria-label="Demo pages">
-      <a href="/">Assessment</a>
-      <a href="/teacher" aria-current="page">Educator workspace</a>
-    </nav>
+    <div class="masthead-actions">
+      <nav class="topnav" aria-label="Demo pages">
+        <a href="/">Assessment</a>
+        <a href="/teacher" aria-current="page">Educator workspace</a>
+      </nav>
+      <div class="account-controls" role="group" aria-label="Workspace access">
+        <button id="logout" type="button" class="ghost small" hidden>Log out</button>
+      </div>
+    </div>
   </div>
 </header>
 <main id="teacher-root" tabindex="-1">
   <div class="page-heading"><div><p class="eyebrow">OBSERVE. COMPARE. REVIEW.</p><h2>Better questions. Clearer evidence.</h2><p class="meta">Explore synthetic assessments and evaluate feedback with the evidence in view.</p></div><span class="environment-badge">Local research environment</span></div>
   <p class="boundary-note"><strong>Synthetic data only.</strong> Feedback is an educator-review draft, not approved learner advice. KT estimates do not establish mastery, difficulty or learning benefit.</p>
   <p id="teacher-error" class="error" role="alert" hidden></p>
-  <div id="config-strip" class="strip" hidden></div>
   <section id="unlock-panel" class="card narrow">
     <p class="eyebrow">PRIVATE WORKSPACE</p>
     <h2>Welcome, reviewer.</h2>
@@ -40,9 +44,12 @@
       <button data-workspace="live" aria-pressed="true" class="active"><span class="nav-number">01</span> Live sessions</button>
       <button data-workspace="library" aria-pressed="false"><span class="nav-number">02</span> Scenario library</button>
       <button data-workspace="comparison" aria-pressed="false"><span class="nav-number">03</span> Blind comparison</button>
-      <button id="logout" class="ghost small">Log out</button>
     </nav>
     <div id="live-pane" class="teacher-grid">
+      <details id="run-configuration" class="run-configuration">
+        <summary>Run configuration</summary>
+        <div id="config-strip" class="strip" hidden></div>
+      </details>
       <aside class="side">
         <div class="side-head"><h2>Sessions</h2><span class="chip">Live</span></div>
         <details class="simulation-disclosure" open>
@@ -93,6 +100,7 @@
   </div>
   <footer class="page-footer"><span>Evidence Lab / Phase 03</span><span>Observed evidence ≠ validated mastery · English wording is a draft translation.</span></footer>
 </main>
+<script src="/ui.js"></script>
 <script src="/research.js"></script>
 <script src="/app.js"></script>
 </body>

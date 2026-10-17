@@ -916,6 +916,14 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
         self.assertIn("script-src 'self'", meta["Content-Security-Policy"])
         self.assertNotIn("unsafe-inline", meta["Content-Security-Policy"])
 
+    def test_ui_script_served_with_same_strict_csp(self):
+        status, body, meta = self.request("GET", "/ui.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"DemoUI", body)
+        self.assertNotIn(b"innerHTML", body)
+        self.assertIn("script-src 'self'", meta["Content-Security-Policy"])
+        self.assertNotIn("unsafe-inline", meta["Content-Security-Policy"])
+
     def test_simulation_endpoint_creates_session(self):
         status, _, meta = self.unlock()
         cookie = self.cookie_from(meta)

@@ -27,6 +27,7 @@ from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
     _REJECTED_DRAFT_MAX_CHARS, build_full_input)
 from replay_provider_scenarios import CaptureCache
+from worked_first_context import PROMPT_VERSION as WF_PROMPT
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_assessment_worked_review import (
     grounded_rows, make_grounded_bank, make_grounded_taxonomy,
@@ -484,7 +485,7 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
                 self.assertEqual(len(opener.calls), 1)
                 request = opener.calls[0]["body"]
                 self.assertIn(
-                    "aitta_worked_first_evidence_author_v3",
+                    WF_PROMPT,
                     request["messages"][1]["content"])
                 job = service._load_meta(sid)["provider_job"]
                 self.assertEqual(job["status"], "fallback")

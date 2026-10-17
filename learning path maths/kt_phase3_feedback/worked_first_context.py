@@ -2,9 +2,11 @@
 import copy
 import math
 
-CONTEXT_VERSION = "worked_first_assessment_research_context_v1"
+from research_content_descriptions import MATHEMATICAL_TASKS
+
+CONTEXT_VERSION = "worked_first_assessment_research_context_v2"
 SCHEMA = "phase3_worked_first_feedback_generation_v1"
-PROMPT_VERSION = "aitta_worked_first_evidence_author_v4"
+PROMPT_VERSION = "aitta_worked_first_evidence_author_v6"
 WF_MAX_TOKENS = 4096
 KT_BOUNDARY = (
     "Experimental pre-answer predictions, not post-assessment mastery, "
@@ -28,8 +30,11 @@ INSTRUCTIONS = (
     "its recorded and correct options. A selected option does not reveal "
     "the student's reasoning or why it was chosen. Do not infer guessing, "
     "misconceptions, forgotten rules, fatigue, confidence, or ability. "
-    "The graph only states content membership, not prerequisite relationships "
-    "or a validated learning path.\n"
+    "The graph states content membership, not prerequisites or a validated "
+    "learning path. Its subtopics include shared mathematical_task descriptions "
+    "for assessment_records with matching skill_id and subtopic_id. Null "
+    "means unavailable. These describe task requirements, not measured skills, "
+    "student understanding, or causes of errors.\n"
     "KT context contains experimental probabilities predicted before each "
     "answer, not current mastery estimates. It may inform cautious wording "
     "only when consistent with the observed evidence; do not diagnose, rank "
@@ -53,11 +58,11 @@ INSTRUCTIONS = (
     "questions. "
     "No extra fields, Markdown, HTML, citations, or reasoning trace. "
     "Digits and number words are both allowed, including 20 and twenty. "
-    "Every claim about assessment performance must match the supplied observed evidence for "
-    "the same topic and denominator. Distinguish topic totals from "
-    "subtopic counts; a topic total must not be attributed to a single "
-    "subtopic. Do not invent assessment counts or derive "
-    "new performance percentages. Worked solutions may calculate the "
+    "Match performance claims to the supplied topic or subtopic and "
+    "denominator. Prefer topic totals for strengths; subtopic counts are "
+    "included in their topic, not additional successes. Never attribute a "
+    "topic total to one subtopic, invent counts, or derive performance "
+    "percentages. Worked solutions may calculate the "
     "intermediate quantities required by the selected question. "
     "The application owns the scored results and "
     "answer records. Keep the supplied question, options, selected "
@@ -82,12 +87,10 @@ INSTRUCTIONS = (
     "assessment_summary: introduce the assessment results meaningfully and "
     "concisely without inferring overall ability. You may briefly state "
     "the supplied correct and total counts. "
-    "observed_strengths: describe successes supported by correct recorded "
-    "answers, explicitly limited to this assessment. Describe observed "
-    "performance, not reliable skill, mastery, or lasting ability. "
-    "If none were correct, "
-    "offer a respectful starting point for supported review, not a strength "
-    "that was not observed. Equal counts do not imply equal understanding. "
+    "observed_strengths: say what was answered correctly on this assessment, "
+    "not that the student showed understanding, reliable skill, mastery, or "
+    "lasting ability. If none were correct, offer supported review, not "
+    "an unobserved strength. Equal counts do not imply equal understanding. "
     "review_focus: explain the selected assessed topics as possible review "
     "starting points, retaining isolated-error, limited-coverage and tied "
     "priority qualifications from the supplied plans. Do not choose new "
@@ -98,10 +101,10 @@ INSTRUCTIONS = (
     "requirements. Refer to the worked explanations below without "
     "repeating their full steps in next_steps. For each worked "
     "review, develop a clear explanation of the mathematics and why the "
-    "method works. Ask one question inviting the student to explain "
-    "a mathematical relationship or justify a step; a closely "
-    "related hypothetical comparison may be used only as a question, not "
-    "as an assigned replacement exercise. Do not infer why the student "
+    "method works. Each reasoning question must explicitly ask the student "
+    "to explain why a method works or justify a step, not merely calculate "
+    "another answer. A related hypothetical comparison must also ask for "
+    "that justification, not assign a replacement exercise. Do not infer why the student "
     "selected an incorrect option, diagnose a misconception, introduce a "
     "different exercise, or invent facts about the student's approach. "
     "Calculate intermediate results from the supplied question; do not "
@@ -133,7 +136,9 @@ def _assessment_projection(evidence, assessment_context):
         children = []
         for leaf in topic["subtopics"]:
             children.append({"subtopic_id": leaf["id"],
-                             "subtopic_name": leaf["name"]})
+                             "subtopic_name": leaf["name"],
+                             "mathematical_task":
+                                 MATHEMATICAL_TASKS.get(leaf["id"])})
             for qid in leaf["question_ids"]:
                 leaves[qid] = (leaf["id"], leaf["name"])
         topics.append({"skill_id": topic["skill_id"],

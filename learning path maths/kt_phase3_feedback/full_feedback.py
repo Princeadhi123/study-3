@@ -767,8 +767,7 @@ def _valid_section_text(text):
     return (isinstance(text, str) and text.strip()
             and len(text) <= FULL_FEEDBACK_SECTION_MAX_CHARS
             and not any(ord(c) < 0x20 and c not in "\n\t" for c in text)
-            and not _MARKUP.search(text)
-            and not _INTERNAL_PROCESS_LANGUAGE.search(text))
+            and not _MARKUP.search(text))
 
 
 def _without_scope(text):
@@ -787,8 +786,7 @@ def _valid_worked_text(text, max_chars):
     return (isinstance(text, str) and text.strip()
             and len(text) <= max_chars
             and not any(ord(c) < 0x20 and c not in "\n\t" for c in text)
-            and not _MARKUP.search(text)
-            and not _INTERNAL_PROCESS_LANGUAGE.search(text))
+            and not _MARKUP.search(text))
 
 
 def _normalize_worked_review(entry):
@@ -872,8 +870,9 @@ def validate_full_reply(reply, selected_id, review_examples=None):
     return normalized
 
 
-# numeric_character and number_word are historical rejection codes kept
-# for compatibility with old capture metadata; they are no longer emitted.
+# numeric_character, number_word and internal_process_language are
+# historical rejection codes kept for compatibility with old capture
+# metadata; they are no longer emitted.
 SECTION_REJECTION_PREFIXES = (
     "invalid_section_type", "empty_section", "section_too_long",
     "control_character", "numeric_character", "markup", "number_word",
@@ -915,8 +914,6 @@ def full_reply_rejection_code(reply, selected_id, review_examples=None):
             reason = "control_character"
         elif _MARKUP.search(text):
             reason = "markup"
-        elif _INTERNAL_PROCESS_LANGUAGE.search(text):
-            reason = "internal_process_language"
         else:
             reason = None
         if reason is not None:
@@ -930,6 +927,35 @@ def full_reply_rejection_code(reply, selected_id, review_examples=None):
                 reply["worked_reviews"], review_examples) is None):
         return "invalid_worked_reviews"
     return None
+
+
+def feedback_wording_warnings(preview):
+    """Teacher-facing wording warnings for the currently displayed
+    feedback draft.
+
+    Internal application terminology is a style concern, not a
+    structural or security failure: it produces a review warning on the
+    approval card rather than rejecting the generation. Only displayed
+    narrative/explanation text is scanned - a single edited document
+    overrides the structured sections, and questions, options, labels
+    and identifiers are never wording the provider authored.
+    """
+    if not isinstance(preview, dict):
+        return []
+    if isinstance(preview.get("document_text"), str):
+        texts = [preview["document_text"]]
+    else:
+        texts = [s.get("text") for s in preview.get("sections") or []
+                 if isinstance(s, dict)]
+        for example in preview.get("review_examples") or []:
+            if not isinstance(example, dict):
+                continue
+            texts.extend(example.get("steps") or [])
+            texts.append(example.get("reasoning_question"))
+    flagged = any(isinstance(text, str)
+                  and _INTERNAL_PROCESS_LANGUAGE.search(text)
+                  for text in texts)
+    return ["internal_process_language"] if flagged else []
 
 
 def full_message_sections(sections):

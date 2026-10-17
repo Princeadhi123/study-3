@@ -34,6 +34,7 @@ STATIC_FILES = {
     "/teacher.html": "teacher.html",
     "/app.js": "app.js",
     "/research.js": "research.js",
+    "/ui.js": "ui.js",
     "/styles.css": "styles.css",
 }
 CONTENT_TYPES = {

@@ -1,15 +1,20 @@
 """Tests for the worked-first provider evidence projection (lead module)."""
 import copy
+import json
 import math
 import unittest
 
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
-from evidence_feedback import build_evidence
+from evidence_feedback import build_evidence, build_research_evidence
 from live_diagnostics import LiveDiagnostics
+from research_content_descriptions import MATHEMATICAL_TASKS
+from research_runtime import load_research_bank, teacher_content_context
 from worked_first_context import (
-    CONTEXT_VERSION, KT_BOUNDARY, build_worked_first_context,
-    validate_worked_first_context)
+    CONTEXT_VERSION, INSTRUCTIONS, KT_BOUNDARY, PROMPT_VERSION,
+    build_worked_first_context, validate_worked_first_context)
 from tests.helpers import make_bank, make_taxonomy, responses
+from tests.test_assessment_worked_review import (
+    grounded_rows, make_grounded_bank, make_grounded_taxonomy, positions)
 from tests.test_kt_adapter import FakeKT
 
 
@@ -53,6 +58,151 @@ class WorkedFirstContextTests(unittest.TestCase):
         self.blocks = {
             "midpoint": _diag_block(result=self.midpoint),
             "end": _diag_block(result=self.end)}
+
+    def test_prompt_version_and_instruction_contract(self):
+        self.assertEqual(PROMPT_VERSION,
+                         "aitta_worked_first_evidence_author_v6")
+        self.assertEqual(CONTEXT_VERSION,
+                         "worked_first_assessment_research_context_v2")
+        for needle in (
+                "say what was answered correctly on this assessment",
+                "not that the student showed understanding",
+                "subtopic counts are included in their topic, "
+                "not additional successes",
+                "shared mathematical_task descriptions",
+                "Null means unavailable",
+                "not measured skills, student understanding, or causes "
+                "of errors",
+                "Each reasoning question must explicitly ask the "
+                "student to explain why a method works or justify a "
+                "step",
+                "not merely calculate another answer",
+                "A related hypothetical comparison must also ask for "
+                "that justification"):
+            self.assertIn(needle, INSTRUCTIONS)
+
+    def test_graph_leaves_carry_shared_task_descriptions(self):
+        # Grounded fixture: each of the four concept leaves carries the
+        # shared MATHEMATICAL_TASKS description once; the 40 records
+        # join by skill_id/subtopic_id and never embed the text.
+        bank = make_grounded_bank()
+        taxonomy = make_grounded_taxonomy(bank)
+        wrong = sorted({positions(bank, "pct", 0)[0],
+                        positions(bank, "alg", 0)[0]})
+        rows = grounded_rows(bank, wrong)
+        evidence = build_evidence(bank, taxonomy, rows)
+        assessment_context = _context_for(bank, taxonomy, rows)
+        context = build_worked_first_context(
+            evidence, assessment_context)
+        leaves = {leaf["subtopic_id"]: leaf
+                  for topic in context["concept_graph"]["topics"]
+                  for leaf in topic["subtopics"]}
+        self.assertEqual(set(leaves),
+                         {"percentage_amount", "divisibility",
+                          "combine_like_terms", "fraction_product"})
+        for leaf in leaves.values():
+            self.assertEqual(set(leaf), {"subtopic_id", "subtopic_name",
+                                         "mathematical_task"})
+            self.assertEqual(leaf["mathematical_task"],
+                             MATHEMATICAL_TASKS[leaf["subtopic_id"]])
+        # One shared description per distinct subtopic leaf.
+        texts = [leaf["mathematical_task"] for leaf in leaves.values()]
+        self.assertEqual(len(texts), len(set(texts)))
+        # Every record joins back to a leaf; the description text is
+        # never copied onto records.
+        leaf_qid = {qid: leaf["id"]
+                    for topic in taxonomy["topics"]
+                    for leaf in topic["subtopics"]
+                    for qid in leaf["question_ids"]}
+        allowed = {"position", "skill_id", "subtopic_id",
+                   "subtopic_name", "question", "options",
+                   "selected_answer", "correct_answer", "correct"}
+        records = context["assessment_records"]
+        self.assertEqual(len(records), 40)
+        for record, question in zip(records, bank["questions"]):
+            self.assertEqual(set(record), allowed)
+            self.assertEqual(record["subtopic_id"],
+                             leaf_qid[question["question_id"]])
+        self.assertNotIn("mathematical_task",
+                         json.dumps(records))
+
+    def test_unknown_subtopic_ids_have_null_task_descriptions(self):
+        # The generic helper bank's synthetic subtopic ids are not in
+        # MATHEMATICAL_TASKS; leaves must carry null, never an invented
+        # description.
+        context = build_worked_first_context(
+            self.evidence, self.assessment_context, self.blocks)
+        leaves = [leaf
+                  for topic in context["concept_graph"]["topics"]
+                  for leaf in topic["subtopics"]]
+        self.assertTrue(leaves)
+        for leaf in leaves:
+            self.assertNotIn(leaf["subtopic_id"], MATHEMATICAL_TASKS)
+            self.assertIsNone(leaf["mathematical_task"])
+        validate_worked_first_context(
+            copy.deepcopy(context), self.evidence,
+            self.assessment_context)
+
+    def test_task_description_tamper_fails_validation(self):
+        context = build_worked_first_context(
+            self.evidence, self.assessment_context, self.blocks)
+        before = copy.deepcopy(self.assessment_context)
+        validate_worked_first_context(
+            copy.deepcopy(context), self.evidence,
+            self.assessment_context)
+        for mutate in (
+                lambda leaf: leaf.update(
+                    mathematical_task="Invented task text."),
+                lambda leaf: leaf.pop("mathematical_task"),
+                lambda leaf: leaf.update(extra_field="x")):
+            tampered = copy.deepcopy(context)
+            mutate(tampered["concept_graph"]["topics"][0]
+                   ["subtopics"][0])
+            with self.assertRaises(ValueError):
+                validate_worked_first_context(
+                    tampered, self.evidence, self.assessment_context)
+        # Validation never mutates the supplied bank/taxonomy context.
+        self.assertEqual(self.assessment_context, before)
+
+    def test_research_bank_leaves_match_teacher_content_context(self):
+        # Real bound research banks: every graph leaf's description is
+        # exactly the teacher-facing mathematical_task text for the
+        # same concept, and all 40 records still join by
+        # skill_id/subtopic_id.
+        for mode in ("warm", "cold"):
+            with self.subTest(mode=mode):
+                bank, taxonomy, _ = load_research_bank(mode)
+                rows = [{"question_id": q["question_id"],
+                         "selected_index": q["answer_index"]}
+                        for q in bank["questions"]]
+                evidence = build_research_evidence(
+                    bank, taxonomy, rows)
+                context = build_worked_first_context(
+                    evidence, _context_for(bank, taxonomy, rows))
+                tasks = {e["concept_id"]: e["mathematical_task"]
+                         for e in teacher_content_context(mode)
+                         ["exercises"]}
+                leaf_qid = {qid: leaf["id"]
+                            for topic in taxonomy["topics"]
+                            for leaf in topic["subtopics"]
+                            for qid in leaf["question_ids"]}
+                leaves = [leaf
+                          for topic in context["concept_graph"]
+                          ["topics"]
+                          for leaf in topic["subtopics"]]
+                self.assertTrue(leaves)
+                for leaf in leaves:
+                    self.assertEqual(
+                        leaf["mathematical_task"],
+                        tasks[leaf["subtopic_id"]])
+                records = context["assessment_records"]
+                self.assertEqual(len(records), 40)
+                for record, question in zip(records,
+                                            bank["questions"]):
+                    self.assertEqual(
+                        record["subtopic_id"],
+                        leaf_qid[question["question_id"]])
+                    self.assertTrue(record["correct"])
 
     def test_records_cover_all_40_in_order_with_correct_flags(self):
         context = build_worked_first_context(

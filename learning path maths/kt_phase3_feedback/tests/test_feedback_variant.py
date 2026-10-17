@@ -431,7 +431,7 @@ class FeedbackVariantTests(unittest.TestCase):
         wf = generator.payloads[0]["worked_first_context"]
         self.assertEqual(
             wf["version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         self.assertEqual(len(wf["assessment_records"]), 40)
         self.assertEqual(
             wf["model_context"]["checkpoints"]["end"]["status"],
@@ -440,7 +440,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v4")
+            "aitta_worked_first_evidence_author_v6")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")
@@ -449,7 +449,7 @@ class FeedbackVariantTests(unittest.TestCase):
         review = meta["checkpoints"]["end"]["student_review"]
         self.assertEqual(
             review["trace"]["generation_context_version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         self.assertEqual(
             review["provider_context"]["version"], wf["version"])
         self.assertEqual(

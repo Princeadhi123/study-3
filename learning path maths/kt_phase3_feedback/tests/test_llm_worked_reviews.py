@@ -21,6 +21,7 @@ from pathlib import Path
 
 import phase3_paths  # noqa: F401
 import worked_review_math
+from research_content_descriptions import MATHEMATICAL_TASKS
 from aitta_generator import AittaGenerationError, AittaGenerator
 from assessment_worked_review import build_assessment_review_examples
 from demo_api import make_server
@@ -32,7 +33,8 @@ from feedback_practice import resolve_practice
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
-    build_multi_full_input, validate_worked_reviews)
+    build_multi_full_input, feedback_wording_warnings,
+    validate_worked_reviews)
 from replay_provider_scenarios import CaptureCache
 from worked_first_context import (
     PROMPT_VERSION as WF_PROMPT, SCHEMA as WF_SCHEMA, WF_MAX_TOKENS,
@@ -144,6 +146,18 @@ class WorkedReviewValidationTests(unittest.TestCase):
             validate_worked_reviews(list(reversed(self.valid)),
                                     self.examples),
             [self.valid[1], self.valid[0]])
+
+    def test_internal_process_wording_accepted(self):
+        # Internal application terminology is a downstream teacher
+        # review warning, not a validation rejection.
+        flagged = [dict(self.valid[0],
+                        steps=["Redo the card using the feedback "
+                               "plan."]),
+                   dict(self.valid[1],
+                        reasoning_question="Why does the practice "
+                                           "context help here?")]
+        out = validate_worked_reviews(flagged, self.examples)
+        self.assertEqual(out, flagged)
 
     def test_no_ready_examples_requires_empty_list(self):
         none_ready = [{"question_id": "q_down", "status": "unavailable"}]
@@ -267,7 +281,18 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v4")
+                         "aitta_worked_first_evidence_author_v6")
+        # The wire context carries one shared task description per
+        # graph leaf; the 40 records still join only by ids.
+        wf = context["worked_first_context"]
+        tasks = {leaf["subtopic_id"]: leaf["mathematical_task"]
+                 for topic in wf["concept_graph"]["topics"]
+                 for leaf in topic["subtopics"]}
+        self.assertEqual(tasks["percentage_amount"],
+                         MATHEMATICAL_TASKS["percentage_amount"])
+        self.assertEqual(len(wf["assessment_records"]), 40)
+        self.assertNotIn("mathematical_task",
+                         json.dumps(wf["assessment_records"]))
         meta = generator.last_metadata
         self.assertEqual(meta["status"], "completed")
         self.assertEqual(meta["prompt_version"], WF_PROMPT)
@@ -1020,6 +1045,39 @@ class WorkedReviewWireTests(unittest.TestCase):
         snapshot = service.snapshot(sid, token)
         self.assertNotIn("rejected_draft", json.dumps(snapshot))
 
+    def test_internal_process_wording_reaches_teacher_as_warning(self):
+        # A provider draft carrying internal application terminology is
+        # accepted end to end: the job completes with no rejected draft
+        # and the teacher delivery carries the wording warning while
+        # the student still sees nothing before release.
+        opener = WorkedReviewOpener(
+            sections=dict(VALID_SECTIONS,
+                          next_steps="Review the practice contexts "
+                                     "with your teacher."))
+        service = DemoService(
+            root=Path(self.tmp.name) / "svc_warn",
+            bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank),
+            provider_mode="hosted",
+            generator=self._generator(opener))
+        self.addCleanup(service.close, wait=True)
+        created = service.create_session(feedback_variant="worked_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "ready"),
+            "provider job did not reach ready")
+        gen_exec = (service._load_meta(sid)["provider_job"]
+                    ["executions"]["student"]["generator"])
+        self.assertIsNone(gen_exec.get("rejected_draft"))
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        self.assertEqual(delivery["wording_warnings"],
+                         ["internal_process_language"])
+        self.assertIsNone(service.snapshot(sid, token)
+                          ["feedback"]["end"])
+
     def test_deterministic_preview_comparison_teacher_only(self):
         cases = [
             ("worked_first", "aligned_two_topic", "worked_first", True),
@@ -1312,7 +1370,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             execs.setdefault("student", {})["generator"] = {
                 "capture_file": "aitta_full_test_attempt_1.json",
                 "reused": False,
-                "original_call_latency_ms": 17731.54,
+                "original_call_latency_ms": 22465.534,
                 "automatic_retry": {"attempts": 2, "max_attempts": 3,
                                     "stop_reason": "success"},
                 "metadata": {"status": "completed"}}
@@ -1402,7 +1460,8 @@ class WorkedReviewBrowserTests(unittest.TestCase):
                       "wording", research_text)
         self.assertIn("Generation details", research_text)
         self.assertIn("Aitta provenance", research_text)
-        self.assertIn("17731.54 ms", research_text)
+        self.assertIn("22.47 seconds", research_text)
+        self.assertNotIn("22465.534 ms", research_text)
         self.assertIn("2 of 3", research_text)
         self.assertNotIn("Shared feedback draft", research_text)
         self.assertNotIn("All candidates", research_text)
@@ -2114,6 +2173,79 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             ".end-deterministic-comparison').textContent")
         self.assertIn("Deterministic end feedback - comparison",
                       comparison)
+        self.assertEqual(b.errors, [])
+
+    def test_internal_process_wording_warning_teacher_view(self):
+        # A provider draft containing internal application terminology
+        # is accepted and reaches the teacher preview with a wording
+        # warning; editing the flagged sentence clears the warning and
+        # release stays an explicit educator approval.
+        self.opener.sections = dict(
+            VALID_SECTIONS,
+            next_steps="Review the practice contexts with your "
+                       "teacher.")
+        created = self.service.create_session(
+            feedback_variant="worked_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] == "ready"),
+            "provider job did not reach ready")
+        gen_exec = (self.service._load_meta(sid)["provider_job"]
+                    ["executions"]["student"]["generator"])
+        self.assertIsNone(gen_exec.get("rejected_draft"))
+        b = self._teacher_feedback_tab()
+        warning = ("document.querySelector('#tab-feedback "
+                   ".feedback-wording-warning')")
+        b.wait(f"Boolean({warning})")
+        self.assertEqual(
+            b.js(f"{warning}.textContent"),
+            "Wording review: this draft contains internal application "
+            "terminology. Check and edit it before approval. This is a "
+            "review warning, not a validation failure.")
+        # The flagged provider narrative is the current preview, not a
+        # deterministic fallback.
+        release_card = ("document.querySelector('#tab-feedback "
+                        ".release-card')")
+        self.assertIn("AI-generated",
+                      b.js(f"{release_card}.textContent"))
+        self.assertIn(
+            "Review the practice contexts with your teacher.",
+            b.js("document.querySelector('#tab-feedback "
+                 ".feedback-preview').textContent"))
+        # The student still sees nothing before explicit release.
+        self.assertIsNone(self.service.snapshot(sid, token)
+                          ["feedback"]["end"])
+        # Editing the flagged wording clears the warning on the next
+        # poll; the hash changes only because the edit was saved.
+        hash_before = (self.service.teacher_session(sid)
+                       ["feedback_delivery"]["preview_sha256"])
+        detail = self.service.teacher_session(sid)
+        preview = detail["feedback_delivery"]["preview"]
+        sections = {s["kind"]: s["text"] for s in preview["sections"]}
+        sections["next_steps"] = ("Review the activities below with "
+                                  "your teacher.")
+        saved = self.service.save_feedback_edit(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"], "sections": sections})
+        self.assertTrue(saved["saved"])
+        b.wait(f"!{warning}")
+        self.assertIsNone(b.js(warning))
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-feedback').textContent"
+            ".includes('internal application terminology')"))
+        self.assertNotEqual(
+            hash_before,
+            self.service.teacher_session(sid)["feedback_delivery"]
+            ["preview_sha256"])
+        # Release remains an explicit approval, not automatic.
+        detail = self.service.teacher_session(sid)
+        released = self.service.release_feedback(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"], "reviewer_label": "browser-test"})
+        self.assertTrue(released["released"])
         self.assertEqual(b.errors, [])
 
 

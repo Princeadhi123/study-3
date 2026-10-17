@@ -25,8 +25,9 @@ function initResearchWorkspace({mountDetail, getConfig}) {
   }
 
   function heading(kicker, title, description) {
-    const node = el("div", null, "section-heading");
-    node.append(el("p", kicker, "eyebrow"), el("h2", title), el("p", description, "meta"));
+    const node = DemoUI.heading(title, description,
+      {eyebrow: kicker, level: 2});
+    node.classList.add("section-heading");
     return node;
   }
 
@@ -207,25 +208,17 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       ? `${bankLabel} · 40 questions per scenario.`
       : `${bankLabel} · 40 questions per scenario. Synthetic research bank pending educator review — not approved for learner delivery.`));
     libraryPane.append(notice("Planning a blind review? Complete it before opening scenario drafts. Prior exposure can bias preferences."));
-    libraryPane.append(
-      el("p", "Observed answer counts describe this assessment. Model estimates, feedback choices and review judgments remain exploratory."),
-      el("p", "All scenarios are synthetic test cases, not real learners. Replaying them tests software changes; it does not validate learning or mastery."));
-    const summary = library.summary;
-    const metrics = el("div", null, "metrics-grid");
-    metrics.append(metric(summary.scenarios, "Saved scenarios", "Chosen stress-test cases"),
-      metric(summary.end_packages, "End-stage drafts", "Retained original audiences"),
-      metric(summary.selection_differences, "Different selections", `Of ${summary.end_packages} end packages; not a quality score`),
-      metric(summary.fallback_packages, "Recorded fallbacks", "End packages in this replay"));
-    libraryPane.append(metrics, el("p", "These summary counts describe the retained original report, not the most recent replay.", "meta small"));
     const replayToolbar = el("div", null, "replay-toolbar");
     const replayAll = button(`Replay all ${library.scenarios.length} scenarios`, () => confirmReplay(library.scenarios.map((row) => row.id)), "primary");
     replayAll.id = "replay-all";
     const replayFiltered = button("Replay filtered scenarios", () => confirmReplay(filteredIds));
     replayFiltered.id = "replay-filtered";
     replayToolbar.append(replayAll, replayFiltered, el("span", "Same answers · current scoring, feedback & model inference · no retraining", "meta small"));
-    libraryPane.append(replayToolbar);
     const history = el("div"); history.id = "replay-history";
-    libraryPane.append(history);
+    const replayTools = DemoUI.section("Replay tools",
+      "Replay the same recorded answers through the current pipeline — browsing never starts a run.");
+    replayTools.append(replayToolbar, history);
+    libraryPane.append(replayTools);
     const controls = el("div", null, "library-controls");
     const search = el("input");
     search.type = "search"; search.placeholder = "Search a scenario or skill…"; search.id = "scenario-search";
@@ -235,7 +228,6 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const order = select([["name", "Name A–Z"], ["low", "Observed score: low first"], ["high", "Observed score: high first"]]);
     controls.append(field("Find a case", search), field("Scenario group", group),
       field("Selection comparison", difference), field("Sort by", order));
-    libraryPane.append(controls);
     const layout = el("div", null, "library-layout");
     const side = el("div", null, "scenario-browser");
     const count = el("p", null, "meta small"); count.setAttribute("role", "status");
@@ -259,7 +251,11 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     viewHost = el("div");
     detail.append(versionBar, caseNotice, viewHost);
     scenarioView = mountDetail(viewHost, {refresh: () => loadCase(chosen)});
-    side.append(count, list); layout.append(side, detail); libraryPane.append(layout);
+    side.append(count, list); layout.append(side, detail);
+    const browse = DemoUI.section("Browse scenarios",
+      "Inspect a retained original or a replay result. Scenario evidence stays read-only.");
+    browse.append(controls, layout);
+    libraryPane.append(browse);
     function renderCases() {
       const query = search.value.trim().toLowerCase();
       const rows = library.scenarios.filter((row) =>
@@ -329,7 +325,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     try {
       const response = await api(version ? `/api/teacher/replays/${version}/cases/${id}` : `/api/teacher/scenarios/${id}`);
       if (request !== caseRequest || id !== chosen || version !== selectedRun) return;
-      const view = version ? {...response, replay_changes: row.changes || null} : response.detail;
+      const view = version ? response : response.detail;
       exposed = true;
       try { sessionStorage.setItem("replay-exposure", "yes"); } catch (err) {}
       scenarioView.update(view);
@@ -597,7 +593,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       comparisonPane.replaceChildren(heading("EDUCATOR REVIEW / SOURCE-MASKED", "Judge the draft, not the provider.",
         "Compare two drafts against the same observed evidence. Sources stay hidden until every judgment in this review is saved."));
       comparisonPane.append(notice("This is a pilot review protocol, not a validated benchmark. Case order is shuffled, A/B placement is balanced, and identical drafts are retained. Writing style or prior exposure may still reveal sources."));
-      const layout = el("div", null, "comparison-setup");
+      const layout = el("div", null, "comparison-setup ui-section");
       const form = el("form", null, "card review-form");
       form.append(el("h3", "Start a review"));
       const reviewer = el("input"); reviewer.required = true; reviewer.maxLength = 80;
@@ -693,7 +689,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const pair = el("div", null, "compare blind-pair");
     pair.append(draft("Draft A", task.drafts.A, "SOURCE HIDDEN"), draft("Draft B", task.drafts.B, "SOURCE HIDDEN"));
     comparisonPane.append(pair);
-    const form = el("form", null, "card judgment-form");
+    const form = el("form", null, "card ui-section judgment-form");
     form.append(el("h3", "Record your judgment"), el("p",
       "Consider evidence support, usefulness, audience fit, and unsupported claims. A tie is valid; choose neither if both drafts are unsuitable.", "meta"));
     const choices = el("fieldset", null, "preference-options");

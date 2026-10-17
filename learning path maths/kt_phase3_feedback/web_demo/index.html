@@ -21,31 +21,35 @@
 <main id="student-root" tabindex="-1">
   <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Final feedback is shown only after an educator reviews and releases it.</p>
   <p id="student-error" class="error" role="alert" hidden></p>
-  <p id="session-bank" class="meta"></p>
-  <label for="display-language">Question display</label>
-  <select id="display-language">
-    <option value="en">English (draft translation)</option>
-    <option value="fi">Suomi (original wording)</option>
-  </select>
+  <div class="ui-inset display-settings">
+    <p id="session-bank" class="meta"></p>
+    <label for="display-language">Question display</label>
+    <select id="display-language">
+      <option value="en">English (draft translation)</option>
+      <option value="fi">Suomi (original wording)</option>
+    </select>
+  </div>
 
-  <section id="start-panel" class="card assessment-intro" hidden>
+  <section id="start-panel" class="card ui-section assessment-intro" hidden>
     <p class="eyebrow">EXPLORE THE ASSESSMENT EXPERIENCE</p>
     <h2>A small assessment.<br>A closer look at the evidence.</h2>
     <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then receive final feedback after your teacher reviews and releases it.</p>
     <div class="assessment-facts"><div><strong>40</strong><span>Ordered questions</span></div><div><strong>4</strong><span>Mathematics skills</span></div><div><strong>2</strong><span>Checkpoints</span></div></div>
-    <label for="bank-mode">Assessment bank — 40 questions in one selected bank</label>
-    <select id="bank-mode">
-      <option value="demo">Demo bank</option>
-      <option value="warm">Warm research bank</option>
-      <option value="cold">Cold research bank</option>
-    </select>
-    <p class="meta">Warm and cold research banks are independently math checked and pending educator approval. Use synthetic responses only.</p>
-    <label class="attestation"><input id="synthetic-consent" type="checkbox"><span>I will use synthetic responses only, not real student information. I understand that this is a research prototype.</span></label>
-    <button id="start-button" class="primary" disabled>Start synthetic session</button>
-    <p class="meta small">Progress is saved in this browser. English question wording is a prototype translation pending educator review.</p>
+    <div class="ui-inset">
+      <label for="bank-mode">Assessment bank — 40 questions in one selected bank</label>
+      <select id="bank-mode">
+        <option value="demo">Demo bank</option>
+        <option value="warm">Warm research bank</option>
+        <option value="cold">Cold research bank</option>
+      </select>
+      <p class="meta">Warm and cold research banks are independently math checked and pending educator approval. Use synthetic responses only.</p>
+      <label class="attestation"><input id="synthetic-consent" type="checkbox"><span>I will use synthetic responses only, not real student information. I understand that this is a research prototype.</span></label>
+      <button id="start-button" class="primary" disabled>Start synthetic session</button>
+      <p class="meta small">Progress is saved in this browser. English question wording is a prototype translation pending educator review.</p>
+    </div>
   </section>
 
-  <section id="question-panel" class="card" hidden aria-live="polite">
+  <section id="question-panel" class="card ui-section" hidden aria-live="polite">
     <div class="rail">
       <p class="meta">Question <span id="q-pos" class="num"></span> of
       <span class="num">40</span></p>
@@ -61,13 +65,13 @@
     <button id="submit-answer" class="primary" disabled>Submit answer</button>
   </section>
 
-  <section id="pause-panel" class="card" hidden aria-live="polite">
+  <section id="pause-panel" class="card ui-section" hidden aria-live="polite">
     <h2 id="pause-heading" tabindex="-1">Your halfway check-in</h2>
     <div id="pause-message"></div>
     <button id="continue-button" class="primary">Continue to the next 20 questions</button>
   </section>
 
-  <section id="end-panel" class="card" hidden>
+  <section id="end-panel" class="card ui-section" hidden>
     <h2>Assessment complete</h2>
     <p class="meta">Feedback status:
       <span id="job-status" class="chip"></span></p>
@@ -87,6 +91,7 @@
   </section>
   <footer class="page-footer"><span>Evidence Lab / Phase 03</span><span>Synthetic only · Observed scores are not mastery estimates</span></footer>
 </main>
+<script src="/ui.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

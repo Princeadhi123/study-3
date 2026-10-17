@@ -262,7 +262,7 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v4`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v6`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the selected review questions (recorded prompt, options,
@@ -295,12 +295,25 @@ recorded at creation and never reinterpreted afterwards:
   requires an explicit empty `worked_reviews` list. A fresh hosted call
   happens only when the user explicitly starts one.
 
+  The concept graph's subtopic leaves now carry the shared
+  `mathematical_task` descriptions — the same authoritative task
+  requirement text shown to teachers — attached once per graph leaf
+  rather than repeated on each of the 40 records. Records still join to
+  leaves only via `skill_id`/`subtopic_id`; unknown subtopics carry
+  `null`. These are descriptive task requirements, not diagnostics —
+  they describe content, not measured skills, student understanding, or
+  causes of errors — and they add no provider calls.
+
   Section wording may now use digits or number words (20 and twenty are
   both fine). Reply validation still checks only shape — section keys,
-  titles, length, markup, control characters, internal-process wording,
+  titles, length, markup, control characters,
   candidate match, and secrets; it does not verify that a numerical claim
   matches the observed evidence, so educator review stays required and
-  scored results/cards remain application-owned. The prompt version bumps
+  scored results/cards remain application-owned. Internal-process style
+  terminology is no longer a validation rejection: it surfaces as a
+  wording review warning on the teacher approval card and clears when
+  the flagged wording is removed, while structural and security checks
+  remain hard rejections. Wording is not fact-verified. The prompt version bumps
   (`..._v4`, `..._v8`, `..._v2`, `shape_checked_v2`) leave prior captures
   untouched and never trigger a retry implicitly — a fresh hosted call
   happens only when the user explicitly starts one.
@@ -725,7 +738,7 @@ and is not the current UI backend.
 
 | Area | Files |
 |---|---|
-| Current web boundary/UI | `demo_api.py`, `web_demo/app.js`, `web_demo/index.html`, `web_demo/teacher.html`, `web_demo/styles.css` |
+| Current web boundary/UI | `demo_api.py`, `web_demo/app.js`, `web_demo/index.html`, `web_demo/teacher.html`, `web_demo/styles.css`, `web_demo/ui.js` |
 | Demo orchestration | `demo_service.py` |
 | Retained report, labels + source-masked review | `research_workspace.py`, `web_demo/research.js` |
 | New replay orchestration + result snapshots | `scenario_replays.py`, `DemoService` |
@@ -738,6 +751,13 @@ and is not the current UI backend.
 | Batch replay/evaluation | `integrated_synthetic_pipeline.py`, `evaluate_evidence_feedback.py`, `evaluate_scenarios.py`, `compare_scenarios.py`, `scenario_runner.py`, `scenario_report.py`, `render_provider_replay.py`, `visualize_scenarios.py` |
 | Legacy API/demo | `api.py`, `demo_cli.py`, `synthetic_feedback.py`, `synthetic_feedback_demo.py` |
 | Canonical paths/provenance | `phase3_paths.py`, `provenance.py` |
+
+`web_demo/ui.js` is a small shared presentation layer (`DemoUI`: `heading`,
+`section`, `disclosure`, `stat`) used by both pages for consistent module
+styling. It renders plain DOM/textContent only — no inputs, behaviour, or
+data inference; `app.js` and `research.js` remain the controllers. Because
+`/ui.js` is served through the static allowlist, an already-running demo
+server must be restarted before it can serve the file.
 
 ## 10. Retained evidence and metrics
 

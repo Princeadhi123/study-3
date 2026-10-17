@@ -3352,16 +3352,16 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
         review = meta["checkpoints"]["end"]["student_review"]
         self.assertEqual(
             review["trace"]["generation_context_version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         self.assertEqual(
             review["provider_context"]["version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         self.assertEqual(
             meta["feedback_context_version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         self.assertEqual(
             meta["provider_job"]["prompt_versions"]["generation"],
-            "aitta_worked_first_evidence_author_v3")
+            "aitta_worked_first_evidence_author_v6")
         preview = service.teacher_session(sid)["feedback_delivery"][
             "preview"]
         self.assertNotIn("provider_context", json.dumps(preview))

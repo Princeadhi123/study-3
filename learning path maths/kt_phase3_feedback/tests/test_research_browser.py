@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import copy
 import io
 import json
 import os
@@ -216,12 +217,12 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(view["bank_mode"], "warm")
         self.assertNotIn("conformal", json.dumps(view["checkpoints"]))
         # The applied feedback plan is readable in the decision panel, not
-        # only inside raw candidate JSON. The overview "What changed" block
-        # only exists on a replayed version, so it confirms the detail view
-        # has switched to the fresh replay result.
+        # only inside raw candidate JSON. The overview provenance carries
+        # replay metadata only on a replayed version, so it confirms the
+        # detail view has switched to the fresh replay result.
         pane = "document.querySelector('#scenario-tab-feedback')"
         overview = "document.querySelector('#scenario-tab-overview')"
-        b.wait(f"{overview}.textContent.includes('What changed')")
+        b.wait(f"{overview}.textContent.includes('\"replay\": {{')")
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         b.wait(f"{pane}.textContent.includes('Review evidence')")
         ev = (f"{pane}.querySelector('.end-review-evidence')"
@@ -247,7 +248,7 @@ class ResearchBrowserTests(unittest.TestCase):
         # The version picker selects the new run once its detail is loaded.
         b.wait("document.querySelector('#scenario-version').options.length === 2"
                " && document.querySelector('#scenario-version').value !== ''")
-        b.wait(f"{overview}.textContent.includes('What changed')")
+        b.wait(f"{overview}.textContent.includes('\"replay\": {{')")
         b.wait(f"{ev}.includes('Multiple incorrect answers')")
         self.assertTrue(b.js(
             f"{ev}.includes('0 correct, 10 incorrect of 10 assessed')"))
@@ -286,7 +287,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("!document.querySelector('dialog[open]')")
         self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 0)
         b.wait("document.querySelector('#replay-history').textContent.includes('1/1')")
-        b.wait("document.querySelector('#scenario-tab-overview').textContent.includes('What changed')")
+        b.wait("document.querySelector('#scenario-tab-overview').textContent.includes('\"replay\": {')")
         self.assertFalse(b.js("document.querySelector('#scenario-tab-evidence').hidden"))
         self.assertEqual(b.js("document.querySelectorAll('#scenario-tab-evidence .qrow').length"), 40)
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=research]').click()")
@@ -303,7 +304,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(1440, 1100)
         b.screenshot("replay-feedback-desktop.png")
         b.js("document.querySelector('#scenario-version').value=''; document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
-        b.wait("!document.querySelector('#scenario-tab-overview').textContent.includes('What changed')")
+        b.wait("!document.querySelector('#scenario-tab-overview').textContent.includes('\"replay\": {')")
         b.js("document.querySelector('#scenario-search').value='Every answer'; document.querySelector('#scenario-search').dispatchEvent(new Event('input')); document.querySelector('#replay-filtered').click()")
         b.wait("document.querySelector('dialog[open]')")
         self.assertEqual(b.js("document.querySelectorAll('.replay-dialog').length"), 1)
@@ -332,14 +333,299 @@ class ResearchBrowserTests(unittest.TestCase):
         b.screenshot("replay-changes-desktop.png")
         self.assertEqual(b.errors, [])
 
-    def test_workspace_and_assessment_journey(self):
+    def test_summary_modules_without_replay_comparison(self):
         b = self.browser
+        ov = "document.querySelector('#scenario-tab-overview')"
         self.navigate("/teacher")
         b.wait("document.querySelector('#unlock-panel')")
         b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
         b.wait("!document.querySelector('#teacher-app').hidden")
+        # DemoUI builds escaped DOM only and distinguishes missing from zero.
+        self.assertEqual(b.js("DemoUI.stat('Total', 0).textContent"), "Total0")
+        self.assertTrue(b.js("DemoUI.stat('Total', null).textContent.includes('Unavailable')"))
+        self.assertTrue(b.js("DemoUI.stat('Total', undefined).textContent.includes('Unavailable')"))
+        self.assertEqual(b.js("DemoUI.heading('<b>x</b>').querySelector('h3').textContent"), "<b>x</b>")
+        self.assertFalse(b.js("DemoUI.disclosure('More', 'k').open"))
+        self.assertEqual(b.js("DemoUI.disclosure('More', 'k').dataset.disclosureKey"), "k")
+        # A retained original shows the modular summary and no replay comparison.
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Session summary')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Session overview')"))
+        self.assertEqual(b.js(f"{ov}.querySelectorAll('.ui-stat').length"), 3)
+        detail = b.js("fetch('/api/teacher/scenarios/' "
+                      "+ document.querySelector('.scenario-row.active').dataset.caseId"
+                      ").then(r => r.json())")["detail"]
+        stats = b.js(f"[...{ov}.querySelectorAll('.ui-stat')].map(n => n.textContent)")
+        self.assertIn(f"Answered{detail['answered_count']}/40", stats)
+        self.assertIn(
+            f"Observed total{detail['observed_total']['correct']}"
+            f" / {detail['observed_total']['out_of']}", stats)
+        self.assertTrue(all("null" not in s for s in stats))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Assessment snapshot')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Feedback & diagnostics')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Release status')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Saved read-only feedback')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Explore this session')"))
+        self.assertIsNone(b.js(f"{ov}.querySelector('.summary-replay-comparison')"))
+        provenance = f"{ov}.querySelector('details[data-disclosure-key=provenance]')"
+        self.assertTrue(b.js(f"Boolean({provenance})"))
+        self.assertFalse(b.js(f"{provenance}.open"))
+        # Each explore action activates its matching workspace tab only.
+        for label, tab in (("Inspect answers", "evidence"),
+                           ("Inspect saved feedback", "feedback"),
+                           ("Open diagnostics", "research")):
+            b.js("[...document.querySelectorAll('#scenario-tab-overview .ui-actions button')]"
+                 f".find(n => n.textContent === '{label}').click()")
+            b.wait(f"!document.querySelector('#scenario-tab-{tab}').hidden")
+            b.js("document.querySelector('#scenario-ws-tabs [data-tab=overview]').click()")
+            b.wait(f"!{ov}.hidden")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=evidence]').click()")
+        b.js("document.querySelector('#scenario-tab-evidence').scrollIntoView({block:'start'})")
+        b.screenshot("answers-evidence-desktop.png")
+        b.js("document.querySelector('#scenario-ws-tabs [data-tab=overview]').click()")
+        b.js(f"{ov}.scrollIntoView({{block:'start'}})")
+        b.screenshot("summary-original-desktop.png")
+        # A replayed version no longer renders the replay comparison
+        # disclosure; the modular summary and provenance remain.
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        b.wait("document.querySelector('.run-history > summary').textContent.includes('Latest: Complete')")
+        b.wait("document.querySelector('#scenario-version').value !== ''")
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('.summary-replay-comparison')"))
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('details[data-disclosure-key"
+            "=summary-replay-comparison]')"))
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('details[data-disclosure-key^=replay-diff]')"))
+        self.assertFalse(b.js(
+            f"{ov}.textContent.includes('What changed from the retained "
+            "original?')"))
+        self.assertTrue(b.js(f"{ov}.textContent.includes('Session summary')"))
+        self.assertTrue(b.js(f"Boolean({provenance})"))
+        b.js(f"{provenance}.open = true")
+        self.assertTrue(b.js(f"{provenance}.open"))
+        # A forced data change re-renders the pane; keyed disclosures survive.
+        original_session = self.service.teacher_session
+        def marked(session_id):
+            view = copy.deepcopy(original_session(session_id))
+            view["description"] = "Summary refresh marker"
+            return view
+        self.service.teacher_session = marked
+        try:
+            b.js("document.querySelector('#scenario-version')"
+                 ".dispatchEvent(new Event('change'))")
+            b.wait(f"{ov}.textContent.includes('Summary refresh marker')")
+            self.assertTrue(b.js(f"{provenance}.open"))
+            self.assertIsNone(b.js(
+                f"{ov}.querySelector('.summary-replay-comparison')"))
+        finally:
+            self.service.teacher_session = original_session
+        b.js("document.querySelector('#scenario-version')"
+             ".dispatchEvent(new Event('change'))")
+        b.wait(f"!{ov}.textContent.includes('Summary refresh marker')")
+        self.assertTrue(b.js(f"{provenance}.open"))
+        b.js(f"{ov}.scrollIntoView({{block:'start'}})")
+        b.screenshot("summary-replay-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js(f"{ov}.scrollIntoView({{block:'start'}})")
+        b.screenshot("summary-replay-mobile.png")
+        b.viewport(320, 844)
+        self.assert_no_overflow()
+        b.screenshot("summary-replay-320.png")
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('[data-workspace=comparison]').click()")
+        b.wait("document.querySelector('.comparison-setup form')")
+        b.js("document.querySelector('.comparison-setup').scrollIntoView({block:'start'})")
+        b.screenshot("blind-comparison-setup-desktop.png")
+        # Scoping is per session view: the retained original has no comparison.
+        b.js("document.querySelector('#scenario-version').value=''; document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
+        b.wait(f"!{ov}.textContent.includes('\"replay\": {{')")
+        self.assertIsNone(b.js(f"{ov}.querySelector('.summary-replay-comparison')"))
+        # A live session keeps the same modular summary.
+        b.js("document.querySelector('[data-workspace=live]').click(); document.querySelector('#sim-form').requestSubmit()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.wait("document.querySelector('#tab-overview .ui-stat')")
+        self.assertEqual(b.js("document.querySelectorAll('#tab-overview .ui-stat').length"), 3)
+        self.assertTrue(b.js("document.querySelector('#tab-overview').textContent.includes('Live synthetic session')"))
+        self.assertTrue(b.js("document.querySelector('#tab-overview').textContent.includes('Review feedback')"))
+        b.js("document.querySelector('#tab-overview').scrollIntoView({block:'start'})")
+        b.screenshot("summary-live-desktop.png")
+        # Missing counts render as unavailable — never as null or zero.
+        def nulled(session_id):
+            view = copy.deepcopy(original_session(session_id))
+            view["answered_count"] = None
+            view["observed_total"] = {"correct": None, "out_of": None}
+            return view
+        self.service.teacher_session = nulled
+        try:
+            b.wait("document.querySelector('#tab-overview').textContent.includes('Unavailable')")
+            self.assertIn("AnsweredUnavailable",
+                          b.js("[...document.querySelectorAll('#tab-overview .ui-stat')]"
+                               ".map(n => n.textContent)"))
+            self.assertIn("Observed totalUnavailable",
+                          b.js("[...document.querySelectorAll('#tab-overview .ui-stat')]"
+                               ".map(n => n.textContent)"))
+            self.assertFalse(b.js("[...document.querySelectorAll('#tab-overview .ui-stat')]"
+                                  ".some(n => n.textContent.includes('null'))"))
+        finally:
+            self.service.teacher_session = original_session
+        b.wait("document.querySelector('#tab-overview .ui-stat')"
+               ".textContent.match(/\\d+\\/40/)")
+        # The Feedback heading keeps the midpoint/end distinction accurate.
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        b.wait("document.querySelector('#tab-feedback').childElementCount > 0")
+        fb = "document.querySelector('#tab-feedback')"
+        self.assertTrue(b.js(f"{fb}.textContent.includes("
+                             "'Final feedback requires educator approval.')"))
+        self.assertTrue(b.js(f"{fb}.textContent.includes("
+                             "'midpoint check-in is shown automatically')"))
+        # Mobile captures scroll the target into view after the viewport change.
+        b.viewport(390, 844)
+        for tab, shot in (("overview", "summary-live-mobile.png"),
+                          ("evidence", "answers-evidence-mobile.png"),
+                          ("feedback", "feedback-drafts-mobile.png")):
+            b.js(f"document.querySelector('#ws-tabs [data-tab={tab}]').click()")
+            b.wait(f"!document.querySelector('#tab-{tab}').hidden")
+            b.js(f"document.querySelector('#tab-{tab}').scrollIntoView({{block:'start'}})")
+            self.assert_no_overflow()
+            b.screenshot(shot)
+        b.viewport(320, 844)
+        b.js("document.querySelector('#ws-tabs [data-tab=overview]').click()")
+        b.js("document.querySelector('#tab-overview').scrollIntoView({block:'start'})")
+        self.assert_no_overflow()
+        b.screenshot("summary-live-320.png")
+        # Library and blind-comparison setup keep the same module rhythm.
+        b.viewport(390, 844)
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('#library-pane').scrollIntoView({block:'start'})")
+        self.assert_no_overflow()
+        b.screenshot("library-modular-mobile.png")
+        b.js("document.querySelector('[data-workspace=comparison]').click()")
+        b.wait("document.querySelector('.comparison-setup form')")
+        b.js("document.querySelector('.comparison-setup').scrollIntoView({block:'start'})")
+        self.assert_no_overflow()
+        b.screenshot("blind-comparison-setup-mobile.png")
+        b.viewport(1440, 1100)
+        # The student page uses the same module styling end to end.
+        self.navigate("/")
+        b.wait("!document.querySelector('#start-panel').hidden")
+        b.screenshot("student-setup-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js("document.querySelector('#start-panel').scrollIntoView({block:'start'})")
+        b.screenshot("student-setup-mobile.png")
+        b.viewport(1440, 1100)
+        b.js("document.querySelector('#synthetic-consent').click(); document.querySelector('#start-button').click()")
+        b.wait("!document.querySelector('#question-panel').hidden")
+        b.screenshot("student-question-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js("document.querySelector('#question-panel').scrollIntoView({block:'start'})")
+        b.screenshot("student-question-mobile.png")
+        b.viewport(1440, 1100)
+        for index in range(40):
+            if index == 20:
+                b.wait("!document.querySelector('#pause-panel').hidden")
+                b.js("document.querySelector('#continue-button').click()")
+            b.wait(f"document.querySelector('#q-pos').textContent === '{index + 1}'")
+            b.js("document.querySelector('#q-options input').click(); document.querySelector('#submit-answer').click()")
+        b.wait("!document.querySelector('#end-panel').hidden")
+        b.screenshot("student-end-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js("document.querySelector('#end-panel').scrollIntoView({block:'start'})")
+        b.screenshot("student-end-mobile.png")
+        b.viewport(1440, 1100)
+        self.assertEqual(b.errors, [])
+
+    def test_workspace_and_assessment_journey(self):
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        # Log out lives in the masthead and stays hidden until unlock.
+        self.assertTrue(b.js("document.querySelector('#logout').hidden"))
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        self.assertFalse(b.js("document.querySelector('#logout').hidden"))
+        self.assertIsNotNone(b.js("document.querySelector('.masthead #logout')"))
+        self.assertIsNone(b.js("document.querySelector('.workspace-nav #logout')"))
+        self.assertEqual(b.js(
+            "document.querySelectorAll('.workspace-nav [data-workspace]')"
+            ".length"), 3)
         self.assertTrue(b.js("document.querySelector('#library-pane').hidden && document.querySelector('#comparison-pane').hidden"))
         self.assertEqual(b.js("document.querySelector('#pin-input').value"), "")
+        b.screenshot("masthead-unlocked-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.screenshot("masthead-unlocked-mobile.png")
+        b.viewport(320, 844)
+        self.assert_no_overflow()
+        b.viewport(1440, 1100)
+        # Run configuration lives collapsed inside the Live sessions
+        # workspace below the tab bar — never a floating top strip.
+        strip = "document.querySelector('#config-strip')"
+        run_cfg = "document.querySelector('#run-configuration')"
+        nav = "document.querySelector('.workspace-nav')"
+        self.assertTrue(b.js(
+            f"Boolean({run_cfg}) && {run_cfg}.contains({strip})"))
+        self.assertTrue(b.js(
+            f"document.querySelector('#live-pane').contains({run_cfg})"))
+        self.assertFalse(b.js(f"{run_cfg}.open"))
+        self.assertIn("Run configuration", b.js(f"{run_cfg}.textContent"))
+        self.assertTrue(b.js(
+            f"{nav}.compareDocumentPosition({strip}) "
+            "& Node.DOCUMENT_POSITION_FOLLOWING"))
+        nav_y = f"{nav}.getBoundingClientRect().top + window.scrollY"
+        y0 = b.js(nav_y)
+        b.js(f"{run_cfg}.open = true")
+        self.assertTrue(b.js(
+            f"{strip}.textContent.includes('providers:')"))
+        self.assertTrue(b.js(
+            f"{strip}.textContent.includes('New provider calls')"))
+        self.assertAlmostEqual(b.js(nav_y), y0, delta=1)
+        # Refreshing the chips does not collapse the disclosure.
+        time.sleep(2.4)
+        self.assertTrue(b.js(f"{run_cfg}.open"))
+        self.assertAlmostEqual(b.js(nav_y), y0, delta=1)
+        # Switching workspaces keeps the tab bar exactly in place.
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('#scenario-search')")
+        self.assertAlmostEqual(b.js(nav_y), y0, delta=1)
+        b.js("document.querySelector('[data-workspace=comparison]').click()")
+        b.wait("document.querySelector('.comparison-setup')")
+        self.assertAlmostEqual(b.js(nav_y), y0, delta=1)
+        b.js("document.querySelector('[data-workspace=live]').click()")
+        b.wait("!document.querySelector('#live-pane').hidden")
+        self.assertAlmostEqual(b.js(nav_y), y0, delta=1)
+        self.assertIsNone(b.js(
+            "document.querySelector('#library-pane #config-strip')"))
+        self.assertIsNone(b.js(
+            "document.querySelector('#comparison-pane #config-strip')"))
+        b.screenshot("run-config-expanded-desktop.png")
+        b.js(f"{run_cfg}.open = false")
+        b.screenshot("run-config-collapsed-desktop.png")
+        b.viewport(390, 844)
+        ym = b.js(nav_y)
+        b.js(f"{run_cfg}.open = true")
+        self.assertAlmostEqual(b.js(nav_y), ym, delta=1)
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelector('#scenario-search')")
+        self.assertAlmostEqual(b.js(nav_y), ym, delta=1)
+        b.js("document.querySelector('[data-workspace=live]').click()")
+        b.wait("!document.querySelector('#live-pane').hidden")
+        self.assert_no_overflow()
+        b.screenshot("run-config-expanded-mobile.png")
+        b.js(f"{run_cfg}.open = false")
+        b.screenshot("run-config-collapsed-mobile.png")
+        b.viewport(1440, 1100)
         if DEFAULT_REPORT.is_file():
             self.service.research = ResearchWorkspace(self.root / "data")
         b.js("document.querySelector('[data-workspace=library]').click()")
@@ -349,10 +635,18 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js("Boolean(document.querySelector('#research-readiness'))"))
         self.assertEqual(b.js("document.querySelectorAll('.readiness-card').length"), 0)
         library_text = "document.querySelector('#library-pane').textContent"
-        self.assertTrue(b.js(f"{library_text}.includes('Observed answer counts describe this assessment')"))
-        self.assertTrue(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
+        self.assertFalse(b.js(f"{library_text}.includes('Observed answer counts describe this assessment')"))
+        self.assertFalse(b.js(f"{library_text}.includes('synthetic test cases, not real learners')"))
         self.assertFalse(b.js("document.querySelector('#library-pane').textContent.toLowerCase().includes('conformal')"))
         self.assertFalse(b.js(f"{library_text}.includes('Replay identity and interpretation limits')"))
+        # The library keeps scenario count and replay actions but the
+        # retired summary metrics row and its disclaimer are gone.
+        self.assertEqual(b.js("document.querySelectorAll('#library-pane .metric-card').length"), 0)
+        self.assertIsNone(b.js("document.querySelector('#library-pane .metrics-grid')"))
+        self.assertFalse(b.js(f"{library_text}.includes('retained original report')"))
+        self.assertTrue(b.js(f"{library_text}.includes('of {expected} scenarios')"))
+        self.assertTrue(b.js("document.querySelector('#replay-all').textContent.includes('Replay all "
+                             f"{expected} scenarios')"))
         self.assertFalse(b.js("Boolean(document.querySelector('.scenario-row.active'))"))
         try:
             exposure_before = b.js("sessionStorage.getItem('replay-exposure')")
@@ -399,7 +693,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.service.research = ResearchWorkspace(self.root / "data", self.report)
         b.js("document.querySelector('[data-workspace=comparison]').click()")
         b.wait("document.querySelector('.comparison-setup form')")
-        b.js("const f=document.querySelector('.comparison-setup form'); f.querySelector('input').value='browser-fixture'; f.requestSubmit()")
+        b.js("const f=document.querySelector('.comparison-setup form'); f.querySelector('input').value='browser-fixture'; "
+             "const e=f.querySelectorAll('select')[1]; if (!e.value) e.value='yes'; f.requestSubmit()")
         b.wait("document.querySelector('.judgment-form')")
         self.assertTrue(b.js("document.querySelector('#comparison-pane').textContent.includes('Prior exposure declared')"))
         self.assertFalse(b.js("Boolean(document.querySelector('#comparison-pane a[download]'))"))
@@ -432,6 +727,23 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(390, 844)
         self.assert_no_overflow()
         b.viewport(1440, 1100)
+        # An expired session is caught by the next poll: the workspace
+        # and the masthead Log out both hide again.
+        b.js("fetch('/api/teacher/logout', {method: 'POST', headers: "
+             "{'Content-Type': 'application/json'}, body: '{}'})")
+        b.wait("!document.querySelector('#unlock-panel').hidden")
+        self.assertTrue(b.js("document.querySelector('#teacher-app').hidden"))
+        self.assertTrue(b.js("document.querySelector('#logout').hidden"))
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        self.assertFalse(b.js("document.querySelector('#logout').hidden"))
+        # The masthead Log out button ends the session itself.
+        b.js("document.querySelector('#logout').click()")
+        b.wait("!document.querySelector('#unlock-panel').hidden")
+        self.assertTrue(b.js("document.querySelector('#logout').hidden"))
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        self.assertFalse(b.js("document.querySelector('#logout').hidden"))
         self.navigate("/")
         b.wait("!document.querySelector('#start-panel').hidden")
         self.assertTrue(b.js("document.querySelector('#start-button').disabled"))
@@ -721,7 +1033,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("document.querySelector('#scenario-version').options.length === 2")
         b.js(f"document.querySelector('#scenario-version').value={json.dumps(run['id'])}; document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
         b.wait("document.querySelector('#scenario-tab-overview')"
-               ".textContent.includes('What changed')")
+               ".textContent.includes('\"replay\": {')")
         b.js("document.querySelector('#scenario-ws-tabs [data-tab=feedback]').click()")
         card = "#scenario-tab-feedback .midpoint-feedback-card"
         b.wait(f"Boolean(document.querySelector('{card}'))")
@@ -1087,6 +1399,14 @@ class ResearchBrowserTests(unittest.TestCase):
                    "details[data-disclosure-key=feedback-editing]')")
         self.assertTrue(b.js(f"Boolean({edit_dd})"))
         self.assertFalse(b.js(f"{edit_dd}.open"))
+        self.assertEqual(b.js(
+            f"getComputedStyle({research_dd}.querySelector(':scope > summary'))"
+            ".fontWeight"), "400")
+        self.assertEqual(b.js(
+            f"getComputedStyle({research_dd}.querySelector(':scope > summary'))"
+            ".fontWeight"),
+            b.js(f"getComputedStyle({edit_dd}.querySelector(':scope > summary'))"
+                 ".fontWeight"))
         b.js(f"{research_dd}.open = true")
         self.assertIsNone(b.js(
             "document.querySelector('#tab-feedback .compare')"))
@@ -2792,7 +3112,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(generator.calls, 1)
         self.assertEqual(
             generator.payloads[0]["worked_first_context"]["version"],
-            "worked_first_assessment_research_context_v1")
+            "worked_first_assessment_research_context_v2")
         b.wait(f"{detail}.textContent.includes("
                f"{json.dumps(WORKED_SECTIONS['observed_strengths'])})")
         b.wait(f"{notice}.textContent.includes('Replay is complete')")
@@ -2875,12 +3195,61 @@ class ResearchBrowserTests(unittest.TestCase):
                 f"{graph}.includes(englishSkillName({json.dumps(topic['skill_name'])})"
                 f" + ' — ' + {topic['correct']} + '/' + {topic['out_of']}"
                 " + ' observed correct')"))
+        # Focus rows show the observed counts plus exactly one Review
+        # focus badge — the old plain-text suffix is gone for good.
         for leaf in [s for t in end["graph"]["topics"] for s in t["subtopics"]
                      if s["subtopic_id"] in focus_subs]:
             line = (f"{leaf['subtopic_name']}: {leaf['correct']} correct, "
-                    f"{leaf['incorrect']} incorrect of {leaf['out_of']}"
-                    " · selected review focus")
-            self.assertTrue(b.js(f"{graph}.includes({json.dumps(line)})"))
+                    f"{leaf['incorrect']} incorrect of {leaf['out_of']}")
+            li = ("[...document.querySelectorAll('#tab-graph "
+                  ".skill-topics li')].find(n => n.textContent.includes("
+                  f"{json.dumps(leaf['subtopic_name'] + ':')}))")
+            self.assertTrue(b.js(
+                f"{li}.textContent.includes({json.dumps(line)})"))
+            self.assertFalse(b.js(
+                f"{li}.textContent.includes('selected review focus')"))
+            self.assertEqual(b.js(
+                f"{li}.querySelectorAll('.skill-badge').length"), 1)
+            self.assertEqual(b.js(
+                f"{li}.querySelector('.skill-badge').textContent"),
+                "Review focus")
+        non_focus = next(s for t in end["graph"]["topics"]
+                         for s in t["subtopics"]
+                         if s["subtopic_id"] not in focus_subs)
+        nli = ("[...document.querySelectorAll('#tab-graph "
+               ".skill-topics li')].find(n => n.textContent.includes("
+               f"{json.dumps(non_focus['subtopic_name'] + ':')}))")
+        self.assertEqual(b.js(
+            f"{nli}.querySelectorAll('.skill-badge').length"), 0)
+        self.assertTrue(b.js(
+            f"{nli}.textContent.includes('observed')"
+            f" || {nli}.textContent.includes('correct')"))
+        b.js("document.querySelector('#tab-graph .skill-topics')"
+             ".scrollIntoView({block: 'center'})")
+        b.screenshot("skill-map-topics-desktop.png")
+
+        # A baseline shown while the provider job is still pending is
+        # a provisional focus — the badge says so.
+        original = self.service.teacher_session
+        self.addCleanup(
+            setattr, self.service, "teacher_session", original)
+
+        def provisional(sid_arg):
+            v = copy.deepcopy(original(sid_arg))
+            v["checkpoints"]["end"].pop("student_review", None)
+            v["provider_job"]["status"] = "pending"
+            return v
+        self.service.teacher_session = provisional
+        b.wait("document.querySelector('#tab-graph .skill-topics')"
+               ".textContent.includes('Review focus (provisional)')")
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-graph .skill-topics')"
+            ".textContent.includes('selected review focus')"))
+        self.service.teacher_session = original
+        b.wait("document.querySelector('#tab-graph .skill-topics')"
+               ".textContent.includes('Review focus')"
+               " && !document.querySelector('#tab-graph .skill-topics')"
+               ".textContent.includes('provisional')")
 
         def card(qid):
             return ("document.querySelector('#tab-graph "
@@ -3257,10 +3626,107 @@ class ResearchBrowserTests(unittest.TestCase):
                         "Teacher-edited wording.")
                 return v
             return patched
+        expected_numbers = {e["question_id"]: i + 1
+                            for i, e in enumerate(practices)}
+        topic_counts = {}
+        for e in practices:
+            topic_counts.setdefault(e["skill_id"], []).append(e)
+        pane = "document.querySelector('#tab-graph')"
         self.service.teacher_session = selected()
         open_graph()
+        self.assertTrue(b.js(
+            f"{pane}.textContent.includes('Numbers identify drafts in "
+            "bank order; they do not indicate difficulty or a "
+            "recommended sequence.')"))
+        # Default collapsed view then the open practice module.
+        b.js("document.querySelector('#tab-graph')"
+             ".scrollIntoView({block: 'start'})")
+        b.screenshot("skill-map-default-desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        b.js("document.querySelector('#tab-graph')"
+             ".scrollIntoView({block: 'start'})")
+        b.screenshot("skill-map-default-mobile.png")
+        b.js("document.querySelector('#tab-graph .skill-topics')"
+             ".scrollIntoView({block: 'start'})")
+        b.screenshot("skill-map-topics-mobile.png")
+        b.viewport(1440, 1100)
+        # Numbered cards in stable bank order, grouped by first-seen
+        # topic, never renumbered by selection state.
         b.js("document.querySelector('#tab-graph "
              "details[data-disclosure-key=skill-map-practice]').open = true")
+        cards = b.js(
+            "[...document.querySelectorAll('#tab-graph "
+            "details[data-disclosure-key^=\"skill-practice:\"]')]"
+            ".map(n => ({key: n.dataset.disclosureKey, num: "
+            "n.dataset.practiceNumber, label: n.querySelector("
+            "'.skill-task-label').textContent}))")
+        self.assertEqual(len(cards), 24)
+        self.assertEqual(len({c["key"] for c in cards}), 24)
+        self.assertEqual([int(c["num"]) for c in cards],
+                         list(range(1, 25)))
+        practice_by_qid = {e["question_id"]: e for e in practices}
+        for c in cards:
+            qid = c["key"].split(":", 1)[1]
+            number = expected_numbers[qid]
+            self.assertEqual(int(c["num"]), number)
+            self.assertTrue(
+                c["label"].startswith(f"Practice draft {number} · "))
+            self.assertIn(
+                practice_by_qid[qid]["concept_label"], c["label"])
+        groups = b.js(
+            "[...document.querySelectorAll('#tab-graph .practice-topic')]"
+            ".map(g => ({head: g.querySelector('h4').textContent, "
+            "count: g.querySelectorAll('details[data-disclosure-key^="
+            "\"skill-practice:\"]').length}))")
+        self.assertEqual(len(groups), len(topic_counts))
+        for g, exs in zip(groups, topic_counts.values()):
+            self.assertEqual(g["count"], len(exs))
+        chosen_group = (
+            "[...document.querySelectorAll('#tab-graph .practice-topic')]"
+            ".find(g => g.querySelector('details[data-disclosure-key="
+            f"\"skill-practice:{chosen['question_id']}\"]'))")
+        other_group = (
+            "[...document.querySelectorAll('#tab-graph .practice-topic')]"
+            ".find(g => g.querySelector('details[data-disclosure-key="
+            f"\"skill-practice:{other_topic['question_id']}\"]'))")
+        self.assertTrue(b.js(
+            f"{chosen_group}.querySelector('h4').textContent"
+            ".includes('1 selected practice')"))
+        self.assertFalse(b.js(
+            f"{other_group}.querySelector('h4').textContent"
+            ".includes('selected practice')"))
+        self.assertTrue(b.js(
+            f"{ch}.classList.contains('is-selected')"))
+        self.assertFalse(b.js(
+            f"{st}.classList.contains('is-selected')"))
+        # Keyboard activation on the focused summary toggles the
+        # module and its open state survives the polling re-render.
+        summary = ("document.querySelector('#tab-graph "
+                   "details[data-disclosure-key=skill-map-practice] "
+                   "summary')")
+        b.js(f"{summary}.focus()")
+
+        def press_enter():
+            for ktype in ("keyDown", "keyUp"):
+                b.command("Input.dispatchKeyEvent", {
+                    "type": ktype, "key": "Enter", "code": "Enter",
+                    "keyIdentifier": "Enter", "windowsVirtualKeyCode": 13,
+                    "nativeVirtualKeyCode": 13,
+                    **({"text": "\r", "unmodifiedText": "\r"}
+                       if ktype == "keyDown" else {})})
+        press_enter()
+        self.assertFalse(b.js(
+            "document.querySelector('#tab-graph "
+            "details[data-disclosure-key=skill-map-practice]').open"))
+        press_enter()
+        self.assertTrue(b.js(
+            "document.querySelector('#tab-graph "
+            "details[data-disclosure-key=skill-map-practice]').open"))
+        time.sleep(2.4)
+        self.assertTrue(b.js(
+            "document.querySelector('#tab-graph "
+            "details[data-disclosure-key=skill-map-practice]').open"))
         self.assertTrue(b.js(
             f"{summary_text(ch)}.includes('Selected practice')"))
         self.assertTrue(b.js(
@@ -3276,6 +3742,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         b.screenshot("skill-map-practice-selected-desktop.png")
         b.viewport(390, 844)
+        b.js(f"{ch}.open = true")
         b.js(f"{ch}.scrollIntoView({{block: 'center'}})")
         self.assert_no_overflow()
         self.assertTrue(b.js(
@@ -3361,6 +3828,11 @@ class ResearchBrowserTests(unittest.TestCase):
             f"{summary_text(ch)}.includes('Selection not recorded')"))
         self.assertFalse(b.js(
             f"{summary_text(ch)}.includes('Not selected')"))
+        # Bank-order numbering is stable across selection states.
+        self.assertTrue(b.js(
+            f"{ch}.querySelector('.skill-task-label').textContent"
+            ".startsWith('Practice draft "
+            f"{expected_numbers[chosen['question_id']]} ')"))
 
         # Terminal non-selection states stay honest.
         def terminal(status):
@@ -3392,6 +3864,603 @@ class ResearchBrowserTests(unittest.TestCase):
         open_graph()
         self.assertTrue(b.js(
             f"{summary_text(ch)}.includes('Selection pending')"))
+        self.assertEqual(b.errors, [])
+
+    def test_diagnostics_panel_chart_inspector_and_states(self):
+        # Redesigned Model diagnostics tab: editorial header, segmented
+        # checkpoint picker, accessible before-answer chart with
+        # inspector, answer-level table, and honest
+        # pending/unavailable/invalid states.
+        bank = make_bank()
+        rows = responses(bank)
+        for index in (4, 25):
+            question = bank["questions"][index]
+            rows[index] = dict(
+                rows[index],
+                selected_index=(question["answer_index"] + 1)
+                % len(question["options"]))
+        created = self.service.create_session()
+        sid, token = (created["session_id"], created["student_token"])
+        for row in rows:
+            self.service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["checkpoints"]["end"]
+            ["diagnostics_job"]["status"] == "ready"))
+        probs = (self.service._load_meta(sid)["checkpoints"]["end"]
+                 ["diagnostics"]["kt"]
+                 ["p_correct_before_each_answer"])
+        self.assertEqual(len(probs), 40)
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('.session-row')")
+        b.js("document.querySelector('.session-row').click()")
+        b.wait("!document.querySelector('#ws-detail').hidden")
+        b.js("document.querySelector('[data-tab=research]').click()")
+        b.wait("document.querySelector('#tab-research "
+               ".diagnostics-panel')")
+        pane = "document.querySelector('#tab-research')"
+        text = b.js(f"{pane}.textContent")
+        for needle in ("Private research", "Model diagnostics",
+                       "not a mastery score", "Fresh inference",
+                       "Frozen KT",
+                       "Fresh inference using the frozen model",
+                       "Before-answer predictions",
+                       "not a learning curve",
+                       "How to read these diagnostics",
+                       "predictively evaluated on real ViLLE data",
+                       "simulated sessions are not additional "
+                       "real-learner validation",
+                       "Why still research-only"):
+            self.assertIn(needle, text)
+        # Segmented checkpoint picker: two real buttons, one pressed;
+        # the active segment is visibly distinct (teal on white text).
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-research .cp-picker "
+            ".cp-choice').length"), 2)
+        self.assertTrue(b.js(
+            "[...document.querySelectorAll('#tab-research .cp-picker "
+            ".cp-choice')].find(n => n.getAttribute('aria-pressed') "
+            "=== 'true').textContent.includes('All 40 answers')"))
+        seg_styles = json.loads(b.js(
+            "JSON.stringify([...document.querySelectorAll("
+            "'#tab-research .cp-picker .cp-choice')].map((n) => {"
+            " const c = getComputedStyle(n);"
+            " return {bg: c.backgroundColor, color: c.color,"
+            " pressed: n.getAttribute('aria-pressed')}; }))"))
+        active = next(s for s in seg_styles if s["pressed"] == "true")
+        inactive = next(s for s in seg_styles if s["pressed"] == "false")
+        self.assertNotEqual(active["bg"], inactive["bg"])
+        self.assertEqual(active["bg"], "rgb(18, 102, 94)")
+        self.assertEqual(active["color"], "rgb(255, 255, 255)")
+        # 40 interactive data points with honest aria labels.
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-research .kt-point')"
+            ".length"), 40)
+        aria = b.js(
+            "document.querySelector('#tab-research .kt-point')"
+            ".getAttribute('aria-label')")
+        self.assertIn("Answer 1: predicted correctness "
+                      f"{probs[0]:.3f}", aria)
+        self.assertIn("observed Correct", aria)
+        # Axis ticks include first and last positions plus the
+        # second-half boundary on the 40-answer trace.
+        ticks = b.js(
+            "[...document.querySelectorAll('#tab-research "
+            ".axis-label')].map(n => n.textContent)")
+        for tick in ("1", "40", "Second half"):
+            self.assertIn(tick, ticks)
+        # Inspector starts on the first valid point; clicking an
+        # incorrect answer selects it and reports the observed outcome.
+        inspector = ("document.querySelector('#tab-research "
+                     ".kt-inspector')")
+        insp = b.js(f"{inspector}.textContent")
+        self.assertIn("Answer 1", insp)
+        self.assertIn(f"{probs[0]:.3f}", insp)
+        b.js("document.querySelectorAll('#tab-research "
+             ".kt-point')[4].dispatchEvent("
+             "new MouseEvent('click', {bubbles: true}))")
+        insp = b.js(f"{inspector}.textContent")
+        self.assertIn("Answer 5", insp)
+        self.assertIn("Incorrect", insp)
+        self.assertIn(f"{probs[4]:.3f}", insp)
+        self.assertIsNotNone(b.js(
+            "document.querySelector('#tab-research "
+            ".kt-point.selected')"))
+        # The narrow inspector stacks compact labels over full-width
+        # values — no wrapped digits or squeezed words.
+        kv_style = json.loads(b.js(
+            "(() => { const k = document.querySelector('#tab-research "
+            ".kt-inspector .kv .k'); const v = document.querySelector("
+            "'#tab-research .kt-inspector .kv.kt-prob .v');"
+            " return JSON.stringify({minWidth: getComputedStyle(k)"
+            ".minWidth, vHeight: v.getBoundingClientRect().height,"
+            " vText: v.textContent}); })()"))
+        self.assertEqual(kv_style["minWidth"], "0px")
+        self.assertEqual(kv_style["vText"], f"{probs[4]:.3f}")
+        self.assertLess(kv_style["vHeight"], 50)
+        # Keyboard: focus selects, Enter/Space activates without error.
+        b.js("document.querySelectorAll('#tab-research "
+             ".kt-point')[2].focus()")
+        self.assertIn("Answer 3", b.js(f"{inspector}.textContent"))
+        b.js("document.querySelectorAll('#tab-research "
+             ".kt-point')[2].dispatchEvent(new KeyboardEvent("
+             "'keydown', {key: 'Enter', bubbles: true}))")
+        self.assertIn("Answer 3", b.js(f"{inspector}.textContent"))
+        # Whole-plot sweep: hovering anywhere inside the plot bounds
+        # selects the nearest valid answer by position, whatever the
+        # pointer height; the margins leave the selection unchanged.
+        insp_h5 = ("document.querySelector('#tab-research .kt-inspector "
+                   "h5').textContent")
+        spacing = (900 - 2 * 52) / 39
+        plot_bottom = 350 - 58
+        b.js("document.querySelector('#tab-research .ktchart')"
+             ".scrollIntoView({block: 'center'})")
+
+        def svg_client(sx, sy):
+            return json.loads(b.js(
+                "(() => { const svg = document.querySelector("
+                "'#tab-research .ktchart'); const pt = "
+                "svg.createSVGPoint(); pt.x = " + repr(float(sx)) +
+                "; pt.y = " + repr(float(sy)) + "; const r = "
+                "pt.matrixTransform(svg.getScreenCTM());"
+                " return JSON.stringify({x: r.x, y: r.y}); })()"))
+
+        def mouse_move(sx, sy):
+            c = svg_client(sx, sy)
+            b.command("Input.dispatchMouseEvent", {
+                "type": "mouseMoved", "x": c["x"], "y": c["y"]})
+
+        def mouse_click(sx, sy):
+            c = svg_client(sx, sy)
+            for mtype in ("mousePressed", "mouseReleased"):
+                b.command("Input.dispatchMouseEvent", {
+                    "type": mtype, "x": c["x"], "y": c["y"],
+                    "button": "left", "clickCount": 1})
+        mouse_move(52 + 8.2 * spacing, plot_bottom - 10)
+        self.assertEqual(b.js(insp_h5), "Answer 9")
+        self.assertEqual(b.js(
+            "document.querySelector('#tab-research "
+            ".kt-point.selected').dataset.index"), "8")
+        # A different height at the same position keeps the bucket.
+        mouse_move(52 + 8.2 * spacing, 35)
+        self.assertEqual(b.js(insp_h5), "Answer 9")
+        # Sweep to the ends; a background tap shares the same path.
+        mouse_move(52 + 0.3 * spacing, plot_bottom - 20)
+        self.assertEqual(b.js(insp_h5), "Answer 1")
+        mouse_move(52 + 39 * spacing - 2, plot_bottom - 10)
+        self.assertEqual(b.js(insp_h5), "Answer 40")
+        mouse_click(52 + 12 * spacing, 60)
+        self.assertEqual(b.js(insp_h5), "Answer 13")
+        # Margins never move the selection.
+        mouse_move(10, 40)
+        mouse_move(52 + 20 * spacing, 350 - 10)
+        self.assertEqual(b.js(insp_h5), "Answer 13")
+        b.screenshot("diagnostics-hover-desktop.png")
+        # The inspected answer survives the polling re-render —
+        # exactly what the hover request needs while studying a point.
+        time.sleep(2.4)
+        self.assertEqual(b.js(insp_h5), "Answer 13")
+        self.assertEqual(b.js(
+            "document.querySelector('#tab-research "
+            ".kt-point.selected').dataset.index"), "12")
+        # Answer-level data table keeps every position.
+        b.js("document.querySelector('#tab-research "
+             "details[data-disclosure-key=answer-level-data]')"
+             ".open = true")
+        table_text = b.js(
+            "document.querySelector('#tab-research .kt-table')"
+            ".textContent")
+        self.assertIn("Predicted correctness", table_text)
+        self.assertIn("Incorrect", table_text)
+        # Midpoint switch: 20 points, no second-half marker, pressed
+        # state moves with the checkpoint — and each checkpoint keeps
+        # its own remembered inspected answer.
+        b.js("[...document.querySelectorAll('#tab-research .cp-picker "
+             ".cp-choice')].find(n => n.textContent.includes("
+             "'Midpoint')).click()")
+        b.wait("document.querySelectorAll('#tab-research .kt-point')"
+               ".length === 20")
+        self.assertNotIn("Second half", b.js(f"{pane}.textContent"))
+        self.assertTrue(b.js(
+            "[...document.querySelectorAll('#tab-research .cp-picker "
+            ".cp-choice')].find(n => n.textContent.includes("
+            "'Midpoint')).getAttribute('aria-pressed') === 'true'"))
+        self.assertEqual(b.js(insp_h5), "Answer 1")
+        spacing20 = (900 - 2 * 52) / 19
+        mouse_move(52 + 5.2 * spacing20, plot_bottom - 10)
+        self.assertEqual(b.js(insp_h5), "Answer 6")
+        b.js("[...document.querySelectorAll('#tab-research .cp-picker "
+             ".cp-choice')].find(n => n.textContent.trim().startsWith("
+             "'End')).click()")
+        b.wait("document.querySelectorAll('#tab-research .kt-point')"
+               ".length === 40")
+        self.assertEqual(b.js(insp_h5), "Answer 13")
+        # Revisiting the midpoint restores its own selection too.
+        b.js("[...document.querySelectorAll('#tab-research .cp-picker "
+             ".cp-choice')].find(n => n.textContent.includes("
+             "'Midpoint')).click()")
+        b.wait("document.querySelectorAll('#tab-research .kt-point')"
+               ".length === 20")
+        self.assertEqual(b.js(insp_h5), "Answer 6")
+        b.js("[...document.querySelectorAll('#tab-research .cp-picker "
+             ".cp-choice')].find(n => n.textContent.trim().startsWith("
+             "'End')).click()")
+        b.wait("document.querySelectorAll('#tab-research .kt-point')"
+               ".length === 40")
+        self.assertEqual(b.js(insp_h5), "Answer 13")
+        # Mutated payload: one answer record without an observed
+        # outcome reads as unavailable — never incorrect — and an
+        # invalid probability yields no fabricated point.
+        original = self.service.teacher_session
+
+        def degraded(sid_arg):
+            v = original(sid_arg)
+            v = copy.deepcopy(v)
+            v["question_responses"][9]["correct"] = None
+            v["checkpoints"]["end"]["diagnostics"]["kt"][
+                "p_correct_before_each_answer"][14] = "corrupt"
+            return v
+        self.service.teacher_session = degraded
+        b.wait("[...document.querySelectorAll('#tab-research "
+               ".kt-point')].some(n => n.getAttribute('aria-label')"
+               ".includes('Answer 10:') && "
+               "n.getAttribute('aria-label').includes("
+               "'Answer unavailable'))")
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-research .kt-point')"
+            ".length"), 39)
+        b.js("[...document.querySelectorAll('#tab-research "
+             ".kt-point')].find(n => n.getAttribute('aria-label')"
+             ".includes('Answer 10:')).dispatchEvent("
+             "new MouseEvent('click', {bubbles: true}))")
+        insp = b.js(f"{inspector}.textContent")
+        self.assertIn("Answer 10", insp)
+        self.assertIn("Answer unavailable", insp)
+        table_text = b.js(
+            "document.querySelector('#tab-research .kt-table')"
+            ".textContent")
+        self.assertIn("Unavailable", table_text)
+        # Sweeping over the corrupt position picks the nearest valid
+        # neighbour — never the invalid one itself.
+        mouse_move(52 + 14 * spacing, plot_bottom - 10)
+        sel_idx = b.js("document.querySelector('#tab-research "
+                       ".kt-point.selected').dataset.index")
+        self.assertIn(sel_idx, ("13", "15"))
+        self.assertEqual(b.js(insp_h5), f"Answer {int(sel_idx) + 1}")
+        # An all-invalid ready trace renders the explicit empty state,
+        # no fabricated points, and the raw trace disclosure stays.
+        def all_invalid(sid_arg):
+            v = copy.deepcopy(original(sid_arg))
+            v["checkpoints"]["end"]["diagnostics"]["kt"][
+                "p_correct_before_each_answer"] = ["corrupt"] * 40
+            return v
+        self.service.teacher_session = all_invalid
+        b.wait(f"{pane}.textContent.includes('No prediction values "
+               "available')")
+        self.assertEqual(b.js(
+            "document.querySelectorAll('#tab-research .kt-point')"
+            ".length"), 0)
+        self.assertIsNotNone(b.js(
+            "document.querySelector('#tab-research "
+            "details[data-disclosure-key=kt-trace]')"))
+        # Saved (frozen replay) inference is labelled distinctly.
+        def saved_mode(sid_arg):
+            v = copy.deepcopy(original(sid_arg))
+            v["checkpoints"]["end"]["diagnostics"]["mode"] = (
+                "frozen_replay_no_model_rerun")
+            return v
+        self.service.teacher_session = saved_mode
+        b.wait(f"{pane}.textContent.includes('Saved inference')")
+        self.assertIn("Saved historical inference — not recomputed.",
+                      b.js(f"{pane}.textContent"))
+        self.assertNotIn("Fresh inference using",
+                         b.js(f"{pane}.textContent"))
+        # Pending and unavailable checkpoints get honest empty states —
+        # not a fabricated chart.
+        def pending_diag(sid_arg):
+            v = copy.deepcopy(original(sid_arg))
+            v["checkpoints"]["end"]["diagnostics_job"] = {
+                "status": "pending"}
+            v["checkpoints"]["end"]["diagnostics"] = {
+                "status": "unavailable"}
+            return v
+        self.service.teacher_session = pending_diag
+        b.wait("document.querySelector('#tab-research "
+               ".diagnostics-empty[aria-live]')")
+        pending_text = b.js(f"{pane}.textContent")
+        self.assertIn("Diagnostics are still being prepared.",
+                      pending_text)
+        self.assertIn("Answers & scores", pending_text)
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-research .kt-point')"))
+
+        def unavailable_diag(sid_arg):
+            v = copy.deepcopy(original(sid_arg))
+            v["checkpoints"]["end"]["diagnostics_job"] = {
+                "status": "unavailable", "reason": "test_unavailable"}
+            v["checkpoints"]["end"]["diagnostics"] = {
+                "status": "unavailable"}
+            return v
+        self.service.teacher_session = unavailable_diag
+        b.wait(f"{pane}.textContent.includes('not a zero probability')")
+        self.assertIsNone(b.js(
+            "document.querySelector('#tab-research .kt-point')"))
+        self.service.teacher_session = original
+        b.wait("document.querySelectorAll('#tab-research .kt-point')"
+               ".length === 40")
+        self.assert_no_overflow()
+        # Restore the collapsed default before capturing the panel.
+        b.js("document.querySelector('#tab-research "
+             "details[data-disclosure-key=answer-level-data]')"
+             ".open = false")
+
+        def panel_shot(name):
+            box = json.loads(b.js(
+                "JSON.stringify((() => { const r = "
+                "document.querySelector('#tab-research "
+                ".diagnostics-panel').getBoundingClientRect();"
+                " return {x: r.x + window.scrollX,"
+                " y: r.y + window.scrollY, width: r.width,"
+                " height: r.height}; })())"))
+            data = b.command("Page.captureScreenshot", {
+                "format": "png", "captureBeyondViewport": True,
+                "clip": {**box, "scale": 1}})
+            (Path(os.environ["BROWSER_SCREENSHOTS"]) / name).write_bytes(
+                base64.b64decode(data["data"]))
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            panel_shot("diagnostics_panel_desktop.png")
+        b.viewport(390, 844)
+        self.assert_no_overflow()
+        # The horizontally scrolled chart still maps pointer
+        # coordinates through the screen CTM — both sweep and tap
+        # select the visible answer.
+        b.js("document.querySelector('#tab-research .ktchart')"
+             ".scrollIntoView({block: 'center'})")
+        b.js("document.querySelector('#tab-research .kt-scroll')"
+             ".scrollLeft = 200")
+        mouse_move(52 + 20 * spacing, plot_bottom - 10)
+        self.assertEqual(b.js(insp_h5), "Answer 21")
+        mouse_click(52 + 30 * spacing, 100)
+        self.assertEqual(b.js(insp_h5), "Answer 31")
+        # The polling re-render restores the same scroll position —
+        # the teacher does not lose their place on the wide chart.
+        time.sleep(2.4)
+        self.assertEqual(b.js(
+            "document.querySelector('#tab-research .kt-scroll')"
+            ".scrollLeft"), 200)
+        self.assertEqual(b.js(insp_h5), "Answer 31")
+        # The open answer-level table scrolls horizontally rather than
+        # breaking header words; the document still does not overflow.
+        b.js("document.querySelector('#tab-research "
+             "details[data-disclosure-key=answer-level-data]')"
+             ".open = true")
+        self.assertGreater(
+            b.js("document.querySelector('#tab-research .kt-table')"
+                 ".scrollWidth"),
+            b.js("document.querySelector('#tab-research "
+                 ".kt-table-scroll').clientWidth"))
+        self.assert_no_overflow()
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            b.js("document.querySelector('#tab-research "
+                 "details[data-disclosure-key=answer-level-data]')"
+                 ".scrollIntoView({block: 'start'})")
+            b.screenshot("diagnostics_panel_mobile_table.png")
+        b.js("document.querySelector('#tab-research "
+             "details[data-disclosure-key=answer-level-data]')"
+             ".open = false")
+        if os.environ.get("BROWSER_SCREENSHOTS"):
+            panel_shot("diagnostics_panel_mobile.png")
+            b.js("document.querySelector('#tab-research .kt-grid')"
+                 ".scrollIntoView({block: 'start'})")
+            b.screenshot("diagnostics_panel_mobile_grid.png")
+        b.viewport(1440, 1100)
+        # The shared scenario workspace renders the same panel
+        # independently of the live session's mutations.
+        b.js("document.querySelector('[data-workspace=library]')"
+             ".click()")
+        b.wait("document.querySelector('.scenario-row')")
+        b.js("document.querySelector('.scenario-row').click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#scenario-ws-tabs "
+             "[data-tab=research]').click()")
+        b.wait("document.querySelector('#scenario-tab-research "
+               ".diagnostics-panel')")
+        self.assertTrue(b.js(
+            "document.querySelector('#scenario-tab-research')"
+            ".textContent.includes('Model diagnostics')"))
+        self.assertEqual(b.errors, [])
+
+    def test_structured_feedback_sections_render_as_continuous_text(self):
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        # The narrative keeps its headings without individual cards.
+        payload = {"sections": [
+            {"title": "Assessment summary",
+             "text": "Summary paragraph one.\n\nSummary paragraph two."},
+            {"title": "Observed strengths",
+             "text": "Strengths narrative text."},
+            {"title": "Review focus", "text": "Focus narrative text."},
+            {"title": "Next steps", "text": "Steps narrative text."}]}
+        host = "document.querySelector('#isolated-feedback-host')"
+        b.js("const host = document.createElement('div');"
+             "host.id = 'isolated-feedback-host';"
+             "document.body.appendChild(host);"
+             f"renderStructuredFeedback(host, {json.dumps(payload)})")
+        try:
+            b.wait(f"{host}.childElementCount === 4")
+            self.assertEqual(b.js(
+                f"[...{host}.children].map(n => n.className)"),
+                ["feedback-section"] * 4)
+            self.assertEqual(b.js(
+                f"[...{host}.querySelectorAll('.ui-section')].length"), 0)
+            self.assertEqual(b.js(
+                f"[...{host}.querySelectorAll('.feedback-section > h3')]"
+                ".map(n => n.textContent)"),
+                ["Assessment summary", "Observed strengths",
+                 "Review focus", "Next steps"])
+            self.assertEqual(b.js(
+                f"[...{host}.querySelectorAll('.feedback-section')]"
+                ".map(n => [...n.querySelectorAll('p')]"
+                ".map(p => p.textContent))"),
+                [["Summary paragraph one.", "Summary paragraph two."],
+                 ["Strengths narrative text."],
+                 ["Focus narrative text."],
+                 ["Steps narrative text."]])
+            styles = b.js(
+                f"[...{host}.querySelectorAll('.feedback-section')]"
+                ".map(n => { const s = getComputedStyle(n); return {"
+                "border: [s.borderTopWidth, s.borderRightWidth,"
+                " s.borderBottomWidth, s.borderLeftWidth],"
+                "background: s.backgroundColor,"
+                "padding: [s.paddingLeft, s.paddingRight],"
+                "marginY: [parseFloat(s.marginTop),"
+                " parseFloat(s.marginBottom)]}; })")
+            for style in styles:
+                self.assertEqual(style["border"], ["0px"] * 4)
+                self.assertIn(style["background"],
+                              ("transparent", "rgba(0, 0, 0, 0)"))
+                self.assertEqual(style["padding"], ["0px", "0px"])
+                self.assertTrue(all(m > 0 for m in style["marginY"]))
+            self.assert_no_overflow()
+            self.assertFalse(b.js(
+                f"{host}.scrollWidth > {host}.clientWidth"))
+            b.js(f"{host}.scrollIntoView({{block: 'start'}})")
+            b.screenshot("structured-feedback-sections-desktop.png")
+            b.viewport(390, 844)
+            self.assert_no_overflow()
+            self.assertFalse(b.js(
+                f"{host}.scrollWidth > {host}.clientWidth"))
+            b.screenshot("structured-feedback-sections-mobile.png")
+            b.viewport(1440, 1100)
+        finally:
+            b.js(f"{host}.remove()")
+        self.assertEqual(b.errors, [])
+
+    def test_kv_value_column_alignment(self):
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        # Long labels keep a straight value column instead of pushing .v.
+        b.js(
+            "const host = document.createElement('div');"
+            "host.id = 'kv-fixture';"
+            "host.style.maxWidth = '760px'; host.style.margin = '0 auto';"
+            "host.style.padding = '1rem';"
+            "host.style.boxSizing = 'border-box';"
+            "document.body.appendChild(host);"
+            "const row = (k, v) => { const d = document.createElement('div');"
+            " d.className = 'kv'; const kk = document.createElement('span');"
+            " kk.className = 'k'; kk.textContent = k;"
+            " const vv = document.createElement('span');"
+            " vv.className = 'v'; vv.textContent = v;"
+            " d.append(kk, vv); return d; };"
+            "const g1 = document.createElement('div');"
+            "g1.className = 'release-status';"
+            "const g2 = document.createElement('div');"
+            "g2.className = 'selection-evidence';"
+            "const task = document.createElement('div');"
+            "task.className = 'skill-task';"
+            "const insp = document.createElement('div');"
+            "insp.className = 'kt-inspector';"
+            "host.append(g1, g2, task, insp);"
+            "g1.append(row('Release status', 'Draft - educator review "
+            "required'), row('Practice 1 (Calculate a percentage of an "
+            "amount)', 'Ready'), row('Practice 2 (Combine coefficients of "
+            "like terms)', 'Pending educator review'), "
+            "row('Feedback safeguards', "
+            "'provenance:replay-run-9f8e7d6c5b4a3210-snapshot'));"
+            "g2.append(row('Status', 'Complete'), row('Experimental "
+            "probability band (not validated learning difficulty)', "
+            "'0.42-0.61'), row('Estimated correctness on this question "
+            "(not mastery)', '0.600'), row('Practice slot 1', "
+            "'Same answers - current scoring'));"
+            "task.append(row('Topic', 'Fractions of an amount'), "
+            "row('Result', 'Improving'));"
+            "insp.append(row('Answer 1', 'Correct - 0.9'), "
+            "row('Answer 2', 'Incorrect - 0.4'));")
+        host = "document.querySelector('#kv-fixture')"
+        measure = (
+            "JSON.stringify((() => {"
+            " const rects = (sel) => [...document.querySelectorAll(sel)]"
+            " .map(r => { const k = r.querySelector('.k')"
+            " .getBoundingClientRect();"
+            " const v = r.querySelector('.v').getBoundingClientRect();"
+            " return {kL: k.left, kR: k.right, vL: v.left, vR: v.right,"
+            " kH: k.height, rowR: r.getBoundingClientRect().right}; });"
+            " const h = document.querySelector('#kv-fixture');"
+            " return {g1: rects('#kv-fixture .release-status .kv'),"
+            " g2: rects('#kv-fixture .selection-evidence .kv'),"
+            " task: rects('#kv-fixture .skill-task .kv'),"
+            " insp: rects('#kv-fixture .kt-inspector .kv'),"
+            " hostR: h.getBoundingClientRect().right,"
+            " hostOver: h.scrollWidth - h.clientWidth,"
+            " taskDisp: getComputedStyle(document.querySelector("
+            " '#kv-fixture .skill-task .kv')).display,"
+            " inspDisp: getComputedStyle(document.querySelector("
+            " '#kv-fixture .kt-inspector .kv')).display,"
+            " taskKW: document.querySelector('#kv-fixture .skill-task "
+            ".kv .k').getBoundingClientRect().width,"
+            " taskKDisp: getComputedStyle(document.querySelector("
+            " '#kv-fixture .skill-task .kv .k')).display}; })())")
+
+        def check(m, aligned=True, wrap=True):
+            self.assertLessEqual(m["hostOver"], 0)
+            self.assert_no_overflow()
+            groups = (m["g1"], m["g2"])
+            if aligned:
+                for rows in groups:
+                    vls = [r["vL"] for r in rows]
+                    self.assertLessEqual(max(vls) - min(vls), 1)
+                    for r in rows:
+                        self.assertGreater(r["vL"] - r["kR"], 0)
+                        self.assertLessEqual(r["kR"], r["vL"] + 1)
+            for rows in groups + (m["task"], m["insp"]):
+                for r in rows:
+                    self.assertLessEqual(r["vR"], r["rowR"] + 1)
+                    self.assertLessEqual(r["rowR"], m["hostR"] + 1)
+            # The long labels wrap instead of widening the label column.
+            if aligned and wrap:
+                self.assertGreater(m["g1"][1]["kH"], m["g1"][0]["kH"] + 4)
+                self.assertGreater(m["g2"][1]["kH"], m["g2"][0]["kH"] + 4)
+
+        try:
+            b.wait(f"Boolean({host})")
+            self.assertIn(
+                "provenance:replay-run-9f8e7d6c5b4a3210-snapshot",
+                b.js(f"{host}.textContent"))
+            self.assertIn("Practice 2 (Combine coefficients of like terms)",
+                          b.js(f"{host}.textContent"))
+            m = json.loads(b.js(measure))
+            check(m, aligned=True)
+            self.assertEqual(m["inspDisp"], "block")
+            self.assertEqual(m["taskDisp"], "flex")
+            self.assertAlmostEqual(m["taskKW"], 150, delta=1)
+            self.assertLess(
+                m["taskKW"], m["g1"][0]["kR"] - m["g1"][0]["kL"])
+            b.js(f"{host}.scrollIntoView({{block: 'start'}})")
+            b.screenshot("kv-alignment-desktop.png")
+            b.viewport(768, 1024)
+            # At 42% basis the long labels fit on one line; alignment
+            # is what matters here.
+            check(json.loads(b.js(measure)), aligned=True, wrap=False)
+            b.viewport(390, 844)
+            m = json.loads(b.js(measure))
+            check(m, aligned=True)
+            # Representatives keep their stacked overrides on narrow screens.
+            self.assertEqual(m["taskDisp"], "block")
+            self.assertEqual(m["taskKDisp"], "block")
+            self.assertEqual(m["inspDisp"], "block")
+            b.js(f"{host}.scrollIntoView({{block: 'start'}})")
+            b.screenshot("kv-alignment-mobile.png")
+            b.viewport(1440, 1100)
+        finally:
+            b.js(f"{host}.remove()")
         self.assertEqual(b.errors, [])
 
 

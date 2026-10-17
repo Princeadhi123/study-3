@@ -2053,6 +2053,7 @@ function teacherPage() {
       enterApp();
     } catch (err) {
       if (err.status === 403) {
+        $("#logout").hidden = true;
         $("#unlock-panel").hidden = false;
         return;
       }
@@ -2064,6 +2065,7 @@ function teacherPage() {
     unlocked = true;
     $("#unlock-panel").hidden = true;
     $("#teacher-app").hidden = false;
+    $("#logout").hidden = false;
     renderConfigStrip();
     initResearchWorkspace({mountDetail, getConfig: () => config});
     $("#pin-input").value = "";
@@ -2165,6 +2167,7 @@ function teacherPage() {
         unlocked = false;
         $("#teacher-app").hidden = true;
         $("#config-strip").hidden = true;
+        $("#logout").hidden = true;
         $("#unlock-panel").hidden = false;
         return;
       }
@@ -2263,6 +2266,11 @@ function createDetailView(root, options = {}) {
   // pane's last rendered scope so a session/checkpoint switch never
   // transfers another context's expand/collapse choices.
   const disclosureScopes = new Map();
+  // `${selected}|${researchCp}` -> last inspected chart index, and
+  // pane scope -> last chart scroll position; both keep a poll
+  // re-render from disturbing what the teacher is looking at.
+  const researchSelections = new Map();
+  const researchScroll = new Map();
   const pollOnce = () => options.refresh?.();
 
   /* ---------- shared render helpers ---------- */
@@ -2341,6 +2349,10 @@ function createDetailView(root, options = {}) {
       pane.querySelectorAll("details[data-disclosure-key]")
         .forEach((d) => saved.set(d.dataset.disclosureKey, d.open));
       disclosureScopes.set(prevScope, saved);
+      if (name === "research") {
+        const scroller = pane.querySelector(".kt-scroll");
+        if (scroller) researchScroll.set(prevScope, scroller.scrollLeft);
+      }
     }
     try {
       renderer();
@@ -2353,6 +2365,11 @@ function createDetailView(root, options = {}) {
               d.open = saved.get(d.dataset.disclosureKey);
             }
           });
+      }
+      if (name === "research") {
+        const scroller = pane.querySelector(".kt-scroll");
+        const left = researchScroll.get(scope);
+        if (scroller && left) scroller.scrollLeft = left;
       }
       pane.dataset.renderedScope = scope;
     }
@@ -2392,45 +2409,70 @@ function createDetailView(root, options = {}) {
 
   /* ---------- tabs ---------- */
 
+  function releaseStatusLabel() {
+    if (detail.read_only) return "Saved read-only feedback";
+    const status = (detail.feedback_delivery || {}).status;
+    if (!status) return "Not recorded";
+    return {not_ready: "Not ready — the assessment is incomplete",
+            awaiting_teacher_review:
+              "Awaiting educator review — hidden from the student",
+            released: "Released to the student"}[status] || status;
+  }
+
   function renderOverviewContent() {
     const pane = $("#tab-overview");
     pane.replaceChildren();
-    const card = el("div", null, "card-inner");
+    const card = el("div", null, "card-inner ui-stack");
+    card.appendChild(DemoUI.heading("Session summary",
+      "A quick view of recorded answers, feedback release, and diagnostics.",
+      {eyebrow: "Session overview"}));
     card.appendChild(el("p", detail.read_only ? detail.read_only_reason || "Retained original results — no computation was run when opening this case." :
       detail.replay ? "New replay — the original answers were resubmitted through the running pipeline." :
       "Live synthetic session.", "boundary-note"));
-    card.appendChild(kv("Status", statusLabel(detail.status)));
-    card.appendChild(kv("Answered", `${detail.answered_count}/40`));
-    card.appendChild(kv("Observed total",
-      `${detail.observed_total.correct} / ${detail.observed_total.out_of}`));
-    card.appendChild(kv("Provider job",
+    const snapshot = DemoUI.section("Assessment snapshot",
+      "Observed outcomes recorded for this session.");
+    const stats = el("div", null, "ui-stats");
+    const total = detail.observed_total || {};
+    stats.appendChild(DemoUI.stat("Answered",
+      Number.isFinite(detail.answered_count)
+        ? `${detail.answered_count}/40` : null));
+    stats.appendChild(DemoUI.stat("Observed total",
+      Number.isFinite(total.correct) && Number.isFinite(total.out_of)
+        ? `${total.correct} / ${total.out_of}` : null));
+    stats.appendChild(DemoUI.stat("Status", statusLabel(detail.status)));
+    snapshot.appendChild(stats);
+    card.appendChild(snapshot);
+    const feedback = DemoUI.section("Feedback & diagnostics",
+      "Generation and release state for this session.");
+    feedback.appendChild(kv("Provider job",
       `${detail.provider_job.status} (${detail.provider_job.provider_mode})`));
+    feedback.appendChild(kv("Release status", releaseStatusLabel()));
     ["midpoint", "end"].forEach((cp) => {
       const block = detail.checkpoints[cp] || {};
-      card.appendChild(kv(`${cp} diagnostics`,
+      feedback.appendChild(kv(`${cp} diagnostics`,
         (block.diagnostics_job || {}).status || "not_requested"));
     });
-    if (detail.description) card.appendChild(el("p", detail.description, "meta"));
-    if (detail.replay_changes) {
-      const changes = detail.replay_changes;
-      card.appendChild(el("h3", "What changed from the retained original?"));
-      card.appendChild(kv("Observed correct-answer change", changes.observed_correct_delta));
-      card.appendChild(kv("Largest KT probability change", changes.kt_max_absolute_delta ?? "Not comparable / unavailable"));
-      changes.feedback.forEach((row) => {
-        card.appendChild(kv(`${row.audience === "student" ? "Student" : "Educator"} draft`,
-          `${row.text_changed ? "Text changed" : "Same text"}; ${row.candidate_changed ? "different focus" : "same focus"}`));
-        const disclosure = el("details", null, "raw");
-        disclosure.dataset.disclosureKey = `replay-diff:${row.audience}`;
-        disclosure.append(el("summary", `Compare ${row.audience} wording with the original`));
-        const pair = el("div", null, "compare");
-        [["Retained original", row.previous_text], ["This replay", row.current_text]].forEach(([title, text]) => {
-          const col = el("div", null, "col");
-          col.append(el("h4", title), el("p", text, "draft-text")); pair.append(col);
-        });
-        disclosure.append(pair); card.append(disclosure);
-      });
-      card.appendChild(el("p", changes.interpretation, "meta"));
+    if (detail.description) {
+      feedback.appendChild(el("p", detail.description, "meta"));
     }
+    card.appendChild(feedback);
+    const explore = DemoUI.section("Explore this session",
+      "Open another view of the same session — nothing is changed.");
+    const actions = el("div", null, "ui-actions");
+    [["Inspect answers", "evidence"],
+     [detail.read_only ? "Inspect saved feedback" : "Review feedback",
+      "feedback"],
+     ["Open diagnostics", "research"]].forEach(([label, name]) => {
+      const action = el("button", label, "ghost");
+      action.type = "button";
+      action.addEventListener("click", () => {
+        const target = $(`#ws-tabs [data-tab=${name}]`);
+        if (target) target.click();
+      });
+      actions.appendChild(action);
+    });
+    explore.appendChild(actions);
+    card.appendChild(explore);
     card.appendChild(jsonDetails("Technical identity and provenance", {...detail.provenance,
       technical_label: detail.label, session_id: detail.session_id, simulation: detail.simulated, replay: detail.replay},
       "provenance"));
@@ -2440,12 +2482,18 @@ function createDetailView(root, options = {}) {
   function renderEvidenceContent() {
     const pane = $("#tab-evidence");
     pane.replaceChildren();
-    const card = el("div", null, "card-inner");
+    const card = el("div", null, "card-inner ui-stack");
+    card.appendChild(DemoUI.heading("Answers & scores",
+      "Recorded answers and topic results — observed performance, " +
+      "not mastery.", {eyebrow: "Recorded evidence"}));
     const evidence = (detail.checkpoints.end || {}).evidence;
     if (evidence) {
-      card.appendChild(el("h3",
+      const totals = DemoUI.section("Observed results",
+        "Recorded correct and incorrect answers, grouped by subtopic.");
+      totals.appendChild(el("p",
         `Observed totals: ${evidence.total.correct} correct / ` +
-        `${evidence.total.incorrect} incorrect of ${evidence.total.out_of}`));
+        `${evidence.total.incorrect} incorrect of ${evidence.total.out_of}`,
+        "score"));
       const table = el("table", null, "grid");
       table.appendChild(el("caption", "Skill and subtopic observed counts"));
       const head = el("tr");
@@ -2459,14 +2507,16 @@ function createDetailView(root, options = {}) {
           .forEach((v) => tr.appendChild(el("td", String(v))));
         table.appendChild(tr);
       });
-      card.appendChild(table);
+      totals.appendChild(table);
+      card.appendChild(totals);
     } else {
       card.appendChild(el("p",
         "End evidence appears once all 40 answers are in."));
     }
     if (detail.response_notice) card.appendChild(el("p", detail.response_notice, "meta"));
     if (detail.question_responses.length) {
-      card.appendChild(el("h3", "Per-question record (private)"));
+      const record = DemoUI.section("Per-question record (private)",
+        "Recorded answer for each question — private to this workspace.");
       detail.question_responses.forEach((row) => {
         const d = el("details", null, "qrow");
         d.dataset.disclosureKey = `q:${row.question_id}`;
@@ -2484,8 +2534,9 @@ function createDetailView(root, options = {}) {
         inner.appendChild(kv("Answered at", row.answered_at || "Not recorded in the original scenario"));
         inner.appendChild(kv("Question reference", row.question_id));
         d.appendChild(inner);
-        card.appendChild(d);
+        record.appendChild(d);
       });
+      card.appendChild(record);
     }
     pane.appendChild(card);
   }
@@ -2587,19 +2638,11 @@ function createDetailView(root, options = {}) {
       (ex) => ex.role === "practice");
 
     const intro = el("div", null, "card-inner skill-map");
-    intro.appendChild(el("h3",
-      `${detail.bank_label || "Assessment"} · skill map`));
-    intro.appendChild(el("p",
-      "Topic → subtopic → assessed task: each assessed task belongs to " +
-      "one subtopic inside one topic. Subtopics are part-of groupings " +
-      "of the assessed content — they are not prerequisites and do not " +
-      "imply a learning order."));
-    intro.appendChild(el("p",
-      "Topic and subtopic counts below are observed correct/incorrect " +
-      "totals from the recorded answers. They inform the error-based " +
-      "review-focus selection: only the selected focus subtopics become " +
-      "worked reviews. An incorrect answer is an observed error, not " +
-      "evidence of missing mastery or of its cause.", "meta"));
+    intro.appendChild(DemoUI.heading(
+      `${detail.bank_label || "Assessment"} · Skill map`,
+      "Observed answers, grouped topics, and how each task is used in " +
+      "feedback planning — evidence of what was answered, not of " +
+      "mastery.", {eyebrow: "Assessment evidence"}));
     if (context.status) {
       intro.appendChild(el("p",
         `Graph v3 · ${context.practice_question_count ?? "—"} practice ` +
@@ -2614,7 +2657,18 @@ function createDetailView(root, options = {}) {
     }
     const use = el("details", null, "raw");
     use.dataset.disclosureKey = "skill-map-evidence-use";
-    use.appendChild(el("summary", "How feedback uses this evidence"));
+    use.appendChild(el("summary", "How to read this skill map"));
+    use.appendChild(el("p",
+      "Topic → subtopic → assessed task: each assessed task belongs to " +
+      "one subtopic inside one topic. Subtopics are part-of groupings " +
+      "of the assessed content — they are not prerequisites and do not " +
+      "imply a learning order.", "meta"));
+    use.appendChild(el("p",
+      "Topic and subtopic counts below are observed correct/incorrect " +
+      "totals from the recorded answers. They inform the error-based " +
+      "review-focus selection: only the selected focus subtopics become " +
+      "worked reviews. An incorrect answer is an observed error, not " +
+      "evidence of missing mastery or of its cause.", "meta"));
     use.appendChild(el("p",
       "Observed counts and topic/subtopic names are used for review " +
       "planning. When an assessment-grounded worked review is " +
@@ -2631,15 +2685,20 @@ function createDetailView(root, options = {}) {
         "this descriptive topic/subtopic graph. A configured variant " +
         "does not prove that call ran — check the wording source on " +
         "the Feedback drafts tab.", "meta"));
+      use.appendChild(el("p",
+        "Task descriptions are shared once per subtopic in the " +
+        "worked-first request and linked to assessment records by " +
+        "topic/subtopic IDs. They describe the question, not student " +
+        "understanding or causes of errors.", "meta"));
     } else {
       use.appendChild(el("p",
         "The question-first flow is built from all aggregate counts; " +
         "only the selected worked-review examples are sent as raw " +
         "records — it does not send all 40 raw answer records.", "meta"));
+      use.appendChild(el("p",
+        "Task descriptions here are descriptive teacher context, not " +
+        "evidence of student understanding.", "meta"));
     }
-    use.appendChild(el("p",
-      "Task requirement descriptions are teacher context; they are not " +
-      "sent as a 'task requirement' field in the feedback request.", "meta"));
     if (selection.provisional) {
       use.appendChild(el("p",
         "Feedback generation is still processing; the baseline " +
@@ -2659,14 +2718,17 @@ function createDetailView(root, options = {}) {
     intro.appendChild(use);
     pane.appendChild(intro);
 
-    const card = el("div", null, "card-inner");
+    const observed = el("div", null, "card-inner skill-module");
+    observed.appendChild(el("h3", "Observed assessment"));
     const graph = graphFor();
     if (!graph) {
-      card.appendChild(el("p",
+      observed.appendChild(el("p",
         "Graph appears once a checkpoint is reached."));
     } else {
-      card.appendChild(el("p",
-        `Observed counts at ${graph.checkpoint} checkpoint.`, "meta"));
+      observed.appendChild(el("p",
+        `Observed counts at ${graph.checkpoint} checkpoint — recorded ` +
+        "answers, not mastery scores.", "meta"));
+      const topics = el("div", null, "skill-topics");
       (graph.topics || []).forEach((topic) => {
         const box = el("div", null, "topic");
         const heading = topic.out_of === 0
@@ -2680,17 +2742,23 @@ function createDetailView(root, options = {}) {
             : `${leaf.subtopic_name}: ${leaf.correct} correct, ` +
               `${leaf.incorrect} incorrect of ${leaf.out_of}`;
           if (focusSubIds.has(leaf.subtopic_id)) {
-            line += selection.provisional
-              ? " · selected review focus (provisional)"
-              : " · selected review focus";
+            const li = el("li");
+            li.appendChild(el("span", line));
+            li.appendChild(document.createTextNode(" "));
+            li.appendChild(el("span", selection.provisional
+              ? "Review focus (provisional)" : "Review focus",
+              "skill-badge is-focus"));
+            list.appendChild(li);
+          } else {
+            list.appendChild(el("li", line));
           }
-          list.appendChild(el("li", line));
         });
         box.appendChild(list);
-        card.appendChild(box);
+        topics.appendChild(box);
       });
+      observed.appendChild(topics);
     }
-    pane.appendChild(card);
+    pane.appendChild(observed);
 
     const content = el("div", null, "card-inner skill-map");
     const seen = new Set();
@@ -2864,7 +2932,40 @@ function createDetailView(root, options = {}) {
       return d;
     }
 
+    function practiceCard(ex, bankNumber) {
+      const sel = practiceSelectionFor(ex);
+      const item = el("details", null,
+        "skill-task" + (sel.kind === "selected" ? " is-selected" : ""));
+      item.dataset.disclosureKey = `skill-practice:${ex.question_id}`;
+      item.dataset.practiceNumber = String(bankNumber);
+      const topicName = taskTopicName(ex.skill_id, ex.skill_name);
+      const summary = el("summary");
+      summary.appendChild(el("span",
+        `Practice draft ${bankNumber} · ${topicName} · ` +
+        `${ex.concept_label || "—"}`,
+        "skill-task-label"));
+      summary.appendChild(el("span", null, "skill-task-status"))
+        .appendChild(el("span", sel.text,
+          `skill-badge is-${sel.kind}`));
+      item.appendChild(summary);
+      item.appendChild(el("h4", englishQuestionText(ex)));
+      const options = el("ol");
+      (ex.options || []).forEach((option) =>
+        options.appendChild(el("li", englishOptionText(option))));
+      item.appendChild(options);
+      item.appendChild(kv("Topic", topicName));
+      item.appendChild(kv("Subtopic", ex.concept_label || "—"));
+      item.appendChild(kv("Task requirement",
+        ex.mathematical_task || "—"));
+      item.appendChild(kv("Selection", sel.text));
+      return item;
+    }
+
     if (tasks.length) {
+      const module = el("div", null, "card-inner skill-module");
+      module.appendChild(el("p",
+        "Every recorded task with its answer and feedback role — " +
+        "expand to inspect individual tasks.", "meta"));
       const section = el("details", null, "skill-map-section");
       section.dataset.disclosureKey = "skill-map-assessed";
       section.appendChild(el("summary",
@@ -2878,14 +2979,12 @@ function createDetailView(root, options = {}) {
         "example task; 'Review focus' marks other tasks inside a " +
         "selected focus subtopic.", "meta"));
       tasks.forEach((task) => section.appendChild(taskCard(task)));
-      content.appendChild(section);
+      module.appendChild(section);
+      content.appendChild(module);
     }
     if (practiceRows.length) {
-      const section = el("details", null, "skill-map-section");
-      section.dataset.disclosureKey = "skill-map-practice";
-      section.appendChild(el("summary",
-        `Practice drafts (${practiceRows.length})`));
-      section.appendChild(el("p",
+      const module = el("div", null, "card-inner skill-module");
+      module.appendChild(el("p",
         "Separate possible practice drafts — not answered assessment " +
         "evidence and not automatically assigned to this learner. " +
         "Task requirements are not separately measured skills. " +
@@ -2893,54 +2992,74 @@ function createDetailView(root, options = {}) {
         "recommendation — it is not approval or release, and not " +
         "evidence that a teacher-edited document includes it.", "meta"));
       if (examples.editedDocument) {
-        section.appendChild(el("p",
+        module.appendChild(el("p",
           "The current feedback is a teacher-edited document; whether " +
           "the edited wording includes the recorded selection cannot " +
           "be confirmed from this view.", "meta"));
       }
-      practiceRows.forEach((ex) => {
-        const sel = practiceSelectionFor(ex);
-        const item = el("details", null, "skill-task");
-        item.dataset.disclosureKey = `skill-practice:${ex.question_id}`;
-        const topicName = taskTopicName(ex.skill_id, ex.skill_name);
-        const summary = el("summary");
-        summary.appendChild(el("span",
-          `Practice · ${topicName} · ${ex.concept_label || "—"}`,
-          "skill-task-label"));
-        summary.appendChild(el("span", null, "skill-task-status"))
-          .appendChild(el("span", sel.text,
-            `skill-badge is-${sel.kind}`));
-        item.appendChild(summary);
-        item.appendChild(el("h4", englishQuestionText(ex)));
-        const options = el("ol");
-        (ex.options || []).forEach((option) =>
-          options.appendChild(el("li", englishOptionText(option))));
-        item.appendChild(options);
-        item.appendChild(kv("Topic", topicName));
-        item.appendChild(kv("Subtopic", ex.concept_label || "—"));
-        item.appendChild(kv("Task requirement",
-          ex.mathematical_task || "—"));
-        item.appendChild(kv("Selection", sel.text));
-        section.appendChild(item);
+      module.appendChild(el("p",
+        "Numbers identify drafts in bank order; they do not indicate " +
+        "difficulty or a recommended sequence.", "meta"));
+      const section = el("details", null, "skill-map-section");
+      section.dataset.disclosureKey = "skill-map-practice";
+      section.appendChild(el("summary",
+        `Practice drafts (${practiceRows.length})`));
+      const groups = new Map();
+      practiceRows.forEach((ex, index) => {
+        if (!groups.has(ex.skill_id)) groups.set(ex.skill_id, []);
+        groups.get(ex.skill_id).push({ex, number: index + 1});
       });
-      content.appendChild(section);
+      groups.forEach((rows, skillId) => {
+        const topicName = taskTopicName(
+          skillId, rows[0].ex && rows[0].ex.skill_name);
+        const selected = rows.filter(
+          (row) => practiceSelectionFor(row.ex).kind === "selected")
+          .length;
+        const group = el("div", null, "practice-topic");
+        const heading = el("h4");
+        heading.appendChild(el("span",
+          `${topicName} · ${rows.length} drafts`,
+          "practice-topic-label"));
+        if (selected) {
+          heading.appendChild(el("span",
+            `${selected} selected practice`,
+            "skill-badge is-selected"));
+        }
+        group.appendChild(heading);
+        rows.forEach((row) =>
+          group.appendChild(practiceCard(row.ex, row.number)));
+        section.appendChild(group);
+      });
+      module.appendChild(section);
+      content.appendChild(module);
     }
     if (content.childElementCount) pane.appendChild(content);
   }
 
-  function ktChart(diag) {
-    const probs = diag.kt.p_correct_before_each_answer || [];
-    if (!probs.length) return null;
-    const w = 680, h = 220, padX = 44, padY = 26;
+  function ktChart(diag, onSelect) {
+    const probs = (diag.kt || {}).p_correct_before_each_answer || [];
+    const n = probs.length;
+    if (!n) return null;
+    const w = 900, h = 350, padX = 52, topPad = 30, plotBottom = h - 58;
     const svg = document.createElementNS(SVGNS, "svg");
     svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
     svg.setAttribute("class", "ktchart");
-    svg.setAttribute("role", "img");
-    svg.setAttribute("aria-label", "Research-only predicted probability before each answer, from zero to one.");
+    svg.setAttribute("role", "group");
+    // Transparent plot-area hit surface behind everything else so
+    // pointer sweeps are caught even between markers.
+    const hit = document.createElementNS(SVGNS, "rect");
+    hit.setAttribute("x", padX); hit.setAttribute("y", topPad);
+    hit.setAttribute("width", w - 2 * padX);
+    hit.setAttribute("height", plotBottom - topPad);
+    hit.setAttribute("class", "kt-hit");
+    svg.appendChild(hit);
+    svg.setAttribute("aria-label",
+      "Before-answer predicted correctness per answer position, " +
+      "from zero to one. Not a mastery score.");
     const xFor = (i) =>
-      padX + i * (w - 2 * padX) / Math.max(probs.length - 1, 1);
-    const yFor = (p) => h - padY - p * (h - 2 * padY);
-    // Axes: probability 0..1 on y, response position on x.
+      padX + i * (w - 2 * padX) / Math.max(n - 1, 1);
+    const yFor = (p) => plotBottom - p * (plotBottom - topPad);
+    // Axes: probability 0..1 on y, answer position on x.
     [0, 0.25, 0.5, 0.75, 1].forEach((tick) => {
       const y = yFor(tick);
       const grid = document.createElementNS(SVGNS, "line");
@@ -2954,37 +3073,155 @@ function createDetailView(root, options = {}) {
       label.textContent = Number(tick.toFixed(2)).toString();
       svg.appendChild(label);
     });
-    const step = probs.length > 20 ? 10 : 5;
-    for (let i = 0; i < probs.length; i += step) {
+    const ticks = new Set(
+      (n > 20 ? [0, 9, 19, 29, 39] : [0, 4, 9, 14, 19])
+        .filter((i) => i < n));
+    ticks.add(0);
+    ticks.add(n - 1);
+    ticks.forEach((i) => {
       const label = document.createElementNS(SVGNS, "text");
-      label.setAttribute("x", xFor(i)); label.setAttribute("y", h - 8);
+      label.setAttribute("x", xFor(i)); label.setAttribute("y", h - 30);
       label.setAttribute("class", "axis-label");
       label.setAttribute("text-anchor", "middle");
       label.textContent = String(i + 1);
       svg.appendChild(label);
+    });
+    if (n > 20) {
+      const xm = (xFor(19) + xFor(20)) / 2;
+      const sep = document.createElementNS(SVGNS, "line");
+      sep.setAttribute("x1", xm); sep.setAttribute("x2", xm);
+      sep.setAttribute("y1", topPad - 8);
+      sep.setAttribute("y2", plotBottom);
+      sep.setAttribute("class", "axis-midpoint");
+      svg.appendChild(sep);
+      const marker = document.createElementNS(SVGNS, "text");
+      marker.setAttribute("x", xm + 6);
+      marker.setAttribute("y", topPad - 12);
+      marker.setAttribute("class", "axis-label");
+      marker.textContent = "Second half";
+      svg.appendChild(marker);
     }
     const axisX = document.createElementNS(SVGNS, "text");
-    axisX.setAttribute("x", w / 2); axisX.setAttribute("y", h - 2);
+    axisX.setAttribute("x", w / 2); axisX.setAttribute("y", h - 8);
     axisX.setAttribute("class", "axis-label");
     axisX.setAttribute("text-anchor", "middle");
-    axisX.textContent = "response position";
+    axisX.textContent = "answer position";
     svg.appendChild(axisX);
-    const line = document.createElementNS(SVGNS, "polyline");
-    line.setAttribute("fill", "none");
-    line.setAttribute("stroke", "#21615B");
-    line.setAttribute("stroke-width", "2");
-    line.setAttribute("points",
-      probs.map((p, i) => `${xFor(i)},${yFor(p)}`).join(" "));
-    svg.appendChild(line);
+    const valid = (p) => Number.isFinite(p) && p >= 0 && p <= 1;
+    // Connect only contiguous runs of valid points — never across a
+    // missing or invalid value.
+    let run = [];
+    const flush = () => {
+      if (run.length > 1) {
+        const seg = document.createElementNS(SVGNS, "polyline");
+        seg.setAttribute("fill", "none");
+        seg.setAttribute("stroke", "#21615B");
+        seg.setAttribute("stroke-width", "2");
+        seg.setAttribute("points", run.join(" "));
+        svg.appendChild(seg);
+      }
+      run = [];
+    };
     probs.forEach((p, i) => {
-      const dot = document.createElementNS(SVGNS, "circle");
-      dot.setAttribute("cx", xFor(i));
-      dot.setAttribute("cy", yFor(p));
-      dot.setAttribute("r", "4");
-      const observed = detail.question_responses[i];
-      dot.setAttribute("fill",
-        !observed ? "#566973" : observed.correct ? "#21615B" : "#C5603F");
+      if (valid(p)) run.push(`${xFor(i)},${yFor(p)}`);
+      else flush();
+    });
+    flush();
+    const points = [];
+    let lastActive = -1;
+    const activate = (i, dot) => {
+      if (i === lastActive) return;
+      lastActive = i;
+      onSelect(i, dot);
+    };
+    probs.forEach((p, i) => {
+      if (!valid(p)) return;
+      const row = (detail.question_responses || [])[i];
+      const outcome = (!row || (row.correct !== true
+                                && row.correct !== false))
+        ? "unavailable" : row.correct ? "correct" : "incorrect";
+      const observed = outcome === "correct" ? "Correct"
+        : outcome === "incorrect" ? "Incorrect"
+        : "Answer unavailable";
+      const aria = `Answer ${i + 1}: predicted correctness ` +
+        `${p.toFixed(3)}; observed ${observed}.`;
+      let dot;
+      if (outcome === "incorrect") {
+        dot = document.createElementNS(SVGNS, "polygon");
+        const x = xFor(i), y = yFor(p), r = 5;
+        dot.setAttribute("points",
+          `${x},${y - r} ${x + r},${y} ${x},${y + r} ${x - r},${y}`);
+        dot.setAttribute("fill", "#C5603F");
+      } else {
+        dot = document.createElementNS(SVGNS, "circle");
+        dot.setAttribute("cx", xFor(i));
+        dot.setAttribute("cy", yFor(p));
+        dot.setAttribute("r", "5");
+        if (outcome === "correct") {
+          dot.setAttribute("fill", "#21615B");
+        } else {
+          dot.setAttribute("fill", "#fff");
+          dot.setAttribute("stroke", "#8a9aa5");
+          dot.setAttribute("stroke-width", "1.5");
+        }
+      }
+      dot.setAttribute("class", "kt-point");
+      dot.dataset.index = String(i);
+      dot.setAttribute("role", "button");
+      dot.setAttribute("tabindex", "0");
+      dot.setAttribute("aria-label", aria);
+      const tip = document.createElementNS(SVGNS, "title");
+      tip.textContent = aria;
+      dot.appendChild(tip);
+      const mark = () => activate(i, dot);
+      dot.addEventListener("click", mark);
+      dot.addEventListener("focus", mark);
+      dot.addEventListener("mouseenter", mark);
+      dot.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          mark();
+        }
+      });
       svg.appendChild(dot);
+      points.push({index: i, x: xFor(i), dot});
+    });
+    // Sweep anywhere inside the plot to inspect the nearest valid
+    // answer by position — pointer height does not matter. Margins
+    // leave the selection unchanged; invalid positions are skipped.
+    const toSvgPoint = (event) => {
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return null;
+      const pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      return pt.matrixTransform(ctm.inverse());
+    };
+    const inPlot = (pt) =>
+      pt && pt.x >= padX && pt.x <= w - padX
+      && pt.y >= topPad && pt.y <= plotBottom;
+    const nearest = (sx) => {
+      let best = null;
+      points.forEach((p) => {
+        const d = Math.abs(p.x - sx);
+        if (!best || d < best.d) best = {p, d};
+      });
+      return best && best.p;
+    };
+    svg.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "touch") return;
+      const pt = toSvgPoint(event);
+      if (!inPlot(pt)) return;
+      const p = nearest(pt.x);
+      if (p) activate(p.index, p.dot);
+    });
+    svg.addEventListener("click", (event) => {
+      if (event.target && event.target.closest
+          && event.target.closest(".kt-point")) return;
+      const pt = toSvgPoint(event);
+      if (!inPlot(pt)) return;
+      const p = nearest(pt.x);
+      if (p) activate(p.index, p.dot);
     });
     return svg;
   }
@@ -2992,25 +3229,38 @@ function createDetailView(root, options = {}) {
   function renderResearchContent() {
     const pane = $("#tab-research");
     pane.replaceChildren();
-    const card = el("div", null, "card-inner");
+    const card = el("div", null, "card-inner diagnostics-panel");
+    card.appendChild(DemoUI.heading("Model diagnostics",
+      "Predicted correctness before each answer — not a mastery score.",
+      {eyebrow: "Private research"}));
     card.appendChild(el("p",
       "Private research diagnostics — frozen-model outputs, not mastery " +
       "evidence and not shown to students.", "warn"));
-    card.appendChild(el("p",
+    const how = el("details", null, "raw");
+    how.dataset.disclosureKey = "research-interpretation";
+    how.appendChild(el("summary", "How to read these diagnostics"));
+    const howInner = el("div");
+    howInner.appendChild(el("p",
       "KT was trained and predictively evaluated on real ViLLE data. It " +
       "estimates answer correctness, not mastery. The 40-question bank is " +
       "source-derived, but the simulated sessions are not additional " +
       "real-learner validation."));
-    card.appendChild(el("p",
+    howInner.appendChild(el("p",
       "Why still research-only: predictive performance needs assessment-specific evaluation. These " +
       "estimates do not establish mastery, difficulty or learning benefit " +
       "and do not determine the feedback focus."));
+    how.appendChild(howInner);
+    card.appendChild(how);
     const picker = el("div", null, "cp-picker");
-    [["midpoint", "Midpoint — first 20 answers"],
-     ["end", "End — all 40 answers"]].forEach(([cp, label]) => {
-      const b = el("button", label,
-        "ghost small" + (researchCp === cp ? " active" : ""));
+    [["midpoint", "Midpoint", "First 20 answers"],
+     ["end", "End", "All 40 answers"]].forEach(([cp, label, sub]) => {
+      const b = el("button", null,
+        "cp-choice" + (researchCp === cp ? " active" : ""));
       b.type = "button";
+      b.setAttribute("aria-pressed",
+                     researchCp === cp ? "true" : "false");
+      b.appendChild(el("span", label, "cp-choice-label"));
+      b.appendChild(el("span", sub, "cp-choice-sub"));
       b.addEventListener("click", () => {
         researchCp = cp;
         renderPane("research", renderResearchContent);
@@ -3022,27 +3272,145 @@ function createDetailView(root, options = {}) {
     const job = block.diagnostics_job || {};
     const diag = block.diagnostics;
     if (!diag || diag.status !== "ready") {
-      card.appendChild(el("p",
-        `${researchCp} diagnostics: ${job.status || "not_requested"}` +
-        (job.reason ? ` (${job.reason})` : "")));
+      const empty = el("div", null, "diagnostics-empty");
+      const pending = job.status === "pending";
+      if (pending) empty.setAttribute("aria-live", "polite");
+      empty.appendChild(el("p",
+        pending
+          ? "Diagnostics are still being prepared. Observed scores " +
+            "remain available in Answers & scores."
+          : "No prediction is shown for this checkpoint — unavailable " +
+            "diagnostics are missing evidence, not a zero probability."));
+      empty.appendChild(kv("Diagnostics",
+                           statusLabel(job.status || "not_requested")));
+      if (job.reason) empty.appendChild(kv("Reason", job.reason));
+      card.appendChild(empty);
       pane.appendChild(card);
       return;
     }
-    card.appendChild(el("p", diag.mode === "frozen_replay_no_model_rerun" ?
-      "Saved historical inference — not recomputed." : "Fresh inference using the frozen model; the model was not retrained.", "boundary-note"));
-    card.appendChild(el("h3",
-      `${researchCp === "end" ? "Final" : "Halfway"} checkpoint · ${diag.answer_count} answers`));
+    const saved = diag.mode === "frozen_replay_no_model_rerun";
+    const metaStrip = el("div", null, "diag-meta");
+    metaStrip.appendChild(el("span",
+      saved ? "Saved inference" : "Fresh inference",
+      `skill-badge ${saved ? "is-muted" : "is-example"} diag-badge`));
+    metaStrip.appendChild(el("span", "Frozen KT",
+                             "skill-badge is-muted diag-badge"));
+    metaStrip.appendChild(el("span", `${diag.answer_count} answers`,
+                             "skill-badge is-muted diag-badge"));
+    card.appendChild(metaStrip);
+    card.appendChild(el("p", saved
+      ? "Saved historical inference — not recomputed."
+      : "Fresh inference using the frozen model; the model was not " +
+        "retrained.", "boundary-note"));
+    card.appendChild(el("h4", "Before-answer predictions"));
     card.appendChild(el("p",
-      "Frozen KT pre-answer probability per response position " +
-      "(axis 0–1); dots mark observed correctness " +
-      "(teal=correct, rust=incorrect, grey=answer record unavailable).", "meta"));
-    const chart = ktChart(diag);
-    if (chart) card.appendChild(chart);
-    card.appendChild(el("p", diag.scope_warning || "", "meta"));
-    card.appendChild(jsonDetails("Full KT trace (raw JSON)", diag.kt,
+      "Predicted correctness (0–1) is read per answer position. " +
+      "Probabilities do not explain why an answer was incorrect and " +
+      "are not a learning curve.", "meta"));
+    const observedLabel = (row) =>
+      (!row || (row.correct !== true && row.correct !== false))
+        ? "Answer unavailable" : row.correct ? "Correct" : "Incorrect";
+    const legend = el("div", null, "kt-legend");
+    [["Correct", "is-correct"],
+     ["Incorrect", "is-incorrect"],
+     ["Answer unavailable", "is-unavailable"]].forEach(
+      ([text, kind]) => {
+        const item = el("span", null, "kt-legend-item");
+        item.appendChild(el("span", null, `kt-legend-mark ${kind}`));
+        item.appendChild(el("span", text));
+        legend.appendChild(item);
+      });
+    card.appendChild(legend);
+    card.appendChild(el("p",
+      "Move across the chart to inspect the nearest answer, or focus " +
+      "a point with the keyboard.", "meta"));
+    const probs = (diag.kt || {}).p_correct_before_each_answer || [];
+    const validIndex = probs.findIndex(
+      (p) => Number.isFinite(p) && p >= 0 && p <= 1);
+    const grid = el("div", null, "kt-grid");
+    const chartWrap = el("div", null, "kt-scroll");
+    const inspector = el("div", null, "kt-inspector");
+    if (validIndex < 0) {
+      chartWrap.appendChild(el("p", "No prediction values available.",
+                               "diagnostics-empty-text"));
+      inspector.appendChild(el("p",
+        "Select a point on the chart to inspect an answer.", "meta"));
+    } else {
+      const selKey = `${selected}|${researchCp}`;
+      const showPoint = (i, dot) => {
+        researchSelections.set(selKey, i);
+        grid.querySelectorAll(".kt-point.selected")
+          .forEach((n) => n.classList.remove("selected"));
+        if (dot) dot.classList.add("selected");
+        const p = probs[i];
+        const row = (detail.question_responses || [])[i];
+        inspector.replaceChildren();
+        inspector.appendChild(el("h5", `Answer ${i + 1}`));
+        const probRow = kv("Predicted correctness", p.toFixed(3));
+        probRow.classList.add("kt-prob");
+        inspector.appendChild(probRow);
+        inspector.appendChild(kv("Observed", observedLabel(row)));
+        if (row) {
+          inspector.appendChild(kv("Topic",
+            taskTopicName(row.skill_id, row.skill_name)));
+          inspector.appendChild(el("p", englishQuestionText(row),
+                                   "meta"));
+        } else {
+          inspector.appendChild(el("p", "Answer record unavailable.",
+                                   "meta"));
+        }
+      };
+      const svg = ktChart(diag, showPoint);
+      chartWrap.appendChild(svg);
+      inspector.appendChild(el("p",
+        "Select a point on the chart to inspect an answer.", "meta"));
+      // Keep the teacher's inspected answer across poll re-renders;
+      // fall back to the first valid point if it no longer exists.
+      const savedIndex = researchSelections.get(selKey);
+      const initial = (typeof savedIndex === "number"
+        && Number.isFinite(probs[savedIndex])
+        && probs[savedIndex] >= 0 && probs[savedIndex] <= 1)
+        ? savedIndex : validIndex;
+      const first = svg.querySelector(
+        `.kt-point[data-index="${initial}"]`);
+      showPoint(initial, first);
+    }
+    grid.appendChild(chartWrap);
+    grid.appendChild(inspector);
+    card.appendChild(grid);
+    const data = el("details", null, "raw");
+    data.dataset.disclosureKey = "answer-level-data";
+    data.appendChild(el("summary", "Answer-level data"));
+    const scroller = el("div", null, "kt-table-scroll");
+    const table = el("table", null, "grid kt-table");
+    const head = el("tr");
+    ["Answer", "Topic", "Predicted correctness (0–1)",
+     "Observed answer"].forEach(
+      (text) => head.appendChild(el("th", text)));
+    table.appendChild(head);
+    probs.forEach((p, i) => {
+      const row = (detail.question_responses || [])[i];
+      const tr = el("tr");
+      tr.appendChild(el("td", String(i + 1)));
+      tr.appendChild(el("td",
+        row ? taskTopicName(row.skill_id, row.skill_name) : "—"));
+      tr.appendChild(el("td",
+        Number.isFinite(p) && p >= 0 && p <= 1
+          ? p.toFixed(3) : "Unavailable"));
+      tr.appendChild(el("td", observedLabel(row)));
+      table.appendChild(tr);
+    });
+    scroller.appendChild(table);
+    data.appendChild(scroller);
+    card.appendChild(data);
+    const tech = el("div", null, "kt-technical");
+    tech.appendChild(el("h4", "Technical details"));
+    tech.appendChild(el("p", diag.scope_warning || "", "meta"));
+    tech.appendChild(jsonDetails("Full KT trace (raw JSON)", diag.kt,
       "kt-trace"));
-    card.appendChild(jsonDetails("Provenance",
+    tech.appendChild(jsonDetails("Provenance",
       (diag.kt || {}).provenance || {}, "provenance"));
+    card.appendChild(tech);
     pane.appendChild(card);
   }
 
@@ -3101,7 +3469,7 @@ function createDetailView(root, options = {}) {
 
   function renderReleaseCard(pane) {
     const delivery = detail.feedback_delivery;
-    const card = el("div", null, "card-inner release-card");
+    const card = el("div", null, "card-inner ui-section release-card");
     card.appendChild(el("h3", "Shared feedback — teacher preview and release"));
     card.appendChild(el("p",
       "This approval releases feedback and practice only within this " +
@@ -3151,6 +3519,14 @@ function createDetailView(root, options = {}) {
       strip.appendChild(el("p",
         "AI authored selected wording; remaining text is " +
         "application-owned.", "meta"));
+    }
+    if ((delivery.wording_warnings || [])
+        .includes("internal_process_language")) {
+      strip.appendChild(el("p",
+        "Wording review: this draft contains internal application " +
+        "terminology. Check and edit it before approval. This is a " +
+        "review warning, not a validation failure.",
+        "warn feedback-wording-warning"));
     }
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
     const templateRow = kv("Base feedback template",
@@ -3888,7 +4264,7 @@ function createDetailView(root, options = {}) {
   }
 
   function renderMidpointCard(pane) {
-    const card = el("div", null, "card-inner midpoint-feedback-card");
+    const card = el("div", null, "card-inner ui-section midpoint-feedback-card");
     card.appendChild(el("h3", "Student midpoint check-in"));
     const midpoint = detail.checkpoints.midpoint || {};
     const job = midpoint.phrasing_job || null;
@@ -4167,6 +4543,9 @@ function createDetailView(root, options = {}) {
       ? {start: active.selectionStart, end: active.selectionEnd}
       : null;
     pane.replaceChildren();
+    pane.appendChild(DemoUI.heading("Feedback drafts",
+      "Final feedback requires educator approval. The midpoint check-in " +
+      "is shown automatically when ready.", {eyebrow: "Feedback & release"}));
     renderMidpointCard(pane);
     if (!detail.read_only && detail.feedback_delivery) {
       renderReleaseCard(pane);
@@ -4175,7 +4554,7 @@ function createDetailView(root, options = {}) {
         (detail.checkpoints.end || {}).student_review;
       if (savedReview && savedReview.message) {
         const saved = el("div", null,
-          "card-inner saved-end-feedback");
+          "card-inner ui-section saved-end-feedback");
         saved.appendChild(el("h4", "Saved end feedback"));
         saved.appendChild(kv("Base feedback template",
           feedbackTemplateLabel(savedReview.message,
@@ -4227,7 +4606,7 @@ function createDetailView(root, options = {}) {
         }
       });
     }
-    const research = el("details", null, "raw");
+    const research = el("details", null, "raw ui-disclosure");
     research.dataset.disclosureKey = "feedback-research";
     research.appendChild(el("summary", "End-point generation details"));
     const card = el("div", null, "card-inner");
@@ -4358,7 +4737,8 @@ function createDetailView(root, options = {}) {
     }
     if (Number.isFinite(genExec.original_call_latency_ms)) {
       gen.appendChild(kv("Call duration",
-        `${genExec.original_call_latency_ms} ms`));
+        `${(genExec.original_call_latency_ms / 1000).toFixed(2)} ` +
+        "seconds"));
     }
     const retry = genExec.automatic_retry;
     if (retry && Number.isFinite(retry.attempts)) {
