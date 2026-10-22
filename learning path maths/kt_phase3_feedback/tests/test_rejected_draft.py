@@ -580,8 +580,13 @@ class WorkedFirstRejectedDraftTests(unittest.TestCase):
                 preview = detail["feedback_delivery"]["preview"]
                 self.assertEqual(preview["total"],
                                  {"correct": 38, "out_of": 40})
-                self.assertEqual(preview["review_examples"],
-                                 review.get("review_examples") or [])
+                # Private selection provenance is stripped from the
+                # preview; everything else on the cards is identical.
+                stripped = [
+                    {k: v for k, v in card.items()
+                     if k != "selection_provenance"}
+                    for card in review.get("review_examples") or []]
+                self.assertEqual(preview["review_examples"], stripped)
                 by_id = {c["candidate_id"]: c for c in
                          review.get("selected_candidates") or []}
                 expected_cards = [

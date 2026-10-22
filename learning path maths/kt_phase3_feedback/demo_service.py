@@ -34,8 +34,9 @@ from assessment_worked_review import (
 from active_payload import active_payload
 from evidence_feedback import (
     MIDPOINT_MESSAGE_VERSION, build_evidence, build_research_evidence,
-    canonical_digest, compose_midpoint_message, run_feedback,
-    run_multi_feedback, select_review_bundle, validate_evidence)
+    bundle_selection_payload, canonical_digest, compose_midpoint_message,
+    run_feedback, run_multi_feedback, select_review_bundle,
+    validate_evidence)
 from evidence_feedback_policy import (
     MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
     MULTI_SELECTION_PROMPT_VERSION,
@@ -72,6 +73,7 @@ from session_store import SessionStore, bank_fingerprint, utc_now
 from shadow_practice import (
     ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
 from synthetic_feedback import PROMPT_VERSION
+import worked_example_selection
 from worked_first_context import (
     CONTEXT_VERSION as WORKED_FIRST_CONTEXT_VERSION,
     PROMPT_VERSION as WORKED_FIRST_GENERATION_PROMPT_VERSION,
@@ -334,9 +336,32 @@ class DemoService:
             raise ValueError(
                 "grounded worked review requires 40 recorded answers")
         context = self._context_for(meta)
-        return {"bank": context["bank"],
-                "taxonomy": context["taxonomy"],
-                "responses": rows}
+        result = {"bank": context["bank"],
+                  "taxonomy": context["taxonomy"],
+                  "responses": rows}
+        snapshot = meta["checkpoints"]["end"].get(
+            worked_example_selection.CONTEXT_KEY)
+        if snapshot is not None:
+            result[worked_example_selection.CONTEXT_KEY] = (
+                copy.deepcopy(snapshot))
+        return result
+
+    def _freeze_worked_example_selection(self, meta, rows=None):
+        """Freeze the end-checkpoint worked-example selection snapshot
+        once, before any draft is built; never overwrite an existing
+        frozen snapshot. Callers hold the service lock and persist."""
+        if (meta.get("worked_example_selection_policy")
+                != worked_example_selection.POLICY):
+            return
+        end = meta["checkpoints"]["end"]
+        if worked_example_selection.CONTEXT_KEY in end:
+            return
+        if rows is None:
+            rows = self._rows(meta["session_id"])
+        context = self._context_for(meta)
+        end[worked_example_selection.CONTEXT_KEY] = (
+            worked_example_selection.freeze_selection(
+                context["bank"], rows, end.get("diagnostics")))
 
     @staticmethod
     def _is_grounded(meta):
@@ -632,6 +657,8 @@ class DemoService:
                 MULTI_REVIEW_POLICY_VERSION)
             meta["worked_review_version"] = (
                 ASSESSMENT_WORKED_REVIEW_VERSION)
+            meta["worked_example_selection_policy"] = (
+                worked_example_selection.POLICY)
             meta["review_presentation_version"] = (
                 WORKED_FIRST_VERSION
                 if feedback_variant == "worked_first"
@@ -849,6 +876,10 @@ class DemoService:
                 "worked_review_version", ASSESSMENT_WORKED_REVIEW_VERSION)
             preview["review_examples"] = copy.deepcopy(
                 review.get("review_examples") or [])
+            # Private ranking data (probabilities, alternate
+            # candidates) must never reach approved or student payloads.
+            for example in preview["review_examples"]:
+                example.pop("selection_provenance", None)
             if review.get("worked_review_status") is not None:
                 preview["worked_review_status"] = review[
                     "worked_review_status"]
@@ -928,6 +959,22 @@ class DemoService:
             copy_meta["checkpoints"]["end"]["baseline_student"])
         copy_meta["provider_job"]["status"] = "fallback"
         return self._final_preview(copy_meta)
+
+    @staticmethod
+    def _worked_example_choices(end):
+        """Teacher-only worked-example choices carrying full selection
+        provenance; never part of the preview payload itself."""
+        review = end.get("student_review") or {}
+        choices = []
+        for card in review.get("review_examples") or []:
+            provenance = card.get("selection_provenance")
+            if provenance is None:
+                continue
+            choices.append({
+                "candidate_id": card.get("candidate_id"),
+                "subtopic_name": card.get("for_subtopic_name"),
+                **copy.deepcopy(provenance)})
+        return choices
 
     @staticmethod
     def _delivery_status(session, meta):
@@ -1446,7 +1493,31 @@ class DemoService:
             selection = {"bundle": bundle, "trace": trace}
         else:
             selection = None
+            review = end.get("student_review") or {}
+            candidate_id = review.get("selected_candidate_id")
+            chosen = review.get("selected_candidates")
+            if isinstance(candidate_id, str) and chosen:
+                # A degraded record (selection metadata lost after a
+                # queue/restart fallback) must not trigger a fresh
+                # topic reselection: resolve the recorded candidate id
+                # against the permitted bundles and keep it only when
+                # the recorded candidates match exactly.
+                try:
+                    bundles = bundle_selection_payload(
+                        evidence)["candidates"]
+                except Exception:
+                    bundles = []
+                resolved = next(
+                    (b for b in bundles
+                     if b["candidate_id"] == candidate_id), None)
+                if (resolved is not None
+                        and resolved["review_candidates"] == chosen):
+                    selection = {"bundle": resolved, "trace": trace}
         grounded = self._is_grounded(meta)
+        if grounded:
+            # Freeze the selection snapshot once so restart and queue
+            # fallbacks stay reproducible instead of re-ranking later.
+            self._freeze_worked_example_selection(meta, rows)
         try:
             assessment_ctx = self._assessment_context(meta, rows)
         except Exception:
@@ -1964,16 +2035,12 @@ class DemoService:
                             else "disabled"))
                     meta["provider_job"]["status"] = "pending"
                     self._save_meta(meta)
-                try:
-                    assessment_ctx = self._assessment_context(meta, rows)
-                except Exception:
-                    assessment_ctx = None
-                worked_first_context = None
-                if (meta.get("feedback_variant") == "worked_first"
-                        and mode == "hosted"
-                        and getattr(self.generator,
-                                    "supports_full_feedback", False)
-                        and assessment_ctx is not None):
+                diagnostic_blocks = None
+                if (meta.get("worked_example_selection_policy")
+                        == worked_example_selection.POLICY):
+                    # Grounded worked-example selection needs terminal
+                    # diagnostics regardless of variant or provider
+                    # mode; the frozen snapshot is built afterwards.
                     diagnostic_blocks = (
                         self._wait_for_worked_first_diagnostics(
                             session_id))
@@ -1986,10 +2053,38 @@ class DemoService:
                             meta = self._load_meta(session_id)
                         except FileNotFoundError:
                             return
+                        self._freeze_worked_example_selection(meta, rows)
                         meta["provider_job"]["status"] = "pending"
                         meta["checkpoints"]["end"]["provider_job"] = (
                             copy.deepcopy(meta["provider_job"]))
                         self._save_meta(meta)
+                try:
+                    assessment_ctx = self._assessment_context(meta, rows)
+                except Exception:
+                    assessment_ctx = None
+                worked_first_context = None
+                if (meta.get("feedback_variant") == "worked_first"
+                        and mode == "hosted"
+                        and getattr(self.generator,
+                                    "supports_full_feedback", False)
+                        and assessment_ctx is not None):
+                    if diagnostic_blocks is None:
+                        diagnostic_blocks = (
+                            self._wait_for_worked_first_diagnostics(
+                                session_id))
+                        if diagnostic_blocks is None:
+                            # Closing or missing meta; restart recovery
+                            # publishes the deterministic baseline.
+                            return
+                        with self.lock:
+                            try:
+                                meta = self._load_meta(session_id)
+                            except FileNotFoundError:
+                                return
+                            meta["provider_job"]["status"] = "pending"
+                            meta["checkpoints"]["end"]["provider_job"] = (
+                                copy.deepcopy(meta["provider_job"]))
+                            self._save_meta(meta)
                     worked_first_context = build_worked_first_context(
                         evidence, assessment_ctx, diagnostic_blocks)
                 with self._adapter_scope(
@@ -2046,6 +2141,20 @@ class DemoService:
                 job_status = ("fallback"
                               if review["trace"]["fallback_reason"]
                               else "ready")
+                baseline_review = None
+                if (meta.get("worked_example_selection_policy")
+                        == worked_example_selection.POLICY):
+                    # Refresh the deterministic baseline with the same
+                    # frozen selection, selected bundle and practice
+                    # contexts as the published draft; identical inputs
+                    # give no reason to conceal a failure behind a
+                    # stale earliest baseline. Runs outside the lock;
+                    # genuine failure falls to _multi_worker_failure.
+                    baseline_review = run_multi_feedback(
+                        evidence, selection=selection,
+                        practice_contexts=[
+                            c["context"] for c in contexts],
+                        assessment_context=assessment_ctx)
             with self.lock:
                 try:
                     meta = self._load_meta(session_id)
@@ -2065,6 +2174,8 @@ class DemoService:
                              "generator": {"status": "worker_error"}}}})
                 else:
                     end["student_review"] = review
+                    if baseline_review is not None:
+                        end["baseline_student"] = baseline_review
                     meta["provider_job"].update({
                         "status": job_status,
                         "finished_at": utc_now(),
@@ -2409,6 +2520,8 @@ class DemoService:
                 "deterministic_preview":
                     self._deterministic_preview(meta),
                 "wording_warnings": feedback_wording_warnings(preview),
+                "worked_example_choices": (
+                    self._worked_example_choices(end)),
                 "released_feedback": None,
                 "released_at": None,
                 "reviewer_label": None}
@@ -2469,6 +2582,8 @@ class DemoService:
                 "review_contract": self.teacher_config()["review_contract"],
                 "reviews": copy.deepcopy(meta["reviews"]),
                 "provider_job": copy.deepcopy(meta["provider_job"]),
+                "worked_example_selection_history": copy.deepcopy(
+                    meta.get("worked_example_selection_history", [])),
                 "feedback_delivery": delivery,
                 "provenance": provenance})
 
@@ -2602,6 +2717,148 @@ class DemoService:
                     "released_at":
                         meta["feedback_release"]["released_at"],
                     "preview_sha256": current}
+
+    def select_worked_example(self, session_id, body):
+        """Teacher override of the recommended worked example; rebuilds
+        the whole draft deterministically before approval only."""
+        if (not isinstance(body, dict)
+                or not {"message_sha256", "candidate_id",
+                        "question_id"} <= set(body)
+                or not set(body) <= {
+                    "message_sha256", "candidate_id", "question_id",
+                    "reviewer_label"}):
+            raise ValueError(
+                "worked-example selection body has unexpected fields")
+        digest = body["message_sha256"]
+        if (not isinstance(digest, str)
+                or len(digest) != 64 or any(
+                    ch not in "0123456789abcdef" for ch in digest)):
+            raise ValueError(
+                "message_sha256 must be a sha256 hex digest")
+        candidate_id = body["candidate_id"]
+        question_id = body["question_id"]
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise ValueError("candidate_id must be a nonempty string")
+        if not isinstance(question_id, str) or not question_id:
+            raise ValueError("question_id must be a nonempty string")
+        reviewer = _strict_text(
+            body.get("reviewer_label", "anonymous"), "reviewer_label", 80)
+        with self.lock:
+            meta = self._load_meta(session_id)
+            session = self._context_for(meta)["mcqs"].private_record(
+                session_id)
+            if session["status"] != "complete":
+                raise ValueError(
+                    "worked-example selection requires a completed "
+                    "session")
+            if (meta.get("worked_example_selection_policy")
+                    != worked_example_selection.POLICY):
+                raise ValueError(
+                    "worked-example selection requires the grounded "
+                    "selection policy")
+            if meta["provider_job"].get("status") not in (
+                    "ready", "fallback"):
+                raise ConflictError(
+                    "feedback is not ready for worked-example "
+                    "selection")
+            if meta.get("feedback_release"):
+                raise ConflictError("feedback is already released")
+            preview = self._final_preview(meta)
+            if preview is None:
+                raise ConflictError(
+                    "feedback is not ready for worked-example "
+                    "selection")
+            current = canonical_digest(preview)
+            if current != digest:
+                raise ConflictError(
+                    "stale feedback revision", current=current)
+            end = meta["checkpoints"]["end"]
+            review = end.get("student_review")
+            if review is None:
+                raise ConflictError(
+                    "feedback is not ready for worked-example "
+                    "selection")
+            matched = next(
+                (c for c in review.get("selected_candidates") or []
+                 if c.get("candidate_id") == candidate_id
+                 and c.get("focus")), None)
+            if matched is None:
+                raise ValueError(
+                    "candidate_id must be a selected review candidate "
+                    "with a focus")
+            snapshot = end.get(worked_example_selection.CONTEXT_KEY)
+            if not isinstance(snapshot, dict):
+                raise ConflictError(
+                    "worked-example selection snapshot unavailable")
+            card = next(
+                (c for c in review.get("review_examples") or []
+                 if c.get("candidate_id") == candidate_id), None)
+            if (card or {}).get("question_id") == question_id:
+                # Already selected: idempotent, no draft reset.
+                return {"saved": True, "preview_sha256": current}
+            rows = self._rows(session_id)
+            context = self._context_for(meta)
+            cloned = copy.deepcopy(snapshot)
+            cloned["overrides"] = dict(cloned.get("overrides") or {})
+            cloned["overrides"][candidate_id] = question_id
+            # Reject the override against the frozen assessment before
+            # any metadata changes.
+            worked_example_selection.validate_selection(
+                cloned, context["bank"], rows)
+            recorded = end.get("multi_selection") or {}
+            if not recorded.get("bundle"):
+                raise ConflictError(
+                    "selected review bundle is unavailable")
+            selection = {
+                "bundle": copy.deepcopy(recorded["bundle"]),
+                "trace": copy.deepcopy(recorded.get("trace") or {})}
+            evidence = (end.get("evidence")
+                        or self._evidence(meta, rows))
+            assessment_ctx = self._assessment_context(meta, rows)
+            if assessment_ctx is None:
+                raise ConflictError(
+                    "worked-example selection context unavailable")
+            assessment_ctx[worked_example_selection.CONTEXT_KEY] = cloned
+            practice = [copy.deepcopy(c["context"])
+                        for c in end.get("practice_contexts") or []]
+            # Deterministic rebuild: provider prose or a saved document
+            # can never reference the replaced question.
+            rebuilt = run_multi_feedback(
+                evidence, selection=selection,
+                practice_contexts=practice,
+                assessment_context=assessment_ctx)
+            now = utc_now()
+            rebuilt["trace"]["phrasing_source"] = "deterministic"
+            rebuilt["trace"]["worked_example_override"] = {
+                "candidate_id": candidate_id,
+                "question_id": question_id,
+                "reviewer_label": reviewer,
+                "overridden_at": now}
+            audit = {
+                "applied_at": now, "candidate_id": candidate_id,
+                "question_id": question_id,
+                "reviewer_label": reviewer,
+                "previous_preview_sha256": current,
+                "previous_student_review": copy.deepcopy(
+                    end.get("student_review")),
+                "previous_feedback_edit": copy.deepcopy(
+                    meta.get("feedback_edit")),
+                "previous_provider_job": copy.deepcopy(
+                    meta["provider_job"])}
+            meta.setdefault(
+                "worked_example_selection_history", []).append(audit)
+            end[worked_example_selection.CONTEXT_KEY] = cloned
+            end["student_review"] = rebuilt
+            meta["feedback_edit"] = None
+            meta["provider_job"].setdefault(
+                "executions", {}).setdefault(
+                    "student", {})["generator"] = {
+                        "status": "teacher_selected_checked_draft"}
+            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            self._save_meta(meta)
+            return {"saved": True,
+                    "preview_sha256": canonical_digest(
+                        self._final_preview(meta))}
 
     def save_feedback_edit(self, session_id, body):
         if (not isinstance(body, dict)

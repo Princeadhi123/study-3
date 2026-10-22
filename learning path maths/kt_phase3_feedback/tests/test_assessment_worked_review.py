@@ -1,11 +1,15 @@
 import copy
 import json
 import tempfile
+import threading
+import time
 import unittest
 from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 import phase3_paths  # noqa: F401
+import worked_example_selection
 import worked_review_math
 from assessment_worked_review import (
     ASSESSMENT_WORKED_REVIEW_VERSION, CONCISE_PRACTICE_NOTICE,
@@ -33,6 +37,7 @@ from replay_provider_scenarios import CaptureCache
 from research_runtime import load_research_bank
 from session_store import bank_fingerprint
 from tests.test_kt_adapter import FakeKT
+from tests.test_demo_service import GatedDiagnostics, wait_for
 from live_diagnostics import LiveDiagnostics
 
 
@@ -2027,6 +2032,785 @@ class WarmBankQuestionFirstTests(unittest.TestCase):
                                      EXPECTED_WARM_CONTRASTS[
                                          (qid, option)])
         self.assertEqual(seen, set(EXPECTED_WARM_CONTRASTS))
+
+
+SELECTION_WRONG = (0, 4, 8, 1, 5)
+
+
+def selection_diagnostics(probabilities):
+    return {"status": "ready", "checkpoint": "end", "answer_count": 40,
+            "kt": {"kind": "frozen_variant_d_response_trace",
+                   "coverage": {
+                       "question_count": 40,
+                       "missing_skill_count": 0,
+                       "missing_content_count": 0,
+                       "missing_option_count": 0},
+                   "p_correct_before_each_answer":
+                       list(probabilities)}}
+
+
+def selection_probabilities():
+    probs = [0.5] * 40
+    probs[0] = 0.8
+    probs[4] = 0.2
+    probs[8] = 0.2
+    probs[1] = 0.1
+    probs[5] = 0.7
+    probs[12] = 0.001  # answered correctly; must be excluded
+    return probs
+
+
+class WorkedExampleSelectionTests(unittest.TestCase):
+    """Experimental KT worked-example selection inside the frozen
+    assessment context; private provenance stays off the wire."""
+
+    def setUp(self):
+        self.bank = make_grounded_bank()
+        self.taxonomy = make_grounded_taxonomy(self.bank)
+        self.rows = grounded_rows(self.bank, SELECTION_WRONG)
+        self.evidence = build_evidence(
+            self.bank, self.taxonomy, self.rows)
+        self.snapshot = worked_example_selection.freeze_selection(
+            self.bank, self.rows,
+            selection_diagnostics(selection_probabilities()))
+        self.context = {
+            **context_for(self.bank, self.taxonomy, self.rows),
+            worked_example_selection.CONTEXT_KEY: self.snapshot}
+        self.pct = candidate_for(self.evidence, "percentage_amount")
+        self.alg = candidate_for(self.evidence, "combine_like_terms")
+
+    def _cards(self, candidates=None, context=None):
+        return build_assessment_review_examples(
+            self.evidence, candidates or [self.pct, self.alg],
+            context if context is not None else self.context)
+
+    def _qids(self, skill):
+        return {q["question_id"] for q in self.bank["questions"]
+                if q["skill_id"] == skill}
+
+    def test_lowest_pre_answer_kt_beats_earliest_position(self):
+        cards = self._cards()
+        self.assertEqual(cards[0]["question_id"],
+                         self.bank["questions"][4]["question_id"])
+        self.assertEqual(cards[1]["question_id"],
+                         self.bank["questions"][1]["question_id"])
+        for card in cards:
+            self.assertEqual(
+                card["selection_policy"],
+                worked_example_selection.POLICY)
+            provenance = card["selection_provenance"]
+            self.assertEqual(
+                provenance["policy"], worked_example_selection.POLICY)
+            self.assertEqual(provenance["score_source"],
+                             "historical_pre_answer_trace")
+        prov = cards[0]["selection_provenance"]
+        self.assertEqual(prov["source"], "kt_recommendation")
+        self.assertEqual(prov["recommended_question_id"],
+                         prov["selected_question_id"])
+        self.assertIn("lowest pre-answer KT", prov["reason"])
+        qids = {c["question_id"] for c in prov["candidates"]}
+        # Only incorrect percentage questions: 0, 4, 8; correct index 12
+        # and other skills are excluded.
+        self.assertEqual(
+            qids, {self.bank["questions"][i]["question_id"]
+                   for i in (0, 4, 8)})
+        self.assertNotIn(self.bank["questions"][12]["question_id"], qids)
+        first = next(c for c in prov["candidates"]
+                     if c["question_id"]
+                     == self.bank["questions"][4]["question_id"])
+        self.assertEqual(first["position"], 5)
+        self.assertEqual(first["p_correct_before_answer"], 0.2)
+        self.assertTrue(first["checked_solution_available"])
+
+    def test_unchecked_solver_falls_to_next_checked_candidate(self):
+        target = self.bank["questions"][4]["question_id"]
+        original = worked_review_math.solution
+
+        def solver(question, subtopic_id):
+            if question["question_id"] == target:
+                raise ValueError("no solver")
+            return original(question, subtopic_id)
+
+        with mock.patch.object(worked_review_math, "solution", solver):
+            cards = self._cards([self.pct])
+        self.assertEqual(cards[0]["question_id"],
+                         self.bank["questions"][8]["question_id"])
+        self.assertEqual(cards[0]["status"], "ready")
+        self.assertFalse(
+            next(c for c in cards[0]["selection_provenance"]
+                   ["candidates"]
+                   if c["question_id"] == target)
+            ["checked_solution_available"])
+
+    def test_all_unchecked_keeps_earliest_for_teacher_review(self):
+        def solver(question, subtopic_id):
+            raise ValueError("no solver")
+
+        with mock.patch.object(worked_review_math, "solution", solver):
+            cards = self._cards([self.pct])
+        self.assertEqual(cards[0]["question_id"],
+                         self.bank["questions"][0]["question_id"])
+        self.assertEqual(cards[0]["status"], "unavailable")
+        self.assertEqual(cards[0]["steps"], [])
+        prov = cards[0]["selection_provenance"]
+        self.assertEqual(prov["source"], "earliest_fallback")
+        self.assertIn("teacher review", prov["reason"])
+
+    def test_invalid_traces_freeze_unavailable_and_fallback(self):
+        base = selection_diagnostics(selection_probabilities())
+
+        def diag(**kt):
+            result = copy.deepcopy(base)
+            result["kt"].update(kt)
+            return result
+
+        cases = [
+            diag(**{"p_correct_before_each_answer": [0.5] * 39}),
+            diag(**{"p_correct_before_each_answer":
+                    [0.5] * 39 + [float("nan")]}),
+            diag(**{"p_correct_before_each_answer":
+                    [0.5] * 39 + [True]}),
+            diag(**{"p_correct_before_each_answer":
+                    [0.5] * 39 + [1.5]}),
+            diag(kind="other_trace_kind"),
+            diag(**{"coverage": {"question_count": 39}}),
+            {"status": "pending"},
+            None,
+            "garbage"]
+        for broken in cases:
+            frozen = worked_example_selection.freeze_selection(
+                self.bank, self.rows, broken)
+            self.assertIsNone(frozen["probabilities"], broken)
+            self.assertEqual(
+                frozen["score_source"],
+                "unavailable_or_incompatible_trace")
+            context = {**context_for(self.bank, self.taxonomy,
+                                     self.rows),
+                       worked_example_selection.CONTEXT_KEY: frozen}
+            card = self._cards([self.pct], context=context)[0]
+            self.assertEqual(card["question_id"],
+                             self.bank["questions"][0]["question_id"])
+            self.assertEqual(card["selection_provenance"]["source"],
+                             "earliest_fallback")
+            self.assertIn("unavailable or incompatible",
+                          card["selection_provenance"]["reason"])
+
+    def test_snapshot_rejects_mismatched_rows(self):
+        other = grounded_rows(self.bank, (0, 1))
+        snapshot = worked_example_selection.freeze_selection(
+            self.bank, other,
+            selection_diagnostics(selection_probabilities()))
+        context = {**context_for(self.bank, self.taxonomy, self.rows),
+                   worked_example_selection.CONTEXT_KEY: snapshot}
+        with self.assertRaises(ValueError):
+            self._cards(context=context)
+
+    def test_teacher_override_selects_eligible_question(self):
+        qid8 = self.bank["questions"][8]["question_id"]
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["overrides"][self.pct["candidate_id"]] = qid8
+        context = {**context_for(self.bank, self.taxonomy, self.rows),
+                   worked_example_selection.CONTEXT_KEY: snapshot}
+        card = self._cards([self.pct], context=context)[0]
+        self.assertEqual(card["question_id"], qid8)
+        prov = card["selection_provenance"]
+        self.assertEqual(prov["source"], "teacher_override")
+        self.assertEqual(prov["recommended_question_id"],
+                         self.bank["questions"][4]["question_id"])
+        self.assertEqual(prov["selected_question_id"], qid8)
+
+    def test_teacher_override_rejects_ineligible_questions(self):
+        for qid in (self.bank["questions"][12]["question_id"],  # correct
+                    self.bank["questions"][1]["question_id"],   # other skill
+                    "nonexistent__qid"):
+            snapshot = copy.deepcopy(self.snapshot)
+            snapshot["overrides"][self.pct["candidate_id"]] = qid
+            context = {
+                **context_for(self.bank, self.taxonomy, self.rows),
+                worked_example_selection.CONTEXT_KEY: snapshot}
+            with self.assertRaises(ValueError, msg=qid):
+                self._cards([self.pct], context=context)
+
+    def test_override_to_unavailable_keeps_unavailable_fields(self):
+        target = self.bank["questions"][8]["question_id"]
+        snapshot = copy.deepcopy(self.snapshot)
+        snapshot["overrides"][self.pct["candidate_id"]] = target
+        context = {**context_for(self.bank, self.taxonomy, self.rows),
+                   worked_example_selection.CONTEXT_KEY: snapshot}
+        original = worked_review_math.solution
+
+        def solver(question, subtopic_id):
+            if question["question_id"] == target:
+                raise ValueError("no solver")
+            return original(question, subtopic_id)
+
+        with mock.patch.object(worked_review_math, "solution", solver):
+            card = self._cards([self.pct], context=context)[0]
+        self.assertEqual(card["question_id"], target)
+        self.assertEqual(card["status"], "unavailable")
+        self.assertEqual(card["steps"], [])
+        self.assertIsNone(card["solution_version"])
+        self.assertEqual(card["notice"], UNAVAILABLE_NOTICE)
+
+    def test_plain_context_keeps_earliest_policy(self):
+        context = context_for(self.bank, self.taxonomy, self.rows)
+        cards = self._cards(context=context)
+        self.assertEqual(cards[0]["question_id"],
+                         self.bank["questions"][0]["question_id"])
+        self.assertEqual(
+            cards[0]["selection_policy"],
+            "earliest_incorrect_in_selected_subtopic_v1")
+        self.assertNotIn("selection_provenance", cards[0])
+
+    def test_zero_probability_is_valid(self):
+        probs = selection_probabilities()
+        probs[8] = 0.0
+        snapshot = worked_example_selection.freeze_selection(
+            self.bank, self.rows, selection_diagnostics(probs))
+        context = {**context_for(self.bank, self.taxonomy, self.rows),
+                   worked_example_selection.CONTEXT_KEY: snapshot}
+        card = self._cards([self.pct], context=context)[0]
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][8]["question_id"])
+        self.assertEqual(card["selection_provenance"]
+                         ["p_correct_before_answer"], 0.0)
+
+    def test_provider_wire_has_no_private_selection_data(self):
+        payload = build_multi_full_input(
+            self.evidence, "student",
+            next(b for b in build_review_bundles(self.evidence)
+                 if {c["focus"]["subtopic_id"]
+                     for c in b["review_candidates"] if c["focus"]}
+                 == {"percentage_amount", "combine_like_terms"}),
+            [{"schema": "phase3_feedback_practice_context_v1",
+              "status": "abstained", "selected_question_id": None,
+              "pool_sha256": None},
+             {"schema": "phase3_feedback_practice_context_v1",
+              "status": "abstained", "selected_question_id": None,
+              "pool_sha256": None}],
+            assessment_context=self.context)
+        chosen = {e["question_id"] for e in payload["review_examples"]}
+        self.assertEqual(
+            chosen, {self.bank["questions"][4]["question_id"],
+                     self.bank["questions"][1]["question_id"]})
+        opener = RecordingOpener(wire_reply(
+            candidate_id=payload["selected_candidate"]["candidate_id"],
+            worked_reviews=fixture_reviews(payload)))
+        inner = AittaGenerator(API_KEY, BASE_URL, model=MODEL,
+                               opener=opener)
+        FullFeedbackAittaGenerator(inner).generate(
+            copy.deepcopy(payload))
+        body = opener.calls[0]["body"]
+        context = json.loads(body["messages"][1]["content"])
+        for card in context["review_examples"]:
+            self.assertIn(card["question_id"], chosen)
+        raw = json.dumps(context)
+        for forbidden in ("selection_provenance",
+                          "worked_example_selection",
+                          "p_correct_before_answer",
+                          "recommended_question_id",
+                          "probabilities", "score_source",
+                          "checked_solution_available", "overrides"):
+            self.assertNotIn(forbidden, raw)
+
+
+class WorkedExampleSelectionServiceTests(GroundedServiceTests):
+    """End-to-end new-policy selection through the DemoService."""
+
+    def _diagnostics(self, probabilities=None, gate=None):
+        if gate is not None:
+            return GatedDiagnostics(
+                self.bank, gate,
+                end_result=selection_diagnostics(
+                    probabilities or selection_probabilities()))
+        inner = selection_diagnostics(
+            probabilities or selection_probabilities())
+        bank = self.bank
+
+        class Stub:
+            def __init__(self):
+                self.inner = LiveDiagnostics(
+                    model_loader=lambda: FakeKT(bank))
+
+            def warmup(self):
+                return {"status": "ready"}
+
+            @property
+            def state(self):
+                return {"status": "ready"}
+
+            def evaluate(self, bank, taxonomy, rows):
+                if len(rows) == 40:
+                    return copy.deepcopy(inner)
+                return self.inner.evaluate(bank, taxonomy, rows)
+
+            def predict_future_candidates(self, *args):
+                return self.inner.predict_future_candidates(*args)
+
+        return Stub()
+
+    def _selected_card(self, service, sid, candidate_index=0):
+        review = service._load_meta(sid)["checkpoints"]["end"][
+            "student_review"]
+        return review["review_examples"][candidate_index]
+
+    def test_recommendation_uses_kt_not_first_position(self):
+        service = self._service(
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        self.assertEqual(
+            meta["worked_example_selection_policy"],
+            worked_example_selection.POLICY)
+        end = meta["checkpoints"]["end"]
+        self.assertIn(worked_example_selection.CONTEXT_KEY, end)
+        card = next(
+            c for c in end["student_review"]["review_examples"]
+            if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][4]["question_id"])
+        self.assertEqual(card["selection_provenance"]["source"],
+                         "kt_recommendation")
+
+    def test_diagnostics_gate_blocks_final_generation(self):
+        gate = threading.Event()
+        service = self._service(
+            diagnostics=self._diagnostics(gate=gate))
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "waiting_for_diagnostics"),
+            "provider never entered waiting_for_diagnostics")
+        self.assertNotIn(worked_example_selection.CONTEXT_KEY,
+                         service._load_meta(sid)["checkpoints"]["end"])
+        gate.set()
+        self._wait(service, sid)
+        end = service._load_meta(sid)["checkpoints"]["end"]
+        self.assertIn(worked_example_selection.CONTEXT_KEY, end)
+        card = next(
+            c for c in end["student_review"]["review_examples"]
+            if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][4]["question_id"])
+
+    def test_frozen_snapshot_never_refrozen(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        snapshot = end[worked_example_selection.CONTEXT_KEY]
+        changed = list(selection_probabilities())
+        changed[0] = 0.0
+        end["diagnostics"] = selection_diagnostics(changed)
+        service._freeze_worked_example_selection(meta)
+        self.assertEqual(
+            end[worked_example_selection.CONTEXT_KEY], snapshot)
+
+    def test_rules_mode_also_waits_and_selects(self):
+        gate = threading.Event()
+        service = self._service(
+            diagnostics=self._diagnostics(gate=gate))
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            == "waiting_for_diagnostics"))
+        gate.set()
+        self._wait(service, sid)
+        card = self._selected_card(service, sid, 0)
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][4]["question_id"])
+
+    def test_hosted_question_first_uses_selection(self):
+        calls = []
+
+        class FakeGenerator:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                calls.append(payload)
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+
+        service = self._service(
+            provider_mode="hosted", generator=FakeGenerator(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        self.assertEqual(len(calls), 1)
+        examples = calls[0]["review_examples"]
+        self.assertEqual(examples[0]["question_id"],
+                         self.bank["questions"][4]["question_id"])
+
+    def test_hosted_worked_first_uses_selection(self):
+        calls = []
+
+        class FakeGenerator:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                calls.append(payload)
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+
+        service = self._service(
+            provider_mode="hosted", generator=FakeGenerator(),
+            diagnostics=self._diagnostics())
+        created = service.create_session(
+            feedback_variant="worked_first")
+        sid, token = (created["session_id"],
+                      created["student_token"])
+        for row in grounded_rows(self.bank, SELECTION_WRONG):
+            service.submit_response(sid, token, row)
+        self._wait(service, sid)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["review_examples"][0]["question_id"],
+                         self.bank["questions"][4]["question_id"])
+
+    def test_teacher_override_rebuilds_draft_and_audits(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        detail = service.teacher_session(sid)
+        delivery = detail["feedback_delivery"]
+        before_meta = service._load_meta(sid)
+        before_end = before_meta["checkpoints"]["end"]
+        before_candidates = copy.deepcopy(
+            before_end["student_review"]["selected_candidates"])
+        before_practice = copy.deepcopy(
+            before_end["practice_contexts"])
+        before_activities = copy.deepcopy(
+            delivery["preview"].get("practice_activities"))
+        choices = delivery["worked_example_choices"]
+        pct = next(c for c in choices
+                   if c["subtopic_name"] == "Percentage of an amount")
+        self.assertEqual(
+            pct["selected_question_id"],
+            self.bank["questions"][4]["question_id"])
+        self.assertEqual(
+            pct["recommended_question_id"], pct["selected_question_id"])
+        self.assertEqual(
+            {c["question_id"] for c in pct["candidates"]},
+            {self.bank["questions"][i]["question_id"]
+             for i in (0, 4, 8)})
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8, "reviewer_label": "teacher-t"})
+        self.assertTrue(res["saved"])
+        self.assertNotEqual(res["preview_sha256"],
+                            delivery["preview_sha256"])
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        # Topic selection and practice contexts are untouched by the
+        # worked-example override.
+        self.assertEqual(end["student_review"]["selected_candidates"],
+                         before_candidates)
+        self.assertEqual(end["practice_contexts"], before_practice)
+        card = next(c for c in end["student_review"]["review_examples"]
+                    if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"], qid8)
+        question = self.bank["questions"][8]
+        row = grounded_rows(self.bank, SELECTION_WRONG)[8]
+        # The rebuilt card matches the checked solver output exactly.
+        solved = worked_review_math.solution(
+            question, "percentage_amount")
+        self.assertEqual(card["steps"], solved["steps"])
+        self.assertEqual(card["prompt"], question["text"])
+        self.assertEqual(card["options"], question["options"])
+        self.assertEqual(card["selected_answer"],
+                         question["options"][row["selected_index"]])
+        self.assertEqual(card["correct_answer"],
+                         question["options"][question["answer_index"]])
+        # The question-first preview card carries the checked hints
+        # for the overridden subtopic.
+        preview_card = next(
+            c for c in service.teacher_session(sid)
+            ["feedback_delivery"]["preview"]["review_examples"]
+            if c["question_id"] == qid8)
+        scaffold = worked_review_math.pre_reveal_scaffold(
+            "percentage_amount")
+        self.assertEqual(preview_card["progressive_hints"],
+                         scaffold["progressive_hints"])
+        self.assertEqual(preview_card["socratic_prompt"],
+                         scaffold["socratic_prompt"])
+        prov = card["selection_provenance"]
+        self.assertEqual(prov["source"], "teacher_override")
+        self.assertEqual(prov["recommended_question_id"],
+                         self.bank["questions"][4]["question_id"])
+        self.assertEqual(
+            end[worked_example_selection.CONTEXT_KEY]["overrides"]
+            [pct["candidate_id"]], qid8)
+        history = meta["worked_example_selection_history"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["question_id"], qid8)
+        self.assertIsNotNone(history[0]["previous_student_review"])
+        self.assertEqual(
+            meta["provider_job"]["executions"]["student"]
+            ["generator"]["status"], "teacher_selected_checked_draft")
+        self.assertEqual(
+            end["student_review"]["trace"]["phrasing_source"],
+            "deterministic")
+        self.assertEqual(
+            end["student_review"]["trace"]
+            ["worked_example_override"]["question_id"], qid8)
+        # Preview exposes no private ranking fields; choices persist.
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        self.assertEqual(delivery["preview"].get("practice_activities"),
+                         before_activities)
+        raw = json.dumps(delivery["preview"])
+        for forbidden in ("selection_provenance",
+                          "p_correct_before_answer",
+                          "recommended_question_id"):
+            self.assertNotIn(forbidden, raw)
+        # The audit trail is exported to the teacher but never leaks
+        # into the public snapshot.
+        exported = service.teacher_session(sid)
+        self.assertEqual(exported["worked_example_selection_history"],
+                         history)
+        snapshot = json.dumps(service.snapshot(sid, token))
+        self.assertNotIn("worked_example_selection_history", snapshot)
+        self.assertNotIn("worked_example_choices", snapshot)
+        pct2 = next(c for c in delivery["worked_example_choices"]
+                    if c["candidate_id"] == pct["candidate_id"])
+        self.assertEqual(pct2["selected_question_id"], qid8)
+        self.assertEqual(pct2["source"], "teacher_override")
+        # Idempotent re-select keeps the same digest and history.
+        again = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8, "reviewer_label": "teacher-t"})
+        self.assertEqual(again["preview_sha256"],
+                         res["preview_sha256"])
+        self.assertEqual(len(service._load_meta(sid)
+                             ["worked_example_selection_history"]), 1)
+
+    def test_override_resets_saved_edits_and_stale_hashes(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        delivery = service.teacher_session(sid)[
+            "feedback_delivery"]
+        old_hash = delivery["preview_sha256"]
+        service.save_feedback_edit(sid, {
+            "message_sha256": old_hash,
+            "document_text": "Old question description rewrite.",
+            "reviewer_label": "editor"})
+        delivery = service.teacher_session(sid)[
+            "feedback_delivery"]
+        self.assertEqual(delivery["preview_source"], "teacher_edited")
+        self.assertEqual(delivery["preview"].get("document_text"),
+                         "Old question description rewrite.")
+        pct = next(c for c in delivery["worked_example_choices"]
+                   if c["subtopic_name"] == "Percentage of an amount")
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        meta = service._load_meta(sid)
+        self.assertIsNone(meta["feedback_edit"])
+        self.assertIsNotNone(
+            meta["worked_example_selection_history"][0]
+            ["previous_feedback_edit"])
+        # Old digest rejected everywhere; new digest works.
+        with self.assertRaises(ConflictError):
+            service.save_feedback_edit(sid, {
+                "message_sha256": old_hash,
+                "document_text": "Another rewrite."})
+        with self.assertRaises(ConflictError):
+            service.release_feedback(
+                sid, {"message_sha256": old_hash})
+        released = service.release_feedback(
+            sid, {"message_sha256": res["preview_sha256"]})
+        self.assertTrue(released["released"])
+        # No KT data in the released payload.
+        raw = json.dumps(service.teacher_session(sid)
+                         ["feedback_delivery"]["released_feedback"])
+        for forbidden in ("selection_provenance",
+                          "p_correct_before_answer",
+                          "recommended_question_id"):
+            self.assertNotIn(forbidden, raw)
+        # Override is rejected after release.
+        with self.assertRaises(ConflictError):
+            service.select_worked_example(sid, {
+                "message_sha256": res["preview_sha256"],
+                "candidate_id": pct["candidate_id"],
+                "question_id": self.bank["questions"][0]
+                ["question_id"]})
+
+    def test_invalid_override_bodies_and_ids_do_not_mutate(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        before = service._load_meta(sid)
+        digest = service.teacher_session(sid)[
+            "feedback_delivery"]["preview_sha256"]
+        pct = next(
+            c for c in service.teacher_session(sid)
+            ["feedback_delivery"]["worked_example_choices"]
+            if c["subtopic_name"] == "Percentage of an amount")
+        bad_bodies = [
+            {"candidate_id": pct["candidate_id"],
+             "question_id": self.bank["questions"][8]["question_id"]},
+            {"message_sha256": digest,
+             "candidate_id": pct["candidate_id"],
+             "question_id": self.bank["questions"][8]["question_id"],
+             "probability": 0.5},
+            {"message_sha256": "0" * 64,
+             "candidate_id": pct["candidate_id"],
+             "question_id": self.bank["questions"][8]["question_id"]},
+            {"message_sha256": digest,
+             "candidate_id": "bogus",
+             "question_id": self.bank["questions"][8]["question_id"]},
+            {"message_sha256": digest,
+             "candidate_id": pct["candidate_id"],
+             "question_id": self.bank["questions"][12]["question_id"]},
+            {"message_sha256": digest,
+             "candidate_id": pct["candidate_id"],
+             "question_id": self.bank["questions"][1]["question_id"]}]
+        for body in bad_bodies:
+            with self.assertRaises((ValueError, ConflictError),
+                                   msg=body):
+                service.select_worked_example(sid, body)
+        self.assertEqual(service._load_meta(sid), before)
+
+    def test_legacy_unfrozen_session_keeps_earliest(self):
+        gate = threading.Event()
+        service = self._service(
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        # Simulate a pre-policy record: remove marker and snapshot.
+        del meta["worked_example_selection_policy"]
+        del meta["checkpoints"]["end"][
+            worked_example_selection.CONTEXT_KEY]
+        service._save_meta(meta)
+        baseline = service._multi_baseline_review(
+            meta, meta["checkpoints"]["end"]["evidence"],
+            "test", rows=grounded_rows(self.bank, SELECTION_WRONG))
+        card = next(c for c in baseline["review_examples"]
+                    if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][0]["question_id"])
+        self.assertNotIn(worked_example_selection.CONTEXT_KEY,
+                         meta["checkpoints"]["end"])
+        with self.assertRaises(ValueError):
+            service.select_worked_example(sid, {
+                "message_sha256": "0" * 64,
+                "candidate_id": "x", "question_id": "y"})
+
+    def test_override_and_snapshot_survive_service_restart(self):
+        root = Path(self.tmp.name)
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        pct = next(c for c in delivery["worked_example_choices"]
+                   if c["subtopic_name"] == "Percentage of an amount")
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        before = service._load_meta(sid)
+        service.close(wait=True)
+        service = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=self._diagnostics())
+        self.addCleanup(service.close, wait=True)
+        after = service._load_meta(sid)
+        self.assertEqual(
+            after["worked_example_selection_history"],
+            before["worked_example_selection_history"])
+        self.assertEqual(
+            after["checkpoints"]["end"]
+            [worked_example_selection.CONTEXT_KEY],
+            before["checkpoints"]["end"]
+            [worked_example_selection.CONTEXT_KEY])
+        self.assertEqual(
+            after["checkpoints"]["end"]["student_review"],
+            before["checkpoints"]["end"]["student_review"])
+        reopened = service.teacher_session(sid)
+        self.assertEqual(
+            reopened["feedback_delivery"]["preview_sha256"],
+            res["preview_sha256"])
+        self.assertEqual(
+            reopened["worked_example_selection_history"],
+            before["worked_example_selection_history"])
+
+    def test_broken_diagnostics_falls_back_and_override_works(self):
+        from tests.test_demo_service import BrokenDiagnostics
+        service = self._service(diagnostics=BrokenDiagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        snapshot = end[worked_example_selection.CONTEXT_KEY]
+        self.assertIsNone(snapshot["probabilities"])
+        self.assertEqual(snapshot["score_source"],
+                         "unavailable_or_incompatible_trace")
+        card = next(
+            c for c in end["student_review"]["review_examples"]
+            if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][0]["question_id"])
+        self.assertEqual(card["selection_provenance"]["source"],
+                         "earliest_fallback")
+        # A teacher override still works under the fallback trace.
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        pct = next(c for c in delivery["worked_example_choices"]
+                   if c["subtopic_name"] == "Percentage of an amount")
+        self.assertEqual(pct["source"], "earliest_fallback")
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        self.assertTrue(res["saved"])
+        card = next(
+            c for c in service._load_meta(sid)["checkpoints"]["end"]
+            ["student_review"]["review_examples"]
+            if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"], qid8)
+        self.assertEqual(card["selection_provenance"]["source"],
+                         "teacher_override")
+
+    def test_degraded_record_resolves_recorded_bundle(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        original = copy.deepcopy(end["student_review"])
+        # Lose the recorded selection (queue/restart fallback): the
+        # rebuild must resolve the stored candidate id and keep the
+        # exact same topics instead of reselecting.
+        del end["multi_selection"]
+        review = service._multi_baseline_review(
+            meta, end["evidence"], "queue_restart",
+            rows=grounded_rows(self.bank, SELECTION_WRONG))
+        self.assertEqual(review["selected_candidates"],
+                         original["selected_candidates"])
+        self.assertEqual(review["review_examples"],
+                         original["review_examples"])
+        card = next(c for c in review["review_examples"]
+                    if c["subtopic_id"] == "percentage_amount")
+        self.assertEqual(card["question_id"],
+                         self.bank["questions"][4]["question_id"])
+        self.assertEqual(card["selection_provenance"]["source"],
+                         "kt_recommendation")
 
 
 if __name__ == "__main__":

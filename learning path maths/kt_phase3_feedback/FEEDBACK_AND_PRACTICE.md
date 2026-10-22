@@ -59,29 +59,71 @@ Key contracts:
   validation, not semantic verification.
 - **Worked review cards** are built by `assessment_worked_review.py`
   (`assessment_grounded_worked_review_v1`) from the session's own
-  assessment record: for each selected error focus, the card shows the
-  **earliest incorrectly answered assessment question** inside that
-  focus's exact taxonomy leaf (`earliest_incorrect_in_selected_subtopic_v1`
-  — bank order, no KT/model ranking, never a correct response, never a
-  different subtopic or skill). Each card carries the original prompt and
-  options, the recorded selected option, the bank's correct option, and a
-  deterministic checked solution from `worked_review_math.py`
-  (`assessment_worked_solution_v1`). The LLM writes only the narrative
-  sections; the application owns the steps. When the checked solution
-  cannot cover a question, the same actual question stays with
-  `status: unavailable`, no steps, and a teacher-review notice — no
-  replacement example is invented. If grounding itself fails on a
+  assessment record: for each selected error focus, the card shows an
+  **incorrectly answered assessment question** inside that focus's exact
+  taxonomy leaf — never a correct response, never a different subtopic
+  or skill. Sessions completed before the selection policy keep the
+  earliest incorrect question (`earliest_incorrect_in_selected_subtopic_v1`
+  — bank order, no KT/model ranking); new aligned sessions use the
+  experimental KT-informed ranking described below. Each card carries
+  the original prompt and options, the recorded selected option, the
+  bank's correct option, and a checked reference solution from
+  `worked_review_math.py` (`assessment_worked_solution_v1`) when
+  supported. A hosted provider may author narrative sections and
+  overlay card explanations. Those overlays are shape-checked, require
+  teacher review, and preserve the application solution as a checked
+  reference. If neither a checked solution nor a valid provider
+  overlay is available, the same question has `status: unavailable`,
+  no steps, and a teacher-review notice; no replacement is invented. If grounding itself fails on a
   marked session (missing/incomplete response rows or failed
   revalidation), the review instead records
   `worked_review_status: unavailable`, an empty `review_examples`
   array, `trace.worked_review_context_status: unavailable`, and an
   explicit teacher-review notice; the provider is never called and no
   fixed example is substituted. The grounding context
-  (`{bank, taxonomy, responses}`) stays local and must rebuild the
-  validated evidence exactly, so altered responses, banks, options, keys,
-  or taxonomies fail before any provider request. Cards disclose the
-  selected assessment question's wording and both answers to teacher and
-  student; practice answer keys remain hidden.
+  (`{bank, taxonomy, responses}` plus an optional frozen
+  `worked_example_selection` snapshot for new sessions) stays local
+  and must rebuild the validated evidence exactly, so altered
+  responses, banks, options, keys, or taxonomies fail before any
+  provider request. Cards disclose the selected assessment question's
+  wording and both answers in the educator preview; the Assessment
+  page shows completion and the observed score. Practice answer keys
+  remain hidden.
+- **Worked-example selection (new aligned sessions)**:
+  `worked_example_selection.py` (`checked_lowest_pre_answer_kt_v1`)
+  freezes an experimental per-question ranking snapshot into the
+  assessment context once end diagnostics reach a terminal state —
+  before the end draft is built, for both rules and hosted jobs (the
+  provider job waits at `waiting_for_diagnostics`). When the frozen
+  variant-d response trace is complete and valid, the recommended
+  worked example is the incorrect question in the selected subtopic
+  with the **lowest pre-answer KT probability** among candidates that
+  have a checked solution (ties break on position, then question id);
+  with a missing/invalid trace it falls back to the earliest
+  incorrect question that has a checked solution (or the earliest
+  incorrect question when none does) and says so in the private
+  per-card `selection_provenance`. These probabilities are
+  **historical pre-answer estimates for teacher-reviewed example
+  ranking only** — not post-assessment mastery, and not evidence that
+  a given explanation improves learning. The provider wire still
+  carries only the chosen question and recorded answers; the
+  selection snapshot and the alternate-candidate list stay private to
+  the educator workspace. (The separate worked-first diagnostic
+  context intentionally still carries the pre-answer score array for
+  hosted runs — that context predates this policy and is unchanged.)
+  One exception to terminal-first freezing: when the provider job
+  falls back because of a queue-limit or shutdown before end
+  diagnostics finish, the rebuild freezes whatever diagnostics are
+  then available, which can record `unavailable_or_incompatible_trace`
+  even though the trace later completes. Before approval the teacher
+  can pick a different incorrect question from the same subtopic per
+  focus
+  (`POST /api/teacher/sessions/<sid>/worked-example-selection`,
+  digest-bound); choosing another example rebuilds the entire draft
+  deterministically, clears saved wording edits, and the new preview
+  hash must be approved again — overrides are rejected after release.
+  Sessions completed before this policy keep their recorded
+  earliest-incorrect examples unchanged and offer no override.
 - **Legacy worked examples**: the fixed 23-entry `REVIEW_EXAMPLES` map in
   `feedback_practice.py` is retained only for sessions saved before the
   grounded pipeline (no `worked_review_version` marker); those records
@@ -89,22 +131,24 @@ Key contracts:
   sessions never silently swap in a generic fixed example, and callers
   without a local assessment context receive no examples at all.
 - **Approval**: the preview is unavailable until selection, practice, and
-  generation are all terminal; the teacher edits only the four narrative
-  sections (scores, examples, and questions are fixed). One approval
-  releases the whole package — the same approved narrative, worked-example
-  and practice content reaches the student (all included activities and
-  examples, up to two each), while delivery metadata such as the
-  review-required flag changes on release. Stale-hash edits and releases are
-  rejected with 409.
+  generation are all terminal; the teacher can edit draft wording and
+  choose another eligible worked example before approval. Recorded
+  scores and assessment answers remain fixed. One approval
+  releases the whole package — the approved narrative, worked-example
+  and practice content then appears **in the educator workspace only**;
+  the student Assessment keeps showing completion and the observed
+  score. Stale-hash edits and releases are rejected with 409.
 - **Version identifiers**: primitives `observed_subtopic_feedback_v3`;
   multi review marker `observed_distinct_skill_review_v1`; selection
   schema/prompt above; aligned KT policy above; preview template
   `phase3_student_feedback_template_v5` for grounded sessions
   (`worked_review_version`
   `assessment_grounded_worked_review_v1`, selection policy
-  `earliest_incorrect_in_selected_subtopic_v1`, solution version
-  `assessment_worked_solution_v1`). Sessions saved without the marker
-  keep template `phase3_student_feedback_template_v4`. Retained
+  `earliest_incorrect_in_selected_subtopic_v1` for sessions saved
+  before the ranking policy or `checked_lowest_pre_answer_kt_v1` for
+  new sessions, solution version `assessment_worked_solution_v1`).
+  Sessions saved without the marker keep template
+  `phase3_student_feedback_template_v4`. Retained
   single-mode identifiers:
   full schema `phase3_full_feedback_generation_v2`, prompt
   `aitta_feedback_with_practice_v4`, template

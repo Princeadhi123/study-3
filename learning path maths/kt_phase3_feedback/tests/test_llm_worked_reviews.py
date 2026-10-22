@@ -1504,8 +1504,9 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertTrue(b.js(f"{research}.open"))
         self.assertTrue(b.js(
             f"{compare}.nextElementSibling === {research}"))
-        # Release and confirm the shared student renderer also has no
-        # original-wording disclosures and shows the English question.
+        # Release; the approved wording stays in the educator
+        # workspace while the student Assessment shows completion and
+        # the observed score only.
         detail = self.service.teacher_session(sid)
         released = self.service.release_feedback(sid, {
             "message_sha256": detail["feedback_delivery"]
@@ -1515,18 +1516,18 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
                "typeof api === 'function'")
-        b.wait("document.body.textContent.includes('Worked review')",
+        b.wait("!document.querySelector('#end-panel').hidden",
                timeout=30)
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Educator workspace')",
+               timeout=30)
+        student_text = b.js(f"{summary}.textContent")
+        self.assertIn("questions correctly", student_text)
+        self.assertNotIn("Worked review", student_text)
         self.assertFalse(b.js(
-            "document.body.textContent.includes("
-            "'Original question wording')"))
-        self.assertEqual(b.js(
-            "document.querySelectorAll('details[data-disclosure-key^="
-            "\"worked-review-original:\"], details[data-disclosure-key^="
-            "\"practice-original\"]').length"), 0)
-        student_text = b.js("document.body.textContent")
-        self.assertIn("Simplify: 3x + 2x", student_text)
-        self.assertNotIn("Sievennä", student_text)
+            "Boolean(document.querySelector('.review-example'))"))
+        self.assertFalse(b.js(
+            "document.body.textContent.includes('Simplify: 3x + 2x')"))
         self.assertEqual(b.errors, [])
 
     def test_question_first_provider_worked_review_with_provenance(
@@ -1627,19 +1628,25 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         end_examples = (snapshot["feedback"]["end"]
                         .get("review_examples") or [])
         self.assertIn(AUTHORED[0][0][0], json.dumps(end_examples))
+        # The released payload is retained for the educator, but the
+        # student Assessment shows completion and the observed score
+        # only — never the provider-authored card wording.
         b.command("Page.navigate", {
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
                "typeof api === 'function'")
-        b.wait("document.body.textContent.includes('Think first')",
+        b.wait("!document.querySelector('#end-panel').hidden",
                timeout=30)
-        b.js("document.querySelectorAll('.worked-solution')"
-             ".forEach(d => d.open = true)")
-        student_text = b.js("document.body.textContent")
-        self.assertIn(
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Educator workspace')",
+               timeout=30)
+        student_text = b.js(f"{summary}.textContent")
+        self.assertIn("questions correctly", student_text)
+        self.assertNotIn("Think first", student_text)
+        self.assertNotIn(
             "10% means one tenth of the whole amount.", student_text)
-        if os.environ.get("BROWSER_SCREENSHOTS"):
-            b.screenshot("llm_worked_review_question_first_student.png")
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.worked-solution'))"))
         self.assertEqual(b.errors, [])
 
     def test_single_document_editor_roundtrip(self):
@@ -1968,8 +1975,9 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         # underlying base template.
         self.assertIn("Worked-first", card_after)
         self.assertIn("Teacher-edited formatted document", card_after)
-        # Approve and confirm the student sees the exact document with
-        # fixed scores.
+        # Approve; the edited document stays in the educator workspace
+        # and the student Assessment shows completion and the observed
+        # score only — no released wording.
         b.js(f"{approve}.click()")
         b.wait("document.querySelector('#tab-feedback .release-card')"
                ".textContent.includes('Already released')", timeout=30)
@@ -1977,22 +1985,18 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
                "typeof api === 'function'")
-        b.wait("document.body.textContent.includes("
-               "'A teacher-edited tenth is')", timeout=30)
-        student_text = b.js("document.body.textContent")
-        self.assertIn("A teacher-edited tenth is one tenth of the "
-                      "whole amount.", student_text)
-        self.assertIn("<img src=y onerror=alert(2)>", student_text)
-        self.assertIn("New paragraph line.", student_text)
+        b.wait("!document.querySelector('#end-panel').hidden",
+               timeout=30)
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Educator workspace')",
+               timeout=30)
+        student_text = b.js(f"{summary}.textContent")
+        self.assertIn("questions correctly", student_text)
+        self.assertNotIn("A teacher-edited tenth is", student_text)
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('#end-summary "
+            ".feedback-document'))"))
         self.assertFalse(b.js("Boolean(document.querySelector('img'))"))
-        # Released student view keeps the formatted block structure.
-        self.assertTrue(b.js(
-            "Boolean(document.querySelector('#end-summary "
-            ".feedback-document h3'))"))
-        self.assertTrue(b.js(
-            "Boolean(document.querySelector('#end-summary "
-            ".feedback-document ul, #end-summary "
-            ".feedback-document ol'))"))
         self.assertTrue(b.js(
             "document.body.textContent.includes('of 40')"))
         # Mobile width keeps the open editor inside the viewport.

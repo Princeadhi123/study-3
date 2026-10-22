@@ -87,9 +87,10 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             self.process.terminate()
             self.process.wait(timeout=10)
 
-    def _complete_pending(self):
-        wrong = [positions(self.bank, "pct", 0)[0],
-                 positions(self.bank, "alg", 0)[0]]
+    def _complete_pending(self, wrong=None):
+        if wrong is None:
+            wrong = [positions(self.bank, "pct", 0)[0],
+                     positions(self.bank, "alg", 0)[0]]
         created = self.service.create_session()
         sid, token = created["session_id"], created["student_token"]
         for row in grounded_rows(self.bank, wrong):
@@ -184,6 +185,261 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertNotIn("Worked review", student_text)
         self.assertFalse(b.js(
             "Boolean(document.querySelector('.review-example'))"))
+
+    def test_teacher_worked_example_override_rebuilds_draft(self):
+        # Two incorrect percentage answers give the chooser a real
+        # alternative; the KT recommendation still leads. A second
+        # session exercises session-switching while the override POST
+        # is still in flight.
+        wrong = (positions(self.bank, "pct", 0)[:2]
+                 + [positions(self.bank, "alg", 0)[0]])
+        sid, token, cards = self._complete_pending(wrong)
+        other_sid, _, _ = self._complete_pending()
+        delivery = self.service.teacher_session(
+            sid)["feedback_delivery"]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if len(c["candidates"]) > 1)
+        self.assertEqual(choice["source"], "kt_recommendation")
+        self.assertEqual(choice["selected_question_id"],
+                         choice["recommended_question_id"])
+        target = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != choice["selected_question_id"])
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("document.querySelector('#pin-input')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelectorAll('.session-row').length >= 2",
+               timeout=30)
+
+        def select_session(target_sid):
+            # Session rows have no stable sid attribute; the overview
+            # tab embeds it in the technical-identity details JSON.
+            marker = (
+                "(() => { const d = document.querySelector("
+                "'#ws-detail'); return d ? d.textContent.includes("
+                f"{json.dumps(target_sid)}) : false; }})()")
+            for i in range(4):
+                b.js(f"document.querySelectorAll('.session-row')[{i}]"
+                     " && document.querySelectorAll('.session-row')"
+                     f"[{i}].click()")
+                if wait_for(lambda: b.js(marker), timeout=5):
+                    # The review card lives in the feedback tab;
+                    # hidden panes cannot receive real focus/keys.
+                    b.js("document.querySelector("
+                         "'#ws-tabs [data-tab=feedback]').click()")
+                    return
+            self.fail(f"could not select session {target_sid}")
+
+        # Give the second session a dirty editor draft first, so the
+        # in-flight override must not disturb it later.
+        select_session(other_sid)
+        doc = "document.querySelector('#edit-document')"
+        b.wait(doc, timeout=30)
+        marker_text = "TEACHER-DRAFT-SESSION-TWO"
+        b.js(f"{doc}.focus(); {doc}.textContent += "
+             f"{json.dumps(marker_text)}; "
+             f"{doc}.dispatchEvent(new InputEvent('input'))")
+        self.assertTrue(b.js(
+            "Boolean([...document.querySelectorAll('button')]"
+            ".find(n => n.textContent === 'Save edited draft' "
+            "&& !n.disabled))"))
+
+        select_session(sid)
+        cid = json.dumps(choice["candidate_id"])
+        sel = ("document.querySelector("
+               f"'.worked-example-select[data-candidate-id={cid}]')")
+        b.wait(sel, timeout=30)
+        # The select has an explicit accessible label bound by for/id.
+        self.assertTrue(b.js(
+            "(() => { const s = document.querySelector("
+            f"'.worked-example-select[data-candidate-id={cid}]'); "
+            "return s && Boolean(document.querySelector("
+            "'label[for=\"' + s.id + '\"]')); })()"))
+        fieldset_text = b.js(
+            "document.querySelector('.worked-example-choice')"
+            ".textContent")
+        self.assertIn("lowest pre-answer KT", fieldset_text)
+        self.assertIn(
+            "Experimental KT estimates do not establish which "
+            "explanation will improve learning most.", fieldset_text)
+        self.assertIn("rebuilds this draft", fieldset_text)
+
+        # Keyboard interaction through real CDP key events on the
+        # focused select. Headless Edge does not commit <select>
+        # arrow-key navigation (the native popup is unavailable), so
+        # the alternative is then chosen programmatically and the
+        # change event fires as it would after a keyboard commit.
+        initial_value = b.js(f"{sel}.value")
+        b.js(f"{sel}.focus()")
+        self.assertTrue(wait_for(
+            lambda: b.js(f"document.activeElement === {sel}"),
+            timeout=5))
+        arrow_down = {"type": "keyDown", "key": "ArrowDown",
+                      "code": "ArrowDown", "windowsVirtualKeyCode": 40,
+                      "nativeVirtualKeyCode": 40}
+        arrow_up = {"type": "keyUp", "key": "ArrowDown",
+                    "code": "ArrowDown", "windowsVirtualKeyCode": 40,
+                    "nativeVirtualKeyCode": 40}
+        enter_down = {"type": "keyDown", "key": "Enter",
+                      "code": "Enter", "windowsVirtualKeyCode": 13,
+                      "nativeVirtualKeyCode": 13, "text": "\r",
+                      "unmodifiedText": "\r"}
+        enter_up = {"type": "keyUp", "key": "Enter", "code": "Enter",
+                    "windowsVirtualKeyCode": 13,
+                    "nativeVirtualKeyCode": 13}
+
+        def key(pair):
+            b.command("Input.dispatchKeyEvent", pair[0])
+            b.command("Input.dispatchKeyEvent", pair[1])
+            time.sleep(0.15)
+
+        key((arrow_down, arrow_up))
+        key((enter_down, enter_up))
+        self.assertEqual(b.errors, [])
+        new_value = b.js(f"{sel}.value")
+        if new_value == initial_value:
+            # Headless limitation: commit the alternative option
+            # programmatically after the keyboard events.
+            new_value = next(
+                c["question_id"] for c in choice["candidates"]
+                if c["question_id"] != initial_value)
+            b.js(f"{sel}.value = {json.dumps(new_value)}; "
+                 f"{sel}.dispatchEvent(new Event('change'))")
+        self.assertNotEqual(new_value, initial_value)
+        target = next(c for c in choice["candidates"]
+                      if c["question_id"] == new_value)
+
+        # Hold the override POST resolution until released, so the
+        # busy state and session-switch behaviour are observable.
+        b.js(
+            "window.__workedRelease = null;"
+            "const __origFetch = window.fetch.bind(window);"
+            "window.fetch = (input, init) => {"
+            "  const req = __origFetch(input, init);"
+            "  if (String(input).indexOf('worked-example-selection')"
+            "      !== -1) {"
+            "    return req.then((res) => new Promise((resolve) => {"
+            "      window.__workedRelease = () => resolve(res);"
+            "    }));"
+            "  }"
+            "  return req;"
+            "};")
+        apply_btn = (f"{sel}.closest('fieldset')"
+                     ".querySelector('.worked-example-apply')")
+        self.assertFalse(b.js(f"{apply_btn}.disabled"))
+        # Activate the apply button with a real keyboard Enter.
+        b.js(f"{apply_btn}.focus()")
+        self.assertTrue(wait_for(
+            lambda: b.js(
+                f"document.activeElement === {apply_btn}"),
+            timeout=5))
+        key((enter_down, enter_up))
+        b.wait("window.__workedRelease !== null", timeout=30)
+        # While the rebuild is in flight every mutation control for
+        # this session is disabled.
+        self.assertTrue(b.js(
+            f"{sel}.closest('fieldset').disabled"))
+        approve = ("[...document.querySelectorAll('button.primary')]"
+                   ".find(b => b.textContent.startsWith('Approve'))")
+        self.assertTrue(b.js(
+            f"Boolean({approve} && {approve}.disabled)"))
+        self.assertTrue(b.js(
+            "Boolean([...document.querySelectorAll('button')]"
+            ".find(n => n.textContent === 'Save edited draft' "
+            "&& n.disabled))"))
+        self.assertEqual(b.js(
+            f"{doc}.getAttribute('aria-disabled')"), "true")
+
+        # Switch to the other session while the first POST is blocked.
+        select_session(other_sid)
+        b.wait(doc, timeout=30)
+        self.assertIn(marker_text, b.js(f"{doc}.textContent"))
+
+        # Resolve the first request; its rebuild must land on the
+        # right session and the other session's draft stays dirty.
+        b.js("window.__workedRelease()")
+        select_session(sid)
+        b.wait(f"{sel} && {sel}.value === "
+               f"{json.dumps(target['question_id'])}", timeout=30)
+        self.assertTrue(wait_for(
+            lambda: "Worked example updated" in b.js(
+                "document.querySelector('.worked-example-choice')"
+                ".textContent"), timeout=15))
+        # Teacher-selected card does not wear the KT recommendation
+        # reason; it names the original recommendation instead.
+        self.assertIn("Teacher-selected example is shown",
+                      b.js("document.querySelector"
+                           "('.worked-example-choice').textContent"))
+        expected_prompt = b.js(
+            "englishQuestionText(" +
+            json.dumps({"text": target["prompt"]}) + ")")
+        expected_selected = b.js(
+            "englishOptionText(" +
+            json.dumps(target["selected_answer"]) + ")")
+        preview_text = (
+            "document.querySelector('.feedback-preview') && "
+            "document.querySelector('.feedback-preview').textContent")
+        self.assertTrue(wait_for(
+            lambda: expected_prompt in b.js(preview_text)
+            and f"Your selected answer: {expected_selected}"
+            in b.js(preview_text), timeout=15))
+        meta = self.service._load_meta(sid)
+        self.assertEqual(
+            len(meta["worked_example_selection_history"]), 1)
+        card = next(
+            c for c in meta["checkpoints"]["end"]["student_review"]
+            ["review_examples"]
+            if c["question_id"] == target["question_id"])
+        self.assertEqual(card["selection_provenance"]["source"],
+                         "teacher_override")
+
+        # Approve the rebuilt draft exactly once; the chooser disables
+        # because a release now exists.
+        b.wait(f"Boolean({approve} && !{approve}.disabled)",
+               timeout=30)
+        self.assertIsNone(
+            self.service._load_meta(sid).get("feedback_release"))
+        b.js(f"{approve}.click()")
+        b.wait("document.body.textContent.includes('Released to the "
+               "student')", timeout=30)
+        b.wait(f"{sel}.closest('fieldset').disabled && "
+               f"{apply_btn}.disabled", timeout=30)
+        released = self.service.teacher_session(sid)[
+            "feedback_delivery"]["released_feedback"]
+        self.assertIsNotNone(released)
+        self.assertNotIn("p_correct_before_answer",
+                         json.dumps(released))
+        # The other session's dirty editor draft was never touched.
+        select_session(other_sid)
+        b.wait(doc, timeout=30)
+        self.assertIn(marker_text, b.js(f"{doc}.textContent"))
+        self.assertTrue(b.js(
+            "Boolean([...document.querySelectorAll('button')]"
+            ".find(n => n.textContent === 'Save edited draft' "
+            "&& !n.disabled))"))
+
+        # The assessment page still shows completion only.
+        b.command("Page.navigate", {
+            "url": f"{self.url}/?session={sid}#token={token}"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("!document.querySelector('#end-panel').hidden",
+               timeout=30)
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Educator workspace')",
+               timeout=30)
+        student_text = b.js(f"{summary}.textContent")
+        self.assertIn("questions correctly", student_text)
+        self.assertNotIn("Worked review", student_text)
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.review-example'))"))
+        self.assertEqual(b.errors, [])
 
     def test_legacy_released_snapshot_key_is_ignored(self):
         b = self.browser

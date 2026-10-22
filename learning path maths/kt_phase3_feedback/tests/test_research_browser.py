@@ -3616,12 +3616,12 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(b.errors, [])
 
     def test_replay_progress_refresh_and_stage_notice(self):
-        # Question-first: a provider-ready replay whose end diagnostics
-        # are still running must show an explicit stage notice, keep
-        # refreshing while the run record itself is unchanged, and
-        # transition to complete automatically once diagnostics finish.
-        # (Worked-first intentionally waits for diagnostics before the
-        # provider call and is covered by the next test.)
+        # Question-first grounded sessions now wait for terminal end
+        # diagnostics before the provider call, like worked-first: a
+        # replay whose diagnostics are still running shows the waiting
+        # stage notice, keeps refreshing while the run record itself
+        # is unchanged, and transitions to complete automatically once
+        # diagnostics finish.
         self.service.close(wait=True)
         fixture_root = self.root / "gated_fixture"
         fixture_root.mkdir()
@@ -3686,10 +3686,10 @@ class ResearchBrowserTests(unittest.TestCase):
         notice = ("document.querySelector("
                   "'#scenario-detail > p[role=\"status\"]')")
 
-        expected_ready = (
+        expected_waiting = (
             "Replay result · Question-first · Running. Original results "
-            "remain unchanged. Feedback is ready; model diagnostics are "
-            "still pending. This replay is not complete.")
+            "remain unchanged. Waiting for model diagnostics before "
+            "Aitta can draft the feedback. This replay is not complete.")
         expected_pending = (
             "Replay result · Question-first · Running. Original results "
             "remain unchanged. Feedback is still being prepared; this "
@@ -3747,23 +3747,22 @@ class ResearchBrowserTests(unittest.TestCase):
                      "if (window.__noticeObs) window.__noticeObs"
                      ".disconnect();")
 
-        # --- Part A: provider finishes while end diagnostics blocked ---
+        # --- Part A: provider waits for end diagnostics ---
         gen_gate.set()
         run_a = start_replay()
         self.assertTrue(wait_for(
-            lambda: provider_status(run_a) == "ready"),
-            "provider job did not reach ready")
+            lambda: provider_status(run_a) == "waiting_for_diagnostics"),
+            "provider job never entered waiting_for_diagnostics")
         stale_run = copy.deepcopy(run_a)
         stale_run["cases"][0]["session_id"] = None
-        self.assertEqual(provider_status(stale_run), "ready")
+        self.assertEqual(provider_status(stale_run),
+                         "waiting_for_diagnostics")
         self.assertEqual(
             self.service.replays.get(run_a["id"])["status"], "running")
         b.js(f"document.querySelector('.run-record[data-run-id=\"{run_a['id']}\"] .run-case').click()")
-        b.wait(f"{detail}.textContent.includes("
-               f"{json.dumps(MULTI_SECTIONS['assessment_summary'])})")
-        b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
-               "diagnostics are still pending. This replay is not complete.')")
-        assert_notice_stable_during_held_poll(expected_ready)
+        b.wait(f"{notice}.textContent.includes('Waiting for model "
+               "diagnostics before Aitta can draft the feedback.')")
+        assert_notice_stable_during_held_poll(expected_waiting)
         b.screenshot("qf_pending_diagnostics_desktop.png")
         b.viewport(390, 844)
         self.assert_no_overflow()
@@ -3783,8 +3782,10 @@ class ResearchBrowserTests(unittest.TestCase):
             f"{json.dumps(MULTI_SECTIONS['assessment_summary'])})"))
 
         # --- Part B: delayed generator under unchanged run JSON ---
+        # Diagnostics terminal first so the provider job proceeds to
+        # the held generator call, keeping the generic pending stage.
+        diag_gate.set()
         gen_gate.clear()
-        diag_gate.clear()
         run_b = start_replay()
         self.assertTrue(wait_for(lambda: provider_status(run_b) is not None))
         b.js(f"document.querySelector('.run-record[data-run-id=\"{run_b['id']}\"] .run-case').click()")
@@ -3806,25 +3807,18 @@ class ResearchBrowserTests(unittest.TestCase):
         assert_notice_stable_during_held_poll(expected_pending)
 
         gen_gate.set()
-        # End diagnostics remain blocked, so the run record JSON cannot
-        # change; the running-row refresh path must still pull the new
-        # provider-ready detail automatically.
-        self.assertTrue(wait_for(
-            lambda: provider_status(run_b) == "ready"),
-            "provider job did not reach ready")
-        self.assertEqual(
-            self.service.replays.get(run_b["id"])["status"], "running")
-        # The notice derives from the re-fetched response, so this wait
-        # proves the case detail refreshed under unchanged run JSON.
-        b.wait(f"{notice}.textContent.includes('Feedback is ready; model "
-               "diagnostics are still pending. This replay is not complete.')")
-        b.wait(f"Boolean({detail}.querySelector('.feedback-preview'))")
-        diag_gate.set()
+        # Diagnostics are already terminal, so a finished provider job
+        # completes the run directly; the running-row refresh path must
+        # still pull the new detail automatically under an unchanged
+        # run record JSON.
         self.assertTrue(wait_for(
             lambda: self.service.replays.get(run_b["id"])["status"]
             == "complete"),
             f"replay run {run_b['id']} did not complete")
+        # The notice derives from the re-fetched response, so this wait
+        # proves the case detail refreshed under unchanged run JSON.
         b.wait(f"{notice}.textContent.includes('Replay is complete')")
+        b.wait(f"Boolean({detail}.querySelector('.feedback-preview'))")
         self.assert_no_overflow()
         b.viewport(390, 844)
         self.assert_no_overflow()
@@ -3946,8 +3940,8 @@ class ResearchBrowserTests(unittest.TestCase):
         notice = ("document.querySelector("
                   "'#scenario-detail > p[role=\"status\"]')")
         b.wait(f"{notice}.textContent.includes('Waiting for model "
-               "diagnostics before Aitta can draft the worked-first "
-               "feedback. This replay is not complete.')")
+               "diagnostics before Aitta can draft the feedback. "
+               "This replay is not complete.')")
         self.assertNotIn(WORKED_SECTIONS["observed_strengths"],
                          b.js(f"{detail}.textContent"))
         b.screenshot("worked_first_waiting_diagnostics_desktop.png")

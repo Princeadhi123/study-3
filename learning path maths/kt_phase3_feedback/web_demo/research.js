@@ -62,7 +62,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const providerReady = provider === "ready" || provider === "fallback";
     const diagnosticsPending = diagnostics.some((s) => s === "pending");
     if (provider === "waiting_for_diagnostics") {
-      return `${base} Waiting for model diagnostics before Aitta can draft the worked-first feedback. This replay is not complete.`;
+      return `${base} Waiting for model diagnostics before Aitta can draft the feedback. This replay is not complete.`;
     }
     if (!providerReady) {
       return `${base} Feedback is still being prepared; this replay is not complete.`;

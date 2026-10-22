@@ -1,5 +1,6 @@
 import copy
 
+import worked_example_selection
 import worked_review_math
 
 ASSESSMENT_WORKED_REVIEW_VERSION = "assessment_grounded_worked_review_v1"
@@ -7,6 +8,7 @@ GROUNDED_TEMPLATE_VERSION = "phase3_student_feedback_template_v7"
 CONCISE_TEMPLATE_VERSION = "phase3_student_feedback_template_v8"
 SELECTION_POLICY = "earliest_incorrect_in_selected_subtopic_v1"
 CONTEXT_KEYS = {"bank", "taxonomy", "responses"}
+SELECTION_CONTEXT_KEY = worked_example_selection.CONTEXT_KEY
 CARD_TITLE = "Worked review of your assessment answer"
 READY_NOTICE = (
     "This revisits an answer from this assessment. A selected option "
@@ -36,15 +38,21 @@ CONCISE_PRACTICE_NOTICE = (
 
 
 def _rebuild_evidence(context):
-    if (not isinstance(context, dict) or set(context) != CONTEXT_KEYS
+    if (not isinstance(context, dict)
+            or set(context) not in (
+                CONTEXT_KEYS, CONTEXT_KEYS | {SELECTION_CONTEXT_KEY})
             or not isinstance(context["bank"], dict)
             or not isinstance(context["taxonomy"], dict)
             or not isinstance(context["responses"], list)):
         raise ValueError(
             "assessment_context must contain exactly bank, taxonomy, "
-            "responses")
+            "responses plus an optional worked example selection")
     bank, taxonomy, responses = (context["bank"], context["taxonomy"],
                                  context["responses"])
+    if SELECTION_CONTEXT_KEY in context:
+        from worked_example_selection import validate_selection
+        validate_selection(
+            context[SELECTION_CONTEXT_KEY], bank, responses)
     if len(responses) != 40:
         raise ValueError(
             "worked review requires the end checkpoint's 40 answers")
@@ -92,6 +100,7 @@ def build_assessment_review_examples(evidence, selected_candidates,
     bank = assessment_context["bank"]
     taxonomy = assessment_context["taxonomy"]
     responses = assessment_context["responses"]
+    snapshot = assessment_context.get(SELECTION_CONTEXT_KEY)
     examples = []
     for candidate in candidates:
         focus = candidate["focus"]
@@ -99,23 +108,33 @@ def build_assessment_review_examples(evidence, selected_candidates,
             continue
         leaf = _taxonomy_leaf(taxonomy, focus)
         qids = set(leaf["question_ids"])
-        found = None
-        for question, row in zip(bank["questions"], responses):
-            if (question["question_id"] in qids
-                    and question["skill_id"] == focus["skill_id"]
-                    and row["selected_index"] != question["answer_index"]):
-                found = (question, row)
-                break
-        if found is None:
-            raise ValueError(
-                "no incorrectly answered assessment question matches "
-                "the selected focus")
-        question, row = found
+        provenance = None
+        if snapshot is not None:
+            question, row, solved, provenance = (
+                worked_example_selection.select_question(
+                    bank, responses, candidate, qids, snapshot))
+        else:
+            found = None
+            for question, row in zip(bank["questions"], responses):
+                if (question["question_id"] in qids
+                        and question["skill_id"] == focus["skill_id"]
+                        and row["selected_index"]
+                        != question["answer_index"]):
+                    found = (question, row)
+                    break
+            if found is None:
+                raise ValueError(
+                    "no incorrectly answered assessment question "
+                    "matches the selected focus")
+            question, row = found
+            solved = "unresolved"
         options = question["options"]
         card = {
             "source": "incorrect_assessment_response",
             "version": ASSESSMENT_WORKED_REVIEW_VERSION,
-            "selection_policy": SELECTION_POLICY,
+            "selection_policy": (worked_example_selection.POLICY
+                                 if snapshot is not None
+                                 else SELECTION_POLICY),
             "title": CARD_TITLE,
             "candidate_id": candidate["candidate_id"],
             "question_id": question["question_id"],
@@ -126,10 +145,15 @@ def build_assessment_review_examples(evidence, selected_candidates,
             "options": copy.deepcopy(options),
             "selected_answer": options[row["selected_index"]],
             "correct_answer": options[question["answer_index"]]}
-        try:
-            solved = worked_review_math.solution(
-                question, focus["subtopic_id"])
-        except UNSOLVED_ERRORS:
+        if provenance is not None:
+            card["selection_provenance"] = provenance
+        if solved == "unresolved":
+            try:
+                solved = worked_review_math.solution(
+                    question, focus["subtopic_id"])
+            except UNSOLVED_ERRORS:
+                solved = None
+        if solved is None:
             card.update({
                 "status": "unavailable", "steps": [], "explanation": "",
                 "reasoning_question": UNAVAILABLE_REASONING,

@@ -340,14 +340,12 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
             self.url + "/api/sessions", data=big.encode(),
             method="POST",
             headers={"Content-Type": "application/json"})
-        try:
+        with self.assertRaises((urllib.error.HTTPError,
+                                ConnectionAbortedError, ConnectionResetError,
+                                urllib.error.URLError)) as raised:
             urllib.request.urlopen(request, timeout=10)
-            self.fail("oversized body accepted")
-        except urllib.error.HTTPError as exc:
-            self.assertEqual(exc.code, 400)
-        except (ConnectionAbortedError, ConnectionResetError,
-                urllib.error.URLError):
-            pass  # server closed the oversized upload with a 400
+        if isinstance(raised.exception, urllib.error.HTTPError):
+            self.assertEqual(raised.exception.code, 400)
         status, _, _ = self.request(
             "POST", "/api/sessions", {"synthetic": True},
             raw_headers={"Content-Type": "text/plain"})
@@ -1178,6 +1176,99 @@ class DemoApiCliTests(unittest.TestCase):
         self.assertEqual(
             self.run_main(["--review-mode", "legacy_single"])
             .call_args.kwargs["review_mode"], "legacy_single")
+
+
+class WorkedExampleSelectionApiTests(ApiClientMixin, unittest.TestCase):
+    """Teacher worked-example override endpoint over HTTP."""
+
+    def setUp(self):
+        from tests.test_assessment_worked_review import (
+            grounded_rows, make_grounded_bank, make_grounded_taxonomy)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bank = make_grounded_bank()
+        self.service = DemoService(
+            root=Path(self.tmp.name), bank=self.bank,
+            taxonomy=make_grounded_taxonomy(self.bank),
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(self.bank)))
+        self.server = make_server(self.service, PIN)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.url = f"http://{host}:{port}"
+        created = self.service.create_session()
+        self.sid = created["session_id"]
+        for row in grounded_rows(self.bank, [0, 4, 8, 1]):
+            self.service.submit_response(
+                self.sid, created["student_token"], row)
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(self.sid)
+            ["provider_job"]["status"] in ("ready", "fallback")))
+        self.delivery = self.service.teacher_session(
+            self.sid)["feedback_delivery"]
+        self.choice = next(
+            c for c in self.delivery["worked_example_choices"]
+            if len(c["candidates"]) > 1)
+        status, _, meta = self.unlock()
+        self.assertEqual(status, 200)
+        self.cookie = self.cookie_from(meta)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.service.close(wait=True)
+        self.tmp.cleanup()
+
+    def _post(self, body, cookie=None):
+        headers = ({"Cookie": f"demo_teacher={cookie}"}
+                   if cookie else {})
+        return self.request(
+            "POST",
+            f"/api/teacher/sessions/{self.sid}"
+            "/worked-example-selection", body, headers=headers)
+
+    def _alternate_question_id(self):
+        return next(
+            c["question_id"] for c in self.choice["candidates"]
+            if c["question_id"] != self.choice["selected_question_id"])
+
+    def test_override_requires_teacher_auth(self):
+        status, _, _ = self._post({
+            "message_sha256": "0" * 64,
+            "candidate_id": self.choice["candidate_id"],
+            "question_id": self._alternate_question_id()})
+        self.assertEqual(status, 403)
+
+    def test_override_rejects_unexpected_fields(self):
+        status, payload, _ = self._post({
+            "message_sha256": self.delivery["preview_sha256"],
+            "candidate_id": self.choice["candidate_id"],
+            "question_id": self._alternate_question_id(),
+            "probability": 0.5}, self.cookie)
+        self.assertEqual(status, 400)
+
+    def test_override_stale_revision_returns_409(self):
+        status, payload, _ = self._post({
+            "message_sha256": "0" * 64,
+            "candidate_id": self.choice["candidate_id"],
+            "question_id": self._alternate_question_id()},
+            self.cookie)
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "stale_feedback_revision")
+
+    def test_override_valid_cookie_succeeds(self):
+        target = self._alternate_question_id()
+        status, payload, _ = self._post({
+            "message_sha256": self.delivery["preview_sha256"],
+            "candidate_id": self.choice["candidate_id"],
+            "question_id": target,
+            "reviewer_label": "teacher-api"}, self.cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["saved"])
+        self.assertNotEqual(payload["preview_sha256"],
+                            self.delivery["preview_sha256"])
 
 
 if __name__ == "__main__":

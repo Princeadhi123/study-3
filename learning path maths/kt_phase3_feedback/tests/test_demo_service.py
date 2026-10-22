@@ -2202,9 +2202,16 @@ class MultiGenerator:
             self.events.append("generate")
         self.audiences.append(payload["audience"])
         self.execution = {"status": "fake_completed"}
-        return {"candidate_id":
-                payload["selected_candidate"]["candidate_id"],
-                "sections": dict(MULTI_SECTIONS)}
+        result = {"candidate_id":
+                  payload["selected_candidate"]["candidate_id"],
+                  "sections": dict(MULTI_SECTIONS)}
+        # Grounded multi payloads (any assessment_context) require a
+        # worked_reviews entry per ready example — even an empty list.
+        if payload.get("assessment_context") is not None:
+            from tests.test_assessment_worked_review import (
+                fixture_reviews)
+            result["worked_reviews"] = fixture_reviews(payload)
+        return result
 
 
 class RecordingPredictor:
@@ -2427,7 +2434,7 @@ class MultiModeTests(unittest.TestCase):
     def test_malicious_provider_sections_replaced_in_preview(self):
         class MaliciousGenerator(MultiGenerator):
             def generate(self, payload):
-                super().generate(payload)
+                result = super().generate(payload)
                 sections = dict(MULTI_SECTIONS)
                 sections["observed_strengths"] = (
                     "The student shows mastery of every topic.")
@@ -2435,9 +2442,8 @@ class MultiModeTests(unittest.TestCase):
                     "The weakest areas need remediation.")
                 sections["next_steps"] = (
                     "Try similar practice tasks on the same concepts.")
-                return {"candidate_id":
-                        payload["selected_candidate"]["candidate_id"],
-                        "sections": sections}
+                result["sections"] = sections
+                return result
 
         selector = MultiSelector(prefer=("sA", "sB"))
         generator = MaliciousGenerator()
@@ -2477,10 +2483,10 @@ class MultiModeTests(unittest.TestCase):
             self.assertNotIn("draft, not a diagnosis", ptexts[kind])
             self.assertNotIn("If your teacher approves", ptexts[kind])
         self.assertEqual(ptexts["next_steps"],
-                         "Review the topics listed above and explain "
-                         "how you approached those questions. For any "
-                         "question without a checked worked solution, "
-                         "ask your teacher for help. Then try the "
+                         "Think through the review questions below "
+                         "and explain your approach. Use the hints if "
+                         "needed, then reveal the worked explanations "
+                         "to compare your reasoning. Then try the "
                          "practice activities below.")
         activities = preview["practice_activities"]
         self.assertEqual(
@@ -3295,11 +3301,17 @@ class ProviderDiagnosticsRaceTests(unittest.TestCase):
         service = self._service(gate)
         sid, token = self._create(service)
         self._submit(service, sid, token)
-        self._wait_provider_done(service, sid)
+        # New-policy sessions also gate end-draft generation on
+        # terminal diagnostics before freezing the worked-example
+        # selection snapshot.
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)
+            ["provider_job"]["status"] == "waiting_for_diagnostics"))
         self.assertFalse(service._jobs_complete(sid))
         self.assertEqual(service._load_meta(sid)["checkpoints"]["end"]
                          ["diagnostics_job"]["status"], "pending")
         gate.set()
+        self._wait_provider_done(service, sid)
         self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
         self.assertEqual(service._load_meta(sid)["checkpoints"]["end"]
                          ["diagnostics_job"]["status"], "ready")
@@ -3316,9 +3328,10 @@ class RecordingFullGenerator(MultiGenerator):
 
 
 class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
-    """Hosted worked-first provider calls wait for terminal diagnostics
-    so the authored context carries real or explicitly unavailable
-    projections; question-first never waits and never sees it."""
+    """Hosted provider calls wait for terminal diagnostics so the
+    authored context carries real or explicitly unavailable projections
+    and the worked-example selection snapshot freezes on final values;
+    question-first waits too but never sends the diagnostics context."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3454,12 +3467,20 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
             wf["model_context"]["checkpoints"]["end"],
             {"status": "unavailable"})
 
-    def test_question_first_never_waits_or_sends_context(self):
+    def test_question_first_waits_but_never_sends_context(self):
         from full_feedback import MULTI_FULL_FEEDBACK_PROMPT_VERSION
         gate = threading.Event()
         generator = RecordingFullGenerator()
         service = self._service(Path(self.tmp.name), gate, generator)
         sid = self._complete(service, "question_first")
+        # New-policy sessions wait for terminal diagnostics to freeze
+        # the worked-example selection snapshot, but question-first
+        # still never sends the diagnostics context to the provider.
+        self.assertTrue(wait_for(
+            lambda: self._provider_status(service, sid)
+            == "waiting_for_diagnostics"))
+        self.assertEqual(generator.calls, 0)
+        gate.set()
         self.assertTrue(wait_for(
             lambda: self._provider_status(service, sid)
             in ("ready", "fallback")))
@@ -3474,8 +3495,8 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
         review = meta["checkpoints"]["end"]["student_review"]
         self.assertNotIn("generation_context_version", review["trace"])
         self.assertNotIn("provider_context", review)
-        self.assertFalse(service._jobs_complete(sid))
-        gate.set()
+        # The provider now outlasts the diagnostics job, so terminal
+        # provider status implies the whole session is settled.
         self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))
 
     def test_close_during_wait_then_restart_publishes_fallback(self):

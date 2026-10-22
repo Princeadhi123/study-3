@@ -2205,6 +2205,9 @@ function createDetailView(root, options = {}) {
   const TABS = ["overview", "evidence", "graph", "research", "feedback"];
   let detail = null, selected = null, tab = "overview", researchCp = "end";
   const releaseDrafts = new Map();
+  // selected session -> worked-example selection POST state; kept
+  // across polls so a rebuild submission is never duplicated.
+  const workedSelects = new Map();
   // scopeKey -> Map(disclosureKey -> open). Scope is derived from the
   // pane's last rendered scope so a session/checkpoint switch never
   // transfers another context's expand/collapse choices.
@@ -3553,6 +3556,19 @@ function createDetailView(root, options = {}) {
     return releaseDrafts.get(sid);
   }
 
+  function workedSelectFor(sid) {
+    if (!workedSelects.has(sid)) {
+      workedSelects.set(sid, {sending: false, awaitingHash: null,
+                              note: null});
+    }
+    return workedSelects.get(sid);
+  }
+
+  function workedSelectionBusy(sid) {
+    const state = workedSelectFor(sid);
+    return state.sending || Boolean(state.awaitingHash);
+  }
+
   function editDraftFor(sid, delivery) {
     if (!editDrafts.has(sid)) {
       editDrafts.set(sid, {hash: null, texts: {}, content: null,
@@ -3575,7 +3591,9 @@ function createDetailView(root, options = {}) {
           draft.document_blocks = feedbackDocumentBlocks(preview);
           draft.document = serializeDocumentBlocks(
             draft.document_blocks);
-          draft.note = `Edited draft saved (${draft.savedAt}).`;
+          draft.note = draft.savedAt
+            ? `Edited draft saved (${draft.savedAt}).`
+            : "Rebuilt draft loaded. Review it before approval.";
         } else if (delivery.edited_at && draft.savedAt
                    && delivery.edited_at > draft.savedAt) {
           draft.awaitingPreview = false;
@@ -3601,6 +3619,13 @@ function createDetailView(root, options = {}) {
     const delivery = detail.feedback_delivery;
     const endState = endFeedbackUiState(delivery);
     const currentReleased = endState.currentReleased;
+    const workedState = workedSelectFor(selected);
+    if (workedState.awaitingHash === delivery.preview_sha256) {
+      workedState.awaitingHash = null;
+    }
+    // The backend forbids all worked-example overrides once any
+    // release exists, even after edits change the preview hash.
+    const selectionLocked = Boolean(delivery.released_feedback);
     const card = el("div", null, "card-inner ui-section release-card");
     card.appendChild(el("p", "After 40 answers", "eyebrow"));
     card.appendChild(el("h3", "End feedback & practice"));
@@ -3796,6 +3821,144 @@ function createDetailView(root, options = {}) {
       pane.appendChild(card);
       return;
     }
+    const choices = delivery.worked_example_choices || [];
+    if (choices.length) {
+      const sel = workedSelectFor(selected);
+      const editState = editDraftFor(selected, delivery);
+      choices.forEach((choice, choiceIndex) => {
+        const fieldset = el("fieldset", null,
+          "worked-example-choice");
+        fieldset.disabled = selectionLocked || Boolean(detail.read_only)
+          || workedSelectionBusy(selected);
+        fieldset.appendChild(el("legend",
+          `Worked example — ${choice.subtopic_name || "review focus"}`));
+        const recommended = (choice.candidates || []).find(
+          (cand) => cand.question_id === choice.recommended_question_id);
+        if (choice.source === "teacher_override") {
+          fieldset.appendChild(el("p",
+            `Teacher-selected example is shown; the ` +
+            `recommendation was Question ` +
+            `${recommended ? recommended.position : "?"}.`, "meta"));
+        } else if (choice.reason) {
+          fieldset.appendChild(el("p", choice.reason, "meta"));
+        }
+        fieldset.appendChild(el("p",
+          "Experimental KT estimates do not establish which " +
+          "explanation will improve learning most.", "meta"));
+        const select = el("select", null, "worked-example-select");
+        select.id = `${prefix}worked-example-select-${choiceIndex}`;
+        select.dataset.candidateId = choice.candidate_id || "";
+        const selectLabel = el("label", "Worked example question");
+        selectLabel.htmlFor = select.id;
+        fieldset.appendChild(selectLabel);
+        (choice.candidates || []).forEach((cand) => {
+          const option = document.createElement("option");
+          option.value = cand.question_id;
+          let text = `Question ${cand.position}: ${cand.prompt}`;
+          if (cand.question_id === choice.recommended_question_id) {
+            text += " (recommended)";
+          }
+          if (!cand.checked_solution_available) {
+            text += " (no checked solution)";
+          }
+          option.textContent = text;
+          option.selected =
+            cand.question_id === choice.selected_question_id;
+          select.appendChild(option);
+        });
+        fieldset.appendChild(select);
+        const estimates = el("ul", null, "worked-example-estimates");
+        (choice.candidates || []).forEach((cand) => {
+          estimates.appendChild(el("li",
+            `Question ${cand.position}: ` +
+            (cand.p_correct_before_answer === null
+             || cand.p_correct_before_answer === undefined
+              ? "no pre-answer estimate recorded"
+              : "pre-answer estimate " +
+                cand.p_correct_before_answer)));
+        });
+        fieldset.appendChild(estimates);
+        fieldset.appendChild(el("p",
+          "Choosing another example rebuilds this draft using " +
+          "available checked solutions and flags questions without " +
+          "one. It resets saved wording edits. Review it again " +
+          "before approval.", "warn"));
+        const apply = el("button", "Choose example and rebuild draft",
+          "worked-example-apply");
+        apply.type = "button";
+        const applyStatus = el("p", sel.note || null, "meta");
+        const updateApply = () => {
+          apply.disabled =
+            select.value === choice.selected_question_id
+            || workedSelectionBusy(selected) || selectionLocked
+            || Boolean(detail.read_only)
+            || editState.dirty || editState.saving
+            || editState.awaitingPreview
+            || releaseDraftFor(selected).sending;
+        };
+        select.addEventListener("change", updateApply);
+        apply.addEventListener("click", async () => {
+          const sid = selected;
+          const chosenId = select.value;
+          const revision = delivery.preview_sha256;
+          const state = workedSelectFor(sid);
+          const localEdit = editDraftFor(sid, delivery);
+          const release = releaseDraftFor(sid);
+          if (chosenId === choice.selected_question_id
+              || workedSelectionBusy(sid) || selectionLocked
+              || detail.read_only || localEdit.dirty
+              || localEdit.saving || localEdit.awaitingPreview
+              || release.sending) {
+            return;
+          }
+          state.sending = true;
+          state.note = "Rebuilding the draft…";
+          // Re-render now so apply/save/approval/editor controls all
+          // reflect the busy state before the request leaves.
+          if (selected === sid) {
+            renderPane("feedback", renderFeedbackContent);
+          }
+          try {
+            const res = await api(
+              `/api/teacher/sessions/${sid}` +
+              "/worked-example-selection", {
+                body: {message_sha256: revision,
+                       candidate_id: choice.candidate_id,
+                       question_id: chosenId,
+                       reviewer_label: release.label || "anonymous"}});
+            state.note = "Worked example updated; the draft was " +
+              "rebuilt using available checked solutions. Review it again " +
+              "before approval.";
+            state.awaitingHash = res.preview_sha256;
+            // The server cleared the stored edit; keep the editor in
+            // the standard await-preview flow so it resyncs to the
+            // rebuilt revision instead of holding stale wording.
+            localEdit.dirty = false;
+            localEdit.stale = false;
+            localEdit.hash = res.preview_sha256;
+            localEdit.awaitingPreview = true;
+          } catch (err) {
+            if (err.status === 409) {
+              state.note = "The draft changed before the new " +
+                "example was applied. Re-read the updated preview, " +
+                "then choose again.";
+            } else {
+              state.note = "The new worked example was not accepted.";
+            }
+          } finally {
+            state.sending = false;
+            if (selected === sid) {
+              pollOnce();
+              renderPane("feedback", renderFeedbackContent);
+            }
+          }
+        });
+        updateApply();
+        fieldset.appendChild(apply);
+        fieldset.appendChild(applyStatus);
+        card.appendChild(fieldset);
+      });
+    }
     card.appendChild(el("h4",
       currentReleased
         ? "Released end feedback"
@@ -3891,7 +4054,8 @@ function createDetailView(root, options = {}) {
     docField.tabIndex = 0;
     setFeedbackEditorEnabled(docField,
       !(edit.saving || edit.awaitingPreview
-        || edit.mode === "structured"));
+        || edit.mode === "structured"
+        || workedSelectionBusy(selected)));
     if (edit.document_blocks === null
         || edit.document_blocks === undefined) {
       edit.document_blocks = feedbackDocumentBlocks(preview);
@@ -3961,7 +4125,8 @@ function createDetailView(root, options = {}) {
       field.className = "edit-section";
       field.dataset.section = section.kind;
       field.maxLength = 2000;
-      field.disabled = edit.saving || edit.awaitingPreview;
+      field.disabled = edit.saving || edit.awaitingPreview
+        || workedSelectionBusy(selected);
       field.rows = Math.max(3, Math.min(10,
         Math.ceil((section.text || "").length / 80)));
       field.value = Object.hasOwn(edit.texts, section.kind)
@@ -3998,7 +4163,8 @@ function createDetailView(root, options = {}) {
       field.className = "edit-content";
       field.dataset.contentPath = path;
       field.maxLength = 2000;
-      field.disabled = edit.saving || edit.awaitingPreview;
+      field.disabled = edit.saving || edit.awaitingPreview
+        || workedSelectionBusy(selected);
       field.rows = rows || Math.max(2, Math.min(8,
         Math.ceil(String(value || "").length / 80)));
       field.value = value === null || value === undefined
@@ -4240,7 +4406,8 @@ function createDetailView(root, options = {}) {
     useDoc.addEventListener("click", () => {
       edit.mode = "document";
       setFeedbackEditorEnabled(docField,
-        !(edit.saving || edit.awaitingPreview));
+        !(edit.saving || edit.awaitingPreview
+          || workedSelectionBusy(selected)));
       modeNote.textContent =
         "Saving the single document below on next save.";
       advanced.open = false;
@@ -4271,11 +4438,13 @@ function createDetailView(root, options = {}) {
     card.appendChild(rebindBtn);
     const saveBtn = el("button", "Save edited draft", "secondary");
     saveBtn.type = "button";
-    saveBtn.disabled = edit.saving || edit.stale || edit.awaitingPreview;
+    saveBtn.disabled = edit.saving || edit.stale || edit.awaitingPreview
+      || workedSelectionBusy(selected);
     saveBtn.addEventListener("click", async () => {
       const sid = selected;
       const baseHash = edit.hash;
-      if (edit.saving || edit.stale || edit.awaitingPreview || !baseHash) {
+      if (edit.saving || edit.stale || edit.awaitingPreview
+          || !baseHash || workedSelectionBusy(sid)) {
         return;
       }
       const sections = {};
@@ -4337,9 +4506,10 @@ function createDetailView(root, options = {}) {
       } finally {
         edit.saving = false;
         saveBtn.disabled = edit.saving || edit.stale
-          || edit.awaitingPreview;
+          || edit.awaitingPreview || workedSelectionBusy(sid);
         button.disabled = edit.dirty || edit.saving || edit.awaitingPreview
-          || draft.sending || currentReleased;
+          || draft.sending || currentReleased
+          || workedSelectionBusy(sid);
         editStatus.textContent = edit.note;
         if (failed && selected === sid) {
           renderPane("feedback", renderFeedbackContent);
@@ -4380,11 +4550,12 @@ function createDetailView(root, options = {}) {
     button.type = "button";
     button.disabled =
       !delivery.preview_sha256 || draft.sending || currentReleased ||
-      edit.dirty || edit.saving || edit.awaitingPreview;
+      edit.dirty || edit.saving || edit.awaitingPreview ||
+      workedSelectionBusy(selected);
     button.addEventListener("click", async () => {
       const sid = selected;
       if (draft.sending || currentReleased || edit.dirty || edit.saving
-          || edit.awaitingPreview) {
+          || edit.awaitingPreview || workedSelectionBusy(sid)) {
         return;
       }
       draft.sending = true;
@@ -4407,7 +4578,7 @@ function createDetailView(root, options = {}) {
       } finally {
         draft.sending = false;
         button.disabled = currentReleased || edit.dirty || edit.saving
-          || edit.awaitingPreview;
+          || edit.awaitingPreview || workedSelectionBusy(sid);
       }
       status.textContent = draft.note;
     });

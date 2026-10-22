@@ -221,6 +221,25 @@ stored deterministic baseline through the same variant layout — a
 reference for comparing the Aitta or edited wording, never part of
 the preview being approved and never student-facing.
 
+For sessions created under `aligned_two_topic`, each worked-review
+example is recommended by an experimental frozen ranking
+(`checked_lowest_pre_answer_kt_v1`): the incorrect question in the
+selected subtopic with the lowest pre-answer KT probability among
+candidates with a checked solution — a historical estimate used only
+to order teacher-reviewed examples, never a claim about which
+explanation improves learning. Invalid or missing traces fall back to
+the earliest incorrect question that has a checked solution (or the
+earliest incorrect question when none does); a queue-limit or
+shutdown fallback can additionally freeze the snapshot as unavailable
+before diagnostics finish. The ranking snapshot and
+alternate-candidate list stay private to the educator workspace.
+Before approval the teacher can override the choice per focus from a
+digest-bound picker, which rebuilds the draft, clears saved wording
+edits, and must be approved again. Older sessions keep their recorded
+examples and offer no override; approved content stays in the
+educator workspace and is never rendered in the student Assessment.
+See `FEEDBACK_AND_PRACTICE.md`.
+
 End feedback editing defaults to a single document-style editor that covers
 all displayed wording — narrative, worked-card steps and reasoning
 questions, and practice instructions — as formatted blocks (headings,

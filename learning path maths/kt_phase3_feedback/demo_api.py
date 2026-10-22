@@ -53,7 +53,8 @@ SESSION_RE = re.compile(
     r"\A/api/sessions/(?P<sid>[a-f0-9]{32})(?:/(?P<action>responses))?\Z")
 TEACHER_SESSION_RE = re.compile(
     r"\A/api/teacher/sessions/(?P<sid>[a-f0-9]{32})"
-    r"(?:/(?P<action>export|reviews|release|feedback-edits))?\Z")
+    r"(?:/(?P<action>export|reviews|release|feedback-edits"
+    r"|worked-example-selection))?\Z")
 REPLAY_ROOT = "/api/teacher/replays"
 SCENARIO_ROOT = "/api/teacher/scenarios"
 COMPARISON_ROOT = "/api/teacher/comparisons"
@@ -329,6 +330,8 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
                 "reviews": self.service.add_review,
                 "release": self.service.release_feedback,
                 "feedback-edits": self.service.save_feedback_edit,
+                "worked-example-selection":
+                    self.service.select_worked_example,
             }.get(action)
             if handler is not None:
                 status = 201 if action == "reviews" else 200

@@ -14,7 +14,9 @@ from session_store import utc_now
 SCOPE_WARNING = (
     "Research diagnostics only. Frozen KT estimates do not establish mastery, "
     "difficulty, learning benefit, or causes of incorrect answers. "
-    "They do not control student advice."
+    "They may rank candidate worked examples offered for teacher review; "
+    "the raw estimates stay private to educators and are not shown to "
+    "students."
 )
 
 
