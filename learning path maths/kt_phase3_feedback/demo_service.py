@@ -523,45 +523,52 @@ class DemoService:
         return self.meta_dir / f"{session_id}.json"
 
     def _save_meta(self, meta):
-        """Atomic metadata write with a unique temp file, under lock."""
-        target = self._meta_path(meta["session_id"])
-        tmp = target.with_name(
-            f"{target.name}.{secrets.token_hex(6)}.tmp")
-        with tmp.open("w", encoding="utf-8") as stream:
-            json.dump(meta, stream, ensure_ascii=False, indent=2)
-        tmp.replace(target)
+        """Atomic metadata write with a unique temp file.
+
+        Holds the service lock so concurrent readers cannot open the
+        target mid-replace (Windows treats that as a sharing conflict)."""
+        with self.lock:
+            target = self._meta_path(meta["session_id"])
+            tmp = target.with_name(
+                f"{target.name}.{secrets.token_hex(6)}.tmp")
+            with tmp.open("w", encoding="utf-8") as stream:
+                json.dump(meta, stream, ensure_ascii=False, indent=2)
+            tmp.replace(target)
 
     def _load_meta(self, session_id):
-        if (not isinstance(session_id, str)
-                or not SESSION_ID_RE.fullmatch(session_id)):
-            raise ValueError("invalid session id")
-        path = self._meta_path(session_id)
-        if not path.exists():
-            raise FileNotFoundError("unknown demo session")
-        meta = json.loads(path.read_text(encoding="utf-8"))
-        context = self._context_for(meta)
-        if (meta.get("session_id") != session_id
-                or meta.get("schema") != META_SCHEMA
-                or meta.get("synthetic") is not True
-                or meta.get("bank_sha256") != bank_fingerprint(context["bank"])
-                or meta.get("taxonomy_sha256")
-                != canonical_digest(context["taxonomy"])
-                or ("bank_provenance" in meta
-                    and meta["bank_provenance"] != context["provenance"])
-                or (meta.get("bank_mode", "demo") != "demo"
-                    and "bank_provenance" not in meta)
-                or meta.get("policy_version") != POLICY_VERSION):
-            raise ValueError("metadata is incompatible")
-        session = self.store.load(session_id)
-        if (session["bank_sha256"] != meta["bank_sha256"]
-                or ("bank_mode" in session
-                    and session["bank_mode"] != meta.get("bank_mode", "demo"))
-                or ("bank_provenance" in session
-                    and session["bank_provenance"] != context["provenance"])
-                or ("taxonomy_sha256" in session
-                    and session["taxonomy_sha256"] != meta["taxonomy_sha256"])):
-            raise ValueError("session provenance is incompatible")
-        return meta
+        # The lock pairs with _save_meta: readers never open the metadata
+        # file while an atomic temp replace is in flight.
+        with self.lock:
+            if (not isinstance(session_id, str)
+                    or not SESSION_ID_RE.fullmatch(session_id)):
+                raise ValueError("invalid session id")
+            path = self._meta_path(session_id)
+            if not path.exists():
+                raise FileNotFoundError("unknown demo session")
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            context = self._context_for(meta)
+            if (meta.get("session_id") != session_id
+                    or meta.get("schema") != META_SCHEMA
+                    or meta.get("synthetic") is not True
+                    or meta.get("bank_sha256") != bank_fingerprint(context["bank"])
+                    or meta.get("taxonomy_sha256")
+                    != canonical_digest(context["taxonomy"])
+                    or ("bank_provenance" in meta
+                        and meta["bank_provenance"] != context["provenance"])
+                    or (meta.get("bank_mode", "demo") != "demo"
+                        and "bank_provenance" not in meta)
+                    or meta.get("policy_version") != POLICY_VERSION):
+                raise ValueError("metadata is incompatible")
+            session = self.store.load(session_id)
+            if (session["bank_sha256"] != meta["bank_sha256"]
+                    or ("bank_mode" in session
+                        and session["bank_mode"] != meta.get("bank_mode", "demo"))
+                    or ("bank_provenance" in session
+                        and session["bank_provenance"] != context["provenance"])
+                    or ("taxonomy_sha256" in session
+                        and session["taxonomy_sha256"] != meta["taxonomy_sha256"])):
+                raise ValueError("session provenance is incompatible")
+            return meta
 
     def _try_load_meta(self, session_id):
         """Load compatible metadata or None; never rewrites bad files."""

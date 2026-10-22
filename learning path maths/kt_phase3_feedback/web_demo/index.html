@@ -19,7 +19,7 @@
   </div>
 </header>
 <main id="student-root" tabindex="-1">
-  <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Final feedback is shown only after an educator reviews and releases it.</p>
+  <p class="boundary-note"><strong>Synthetic assessment demo.</strong> No real student data. Educator-reviewed feedback is shown only in the Educator workspace, never on this page.</p>
   <p id="student-error" class="error" role="alert" hidden></p>
   <div class="ui-inset display-settings">
     <p id="session-bank" class="meta"></p>
@@ -33,7 +33,7 @@
   <section id="start-panel" class="card ui-section assessment-intro" hidden>
     <p class="eyebrow">EXPLORE THE ASSESSMENT EXPERIENCE</p>
     <h2>A small assessment.<br>A closer look at the evidence.</h2>
-    <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then receive final feedback after your teacher reviews and releases it.</p>
+    <p class="meta">Try the fixed mathematics assessment with synthetic responses. Pause halfway, then see your completion score. Educator-reviewed feedback stays in the Educator workspace.</p>
     <div class="assessment-facts"><div><strong>40</strong><span>Ordered questions</span></div><div><strong>4</strong><span>Mathematics skills</span></div><div><strong>2</strong><span>Checkpoints</span></div></div>
     <div class="ui-inset">
       <label for="bank-mode">Assessment bank — 40 questions in one selected bank</label>
@@ -55,7 +55,7 @@
       <span class="num">40</span></p>
       <progress id="q-progress" max="40" value="0" aria-label="Answered questions"></progress>
     </div>
-    <h2 id="q-text" tabindex="-1"></h2>
+    <h2 id="q-text" tabindex="-1">Assessment question</h2>
     <p id="q-skill" class="meta"></p>
     <p id="language-note" class="meta small"></p>
     <fieldset id="q-options" class="options">
@@ -73,13 +73,14 @@
 
   <section id="end-panel" class="card ui-section" hidden>
     <h2>Assessment complete</h2>
-    <p class="meta">Feedback status:
+    <p class="meta">Completion status:
       <span id="job-status" class="chip"></span></p>
     <div id="end-summary"></div>
     <div id="end-sections"></div>
-    <p class="meta small">Final feedback and any selected practice activity
-    appear once an educator has reviewed and released them. Synthetic demo
-    only — release does not certify the research bank or authorize
+    <p class="meta small">Educator-reviewed feedback and any selected
+    practice activity are available in the Educator workspace for this
+    prototype and are not shown on this page. Synthetic demo only —
+    release does not certify the research bank or authorize
     real-learner delivery.</p>
     <button id="new-session" class="ghost">Start a new session</button>
   </section>

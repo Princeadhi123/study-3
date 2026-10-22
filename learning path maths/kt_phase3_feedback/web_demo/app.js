@@ -1679,52 +1679,6 @@ function renderPracticeCard(container, practice, index, showNotice,
 
 /* ============================ STUDENT ============================ */
 
-const RELEASED_SNAPSHOT_KEY = "demoReleasedSnapshot";
-
-function buildStudentSnapshotFromDetail(detail, releasedFeedback) {
-  if (!detail) return null;
-  const delivery = detail.feedback_delivery || {};
-  const endFeedback = releasedFeedback || delivery.released_feedback;
-  if (!endFeedback) return null;
-  return {
-    session_id: detail.session_id,
-    synthetic: true,
-    bank_mode: detail.bank_mode || "demo",
-    bank_label: detail.bank_label || "Demo bank",
-    status: "complete",
-    answered_count: detail.answered_count || 40,
-    assessment_total: detail.observed_total || null,
-    current_question: null,
-    feedback: {
-      midpoint: null,
-      end: endFeedback,
-    },
-    feedback_delivery: {
-      status: "released",
-      released_at: delivery.released_at || new Date().toISOString(),
-    },
-    provider_job: {
-      status: (detail.provider_job || {}).status || "ready",
-      provider_mode: (detail.provider_job || {}).provider_mode || "rules",
-    },
-  };
-}
-
-function saveReleasedStudentSnapshot(detail, releasedFeedback, clearActiveCreds = false) {
-  const snap = buildStudentSnapshotFromDetail(detail, releasedFeedback);
-  if (!snap) return;
-  try {
-    localStorage.setItem(RELEASED_SNAPSHOT_KEY, JSON.stringify(snap));
-    if (clearActiveCreds) {
-      const raw = localStorage.getItem("demoSession");
-      const current = raw ? JSON.parse(raw) : null;
-      if (!current || current.sid !== detail.session_id) {
-        localStorage.removeItem("demoSession");
-      }
-    }
-  } catch (err) {}
-}
-
 function studentPage() {
   const PANELS = ["#start-panel", "#question-panel", "#pause-panel",
                   "#end-panel", "#load-error"];
@@ -1741,15 +1695,6 @@ function studentPage() {
     creds = value;
     if (value) localStorage.setItem(credKey, JSON.stringify(value));
     else localStorage.removeItem(credKey);
-  }
-
-  function loadReleasedSnapshot() {
-    try {
-      const raw = localStorage.getItem(RELEASED_SNAPSHOT_KEY);
-      return raw ? JSON.parse(raw) : null;
-    } catch (err) {
-      return null;
-    }
   }
 
   function credsFromUrl() {
@@ -1779,8 +1724,10 @@ function studentPage() {
 
   async function refresh() {
     if (!creds) {
-      const releasedSnap = loadReleasedSnapshot();
-      render(releasedSnap);
+      // Released feedback lives only in the educator workspace; without
+      // session credentials this page shows the setup panel. Any legacy
+      // "demoReleasedSnapshot" key left in storage is ignored.
+      render(null);
       return;
     }
     try {
@@ -1909,33 +1856,23 @@ function studentPage() {
   }
 
   function renderEnd(snapshot) {
-    const delivery = snapshot.feedback_delivery || {};
-    $("#job-status").textContent =
-      delivery.status === "released" ? "Released by your teacher"
-      : delivery.status === "awaiting_teacher_review"
-        ? "Awaiting teacher review"
-        : statusLabel(snapshot.provider_job.status);
-    const end = snapshot.feedback && snapshot.feedback.end;
+    // Completed sessions show the observed score only. Teacher-approved
+    // end feedback is intentionally not rendered here — it stays in the
+    // educator workspace for this prototype — so there is nothing left
+    // to poll for after the assessment completes.
+    $("#job-status").textContent = "Complete";
     const summary = $("#end-summary");
     summary.replaceChildren();
     $("#end-sections").replaceChildren();
-    if (end) {
+    const total = snapshot.assessment_total;
+    if (total) {
       summary.appendChild(el("p",
-        "Your teacher has reviewed and released this feedback.",
-        "boundary-note"));
-      renderStructuredFeedback(summary, end);
-    } else {
-      const total = snapshot.assessment_total;
-      if (total) {
-        summary.appendChild(el("p",
-          `You answered ${total.correct} of ${total.out_of} ` +
-          `questions correctly.`, "score"));
-      }
-      summary.appendChild(el("p",
-        "Assessment complete—your teacher is reviewing your feedback.",
-        "boundary-note"));
-      schedule(POLL_MS);
+        `You answered ${total.correct} of ${total.out_of} ` +
+        `questions correctly.`, "score"));
     }
+    summary.appendChild(el("p",
+      "Review and approved feedback are available in the Educator " +
+      "workspace for this prototype.", "boundary-note"));
   }
 
   async function startSession() {
@@ -1947,7 +1884,6 @@ function studentPage() {
       const payload = await api("/api/sessions", {
         body: {synthetic: true, bank_mode: $("#bank-mode").value}});
       saveCreds({sid: payload.session_id, token: payload.student_token});
-      localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
       localStorage.removeItem(ackKey(payload.session_id));
       netError(null);
       render(payload.snapshot);
@@ -1968,7 +1904,6 @@ function studentPage() {
   $("#display-language").addEventListener("change", refresh);
   function returnToSetup() {
     saveCreds(null);
-    localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
     $("#synthetic-consent").checked = false;
     $("#start-button").disabled = true;
     render(null);
@@ -2008,7 +1943,6 @@ function studentPage() {
   // Resume: URL token (from teacher simulation link) wins, then storage.
   const fromUrl = credsFromUrl();
   if (fromUrl) {
-    localStorage.removeItem(RELEASED_SNAPSHOT_KEY);
     saveCreds(fromUrl);
     stripHash();
   } else {
@@ -2402,14 +2336,6 @@ function createDetailView(root, options = {}) {
       a.href = link;
       a.target = "_blank";
       a.rel = "noopener";
-      linkBox.appendChild(a);
-    } else if (detail.feedback_delivery && detail.feedback_delivery.released_feedback) {
-      saveReleasedStudentSnapshot(detail, detail.feedback_delivery.released_feedback, false);
-      const a = el("a", "Open student view", "ghost small");
-      a.href = "/";
-      a.addEventListener("click", () => {
-        saveReleasedStudentSnapshot(detail, detail.feedback_delivery.released_feedback, true);
-      });
       linkBox.appendChild(a);
     }
     renderPane("overview", renderOverviewContent);
@@ -3694,7 +3620,6 @@ function createDetailView(root, options = {}) {
     card.appendChild(kv("Release status", endState.label));
     const released = delivery.released_feedback;
     if (released) {
-      saveReleasedStudentSnapshot(detail, released, Boolean(detail.replay));
       card.appendChild(kv("Released at", delivery.released_at));
       card.appendChild(kv("Reviewer", delivery.reviewer_label));
       const box = el("details", null, "raw");
@@ -4469,7 +4394,6 @@ function createDetailView(root, options = {}) {
         await api(`/api/teacher/sessions/${sid}/release`, {
           body: {message_sha256: delivery.preview_sha256,
                  reviewer_label: draft.label || "anonymous"}});
-        saveReleasedStudentSnapshot(detail, delivery.preview, true);
         draft.note = "Released to the student.";
         pollOnce();
       } catch (err) {
@@ -4488,14 +4412,6 @@ function createDetailView(root, options = {}) {
       status.textContent = draft.note;
     });
     card.appendChild(button);
-    if (released) {
-      const openLink = el("a", "Open in Assessment view", "ghost small");
-      openLink.href = "/";
-      openLink.addEventListener("click", () => {
-        saveReleasedStudentSnapshot(detail, released, true);
-      });
-      card.appendChild(openLink);
-    }
     card.appendChild(status);
     pane.appendChild(card);
   }
@@ -4552,6 +4468,9 @@ function createDetailView(root, options = {}) {
             englishMidpointText(message.text || "")));
         }
         card.appendChild(box);
+        card.appendChild(el("p",
+          "Midpoint feedback is displayed with English topic labels.",
+          "meta"));
         card.appendChild(kv("Wording source",
           aittaActive ? "Aitta" : "Deterministic fallback"));
       }
@@ -4589,10 +4508,16 @@ function createDetailView(root, options = {}) {
     box.dataset.disclosureKey = "midpoint-provider-draft";
     box.appendChild(el("summary", "Midpoint generation details"));
     const inner = el("div");
-    inner.appendChild(el("p",
-      "Aitta wording is shown automatically when ready. Counts and " +
-      "the topic table are application-owned; wording is " +
-      "shape-checked, not fact-verified.", "warn"));
+    if (job && job.status === "not_requested" && !draft) {
+      inner.appendChild(el("p",
+        "No Aitta wording was requested; this session uses the " +
+        "deterministic midpoint check-in.", "meta"));
+    } else {
+      inner.appendChild(el("p",
+        "Aitta wording is shown automatically when ready. Counts and " +
+        "the topic table are application-owned; wording is " +
+        "shape-checked, not fact-verified.", "warn"));
+    }
     renderMidpointDraftJob(inner, job);
     renderMidpointVersionDetails(inner, midpoint, job, aittaActive,
                                  pending);

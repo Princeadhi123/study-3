@@ -9,7 +9,9 @@ import json
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 import tempfile
 
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
@@ -178,6 +180,68 @@ class DemoServiceTests(unittest.TestCase):
             lambda: self.job_status(session_id)["status"]
             in ("ready", "fallback")),
             "provider job did not finish")
+
+    # ---------- metadata lock guards ----------
+
+    def test_load_meta_reads_under_service_lock(self):
+        created = self.create()
+        sid = created["session_id"]
+        held = []
+        original = Path.read_text
+
+        def spy(path, *args, **kwargs):
+            if path == self.service._meta_path(sid):
+                held.append(self.service.lock._is_owned())
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", autospec=True,
+                               side_effect=spy):
+            meta = self.service._load_meta(sid)
+        self.assertEqual(meta["session_id"], sid)
+        self.assertIn(True, held,
+                      "metadata read ran without the service lock")
+
+    def test_save_meta_replaces_under_service_lock(self):
+        created = self.create()
+        sid = created["session_id"]
+        meta = self.service._load_meta(sid)
+        meta["lock_marker"] = "save_under_lock"
+        held = []
+        original = Path.replace
+
+        def spy(path, target):
+            if path.parent == self.service.meta_dir:
+                held.append(self.service.lock._is_owned())
+            return original(path, target)
+
+        with mock.patch.object(Path, "replace", autospec=True,
+                               side_effect=spy):
+            self.service._save_meta(meta)
+        self.assertIn(True, held,
+                      "metadata replace ran without the service lock")
+        reloaded = self.service._load_meta(sid)
+        self.assertEqual(reloaded["lock_marker"], "save_under_lock")
+
+    def test_meta_save_load_concurrent_threads(self):
+        created = self.create()
+        sid = created["session_id"]
+        base = self.service._load_meta(sid)
+
+        def save_round(index):
+            meta = copy.deepcopy(base)
+            meta["lock_round"] = index
+            self.service._save_meta(meta)
+
+        def load_round(_index):
+            meta = self.service._load_meta(sid)
+            self.assertEqual(meta["session_id"], sid)
+            self.assertEqual(meta["schema"], base["schema"])
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = ([pool.submit(save_round, i) for i in range(30)]
+                       + [pool.submit(load_round, i) for i in range(30)])
+            for future in futures:
+                future.result()
 
     # ---------- submission & snapshot contract ----------
 

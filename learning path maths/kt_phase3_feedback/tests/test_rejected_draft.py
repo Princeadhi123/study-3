@@ -10,7 +10,6 @@ import secrets
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 import urllib.request
@@ -28,6 +27,8 @@ from full_feedback import (
     _REJECTED_DRAFT_MAX_CHARS, build_full_input)
 from replay_provider_scenarios import CaptureCache
 from worked_first_context import PROMPT_VERSION as WF_PROMPT
+from tests.browser_runtime import (
+    cleanup_browser_directory, read_devtools_port)
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_assessment_worked_review import (
     grounded_rows, make_grounded_bank, make_grounded_taxonomy,
@@ -641,7 +642,7 @@ class RejectedDraftBrowserTests(unittest.TestCase):
         if not edge.is_file():
             self.skipTest("Microsoft Edge is not installed")
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(cleanup_browser_directory, self.tmp)
         self.root = Path(self.tmp.name)
         self.bank = make_bank()
         self.taxonomy = make_taxonomy(self.bank)
@@ -669,17 +670,14 @@ class RejectedDraftBrowserTests(unittest.TestCase):
         self.process = subprocess.Popen([
             str(edge), "--remote-debugging-port=0",
             f"--user-data-dir={profile}", "--headless=new",
-            "--disable-gpu", "--no-first-run",
+            "--disable-gpu", "--no-first-run", "--disable-extensions",
+            "--disable-component-update",
+            "--disable-background-networking",
             "--no-default-browser-check", "--window-size=1440,1100",
             "about:blank"], stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_browser)
-        port_file = profile / "DevToolsActivePort"
-        for _ in range(100):
-            if port_file.exists():
-                break
-            time.sleep(.1)
-        port = port_file.read_text().splitlines()[0]
+        port = read_devtools_port(profile)
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/json", timeout=10) as response:
             pages = json.load(response)
@@ -759,16 +757,15 @@ class RejectedDraftBrowserTests(unittest.TestCase):
                 "'#tab-feedback details.rejected-draft')"
                 ".getBoundingClientRect().top > 0", timeout=5)
             b.screenshot("rejected_draft_disclosure.png")
-        # The student snapshot builder projects status/mode only.
-        snap = b.js(
-            "buildStudentSnapshotFromDetail({session_id:'x', "
-            "provider_job:{status:'fallback', provider_mode:'hosted', "
-            "executions:{student:{generator:{rejected_draft:"
-            "{content:'<script>', truncated:false}}}}}}, "
-            "{sections:[]})")
-        self.assertEqual(set(snap["provider_job"]),
-                         {"status", "provider_mode"})
-        self.assertNotIn("rejected_draft", json.dumps(snap))
+        # The student released-snapshot bridge was removed entirely:
+        # teacher detail payloads can no longer be projected onto the
+        # student page or into localStorage, and nothing was written.
+        self.assertEqual(
+            b.js("typeof buildStudentSnapshotFromDetail"), "undefined")
+        self.assertEqual(
+            b.js("typeof saveReleasedStudentSnapshot"), "undefined")
+        self.assertIsNone(b.js(
+            "localStorage.getItem('demoReleasedSnapshot')"))
         self.assertEqual(b.errors, [])
 
     def test_rejection_reason_without_retained_wording(self):

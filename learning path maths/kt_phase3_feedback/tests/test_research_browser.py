@@ -17,9 +17,11 @@ from demo_api import make_server
 from demo_service import DemoService
 from research_runtime import load_research_bank
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace
+from tests.browser_runtime import (
+    cleanup_browser_directory, read_devtools_port)
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_assessment_worked_review import (
-    make_grounded_bank, make_grounded_taxonomy)
+    fixture_reviews, make_grounded_bank, make_grounded_taxonomy)
 from tests.test_demo_service import (
     GatedDiagnostics, MULTI_SECTIONS, fake_diagnostics, wait_for)
 from tests.test_feedback_variant import (
@@ -113,7 +115,7 @@ class ResearchBrowserTests(unittest.TestCase):
         if not edge.is_file():
             self.skipTest("Microsoft Edge is not installed")
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(cleanup_browser_directory, self.tmp)
         self.root = Path(self.tmp.name)
         bank = make_bank()
         self.source, self.report, _ = replay_fixture(self.root, bank, make_taxonomy(bank), count=4)
@@ -132,16 +134,14 @@ class ResearchBrowserTests(unittest.TestCase):
         profile = self.root / "edge"
         self.process = subprocess.Popen([
             str(edge), "--remote-debugging-port=0", f"--user-data-dir={profile}",
-            "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+            "--headless=new", "--disable-gpu", "--no-first-run",
+            "--disable-extensions", "--disable-component-update",
+            "--disable-background-networking",
+            "--no-default-browser-check",
             "--window-size=1440,1100", "about:blank"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_browser)
-        port_file = profile / "DevToolsActivePort"
-        for _ in range(100):
-            if port_file.exists():
-                break
-            time.sleep(.1)
-        port = port_file.read_text().splitlines()[0]
+        port = read_devtools_port(profile)
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=10) as response:
             pages = json.load(response)
         self.browser = Browser(next(p["webSocketDebuggerUrl"] for p in pages if p["type"] == "page"))
@@ -1133,7 +1133,7 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait("!document.querySelector('#end-panel').hidden")
         b.viewport(390, 844)
         self.assert_no_overflow()
-        self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('your teacher is reviewing your feedback')"))
+        self.assertTrue(b.js("document.querySelector('#end-summary').textContent.includes('Educator workspace')"))
         self.assertFalse(b.js("document.querySelector('#end-summary').textContent.includes('Observed result')"))
         self.assertEqual(b.errors, [])
 
@@ -1279,7 +1279,7 @@ class ResearchBrowserTests(unittest.TestCase):
                " && typeof api === 'function'")
         b.wait("!document.querySelector('#end-panel').hidden")
         summary = "document.querySelector('#end-summary').textContent"
-        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        b.wait(f"{summary}.includes('Educator workspace')")
         self.assertFalse(b.js(
             "document.querySelector('#end-summary .feedback-section')"))
         self.assertEqual(b.errors, [])
@@ -1669,14 +1669,14 @@ class ResearchBrowserTests(unittest.TestCase):
         self.navigate(result["student_url"])
         b.wait("!document.querySelector('#end-panel').hidden")
         summary = "document.querySelector('#end-summary').textContent"
-        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        b.wait(f"{summary}.includes('Educator workspace')")
         self.assertTrue(b.js(f"{summary}.includes('You answered 20 of 40 questions correctly.')"))
         self.assertFalse(b.js(f"{summary}.includes('Observed result')"))
         self.assertFalse(b.js("document.querySelector('#end-summary .feedback-section')"))
         self.assertFalse(b.js("document.querySelector('#end-summary .skill-list')"))
         self.navigate(result["student_url"])
         b.wait(f"{summary}.includes('You answered 20 of 40 questions correctly.')")
-        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        b.wait(f"{summary}.includes('Educator workspace')")
         b.screenshot("student-total-awaiting-release.png")
         self.assertTrue(wait_for(
             lambda: self.service._load_meta(sid)["provider_job"]["status"]
@@ -1685,8 +1685,14 @@ class ResearchBrowserTests(unittest.TestCase):
         self.service.release_feedback(sid, {
             "message_sha256": view["feedback_delivery"]["preview_sha256"],
             "reviewer_label": "browser-reviewer"})
-        b.wait(f"{summary}.includes('Assessment summary')")
-        self.assertTrue(b.js(f"{summary}.includes('reviewed and released')"))
+        # Released feedback never reaches the assessment page, even with a
+        # valid student token: the end panel keeps the completion score
+        # and the educator-workspace note only.
+        self.navigate(result["student_url"])
+        b.wait(f"{summary}.includes('Educator workspace')")
+        self.assertTrue(b.js(f"{summary}.includes('You answered 20 of 40 questions correctly.')"))
+        self.assertFalse(b.js(f"{summary}.includes('Assessment summary')"))
+        self.assertFalse(b.js(f"{summary}.includes('reviewed and released')"))
         student_text = b.js(
             "[...document.querySelectorAll('#end-summary > *')]"
             ".slice(1).map((n) => n.textContent).join('')")
@@ -1707,7 +1713,8 @@ class ResearchBrowserTests(unittest.TestCase):
         preview_text = b.js(
             "[...document.querySelectorAll('#tab-feedback .feedback-preview > *')]"
             ".map((n) => n.textContent).join('')")
-        self.assertEqual(preview_text, student_text)
+        self.assertIn("Assessment summary", preview_text)
+        self.assertNotIn(preview_text, student_text)
         const_btn = "document.querySelector('#tab-feedback .release-card button.primary')"
         self.assertEqual(b.js(f"{const_btn}.textContent"), "Already released")
         self.assertTrue(b.js(f"{const_btn}.disabled"))
@@ -1722,7 +1729,8 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait(f"{release}.textContent.includes('Released to the student')")
         self.assertFalse(b.js(f"{release}.textContent.includes('differs from the released version')"))
         self.navigate(second["student_url"])
-        b.wait(f"{summary}.includes('Assessment summary')")
+        b.wait(f"{summary}.includes('Educator workspace')")
+        self.assertFalse(b.js(f"{summary}.includes('Assessment summary')"))
         b.screenshot("student-released-incorrect.png")
         self.navigate("/teacher")
         b.wait("!document.querySelector('#teacher-app').hidden")
@@ -2276,7 +2284,7 @@ class ResearchBrowserTests(unittest.TestCase):
                 != "pending"))
             self.navigate(result["student_url"])
             summary = "document.querySelector('#end-summary').textContent"
-            b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+            b.wait(f"{summary}.includes('Educator workspace')")
             self.assertTrue(b.js(f"{summary}.includes('You answered 0 of 40 questions correctly.')"))
             self.assertFalse(b.js(f"{summary}.includes('Pool practice prompt')"))
             self.assertFalse(b.js(f"{summary}.includes('practice activity')"))
@@ -2338,30 +2346,28 @@ class ResearchBrowserTests(unittest.TestCase):
             example_text_teacher = b.js(
                 "document.querySelector('#tab-feedback .feedback-preview "
                 ".review-example').textContent")
+            self.assertIn("Pool practice prompt 1?", card_text_teacher)
+            self.assertIn("Browser worked prompt?",
+                          example_text_teacher)
             self.navigate(result["student_url"])
-            b.wait(f"{summary}.includes('practice activity')")
+            b.wait(f"{summary}.includes('Educator workspace')")
             released_text = b.js(summary)
-            self.assertIn("Approved with practice.", released_text)
-            self.assertIn("Pool practice prompt 1?", released_text)
-            self.assertIn("Browser worked prompt?", released_text)
-            self.assertIn("does not practise the review focus",
-                          released_text)
-            for needle in ("pool_q1", "p_correct", "answer_index"):
+            self.assertIn("questions correctly", released_text)
+            for needle in ("Approved with practice.",
+                           "Pool practice prompt 1?",
+                           "Browser worked prompt?",
+                           "practice activity",
+                           "does not practise the review focus",
+                           "pool_q1", "p_correct", "answer_index"):
                 self.assertNotIn(needle, released_text)
-            card_text_student = b.js(
-                "document.querySelector('#end-summary .practice-activity').textContent")
-            self.assertEqual(card_text_student, card_text_teacher)
-            self.assertEqual(
-                b.js("document.querySelector('#end-summary "
-                     ".review-example').textContent"),
-                example_text_teacher)
-            b.js("document.querySelector('#end-summary .practice-activity').scrollIntoView({block:'center'})")
-            b.screenshot("student-practice-activity-visible.png")
+            self.assertFalse(b.js(
+                "Boolean(document.querySelector('#end-summary "
+                ".practice-activity, #end-summary .review-example'))"))
             b.screenshot("student-released-feedback-practice.png")
             self.navigate(result["student_url"])
-            b.wait(f"{summary}.includes('practice activity')")
-            self.assertIn("Pool practice prompt 1?",
-                          b.js(summary))
+            b.wait(f"{summary}.includes('Educator workspace')")
+            self.assertNotIn("Pool practice prompt 1?",
+                             b.js(summary))
             sid_disabled = disabled["session_id"]
             self.assertTrue(wait_for(
                 lambda: self.service._load_meta(sid_disabled)
@@ -2405,7 +2411,17 @@ class ResearchBrowserTests(unittest.TestCase):
                 "explanation": "Browser worked explanation."}
         pin = f"{secrets.randbelow(1000000):06d}"
         selector = MultiSelector(prefer=("sA", "sB"))
-        generator = MultiGenerator()
+
+        class GroundedMultiGenerator(MultiGenerator):
+            # The grounded multi request requires provider
+            # worked_reviews; the plain fake's two-field reply is a
+            # rejection (invalid_generation), not a narrative.
+            def generate(self, payload):
+                reply = super().generate(payload)
+                reply["worked_reviews"] = fixture_reviews(payload)
+                return reply
+
+        generator = GroundedMultiGenerator()
         predictor = RecordingPredictor({"pool_q1": 0.6, "pool_q2": 0.55})
         service = DemoService(
             root=self.root / "multi-data", bank=bank,
@@ -2517,17 +2533,19 @@ class ResearchBrowserTests(unittest.TestCase):
             b.screenshot("teacher-multi-topics.png")
             b.js(f"{approve}.click()")
             b.wait(f"{release}.textContent.includes('Released to the student')")
+            self.assertTrue(teacher_fragments)
             go(result["student_url"])
             summary = "document.querySelector('#end-summary').textContent"
-            b.wait(f"{summary}.includes('Pool practice prompt 2?')")
+            b.wait(f"{summary}.includes('Educator workspace')")
             student_fragments = b.js(
                 "[...document.querySelectorAll('#end-summary "
                 ".practice-activity, #end-summary .review-example, "
                 "#end-summary .feedback-section')]"
                 ".map((n) => n.textContent)")
-            self.assertEqual(student_fragments, teacher_fragments)
+            self.assertEqual(student_fragments, [])
             blob = b.js(summary)
-            for needle in ("pool_q", "p_correct", "answer_index",
+            for needle in ("Pool practice prompt", "Browser worked prompt",
+                           "pool_q", "p_correct", "answer_index",
                            "review_bundle_"):
                 self.assertNotIn(needle, blob)
             b.screenshot("student-multi-topics-released.png")
@@ -2614,7 +2632,7 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(f"{research_dd}.open"))
         summary = "document.querySelector('#end-summary').textContent"
         self.navigate(result["student_url"])
-        b.wait(f"{summary}.includes('your teacher is reviewing your feedback')")
+        b.wait(f"{summary}.includes('Educator workspace')")
         self.assertFalse(b.js(f"{summary}.includes('Assessment summary')"))
         self.navigate("/teacher")
         b.wait("!document.querySelector('#teacher-app').hidden")
@@ -2776,17 +2794,18 @@ class ResearchBrowserTests(unittest.TestCase):
             preview_text = b.js(
                 f"[...{preview}.children]"
                 ".map((n) => n.textContent).join('')")
+            self.assertIn("Simplify: −4x + 3", preview_text)
             self.navigate(result["student_url"])
             summary = "document.querySelector('#end-summary')"
-            b.wait(f"{summary}.textContent.includes('Simplify: −4x + 3')")
+            b.wait(f"{summary}.textContent.includes('Educator workspace')")
             student_text = b.js(
                 "[...document.querySelectorAll('#end-summary > *')]"
                 ".slice(1).map((n) => n.textContent).join('')")
-            self.assertEqual(preview_text, student_text)
+            self.assertNotIn(preview_text, student_text)
             released = b.js(f"{summary}.textContent")
-            self.assertIn("Combining like terms", released)
-            self.assertIn("Browser worked prompt?", released)
-            for needle in ("pool_q1", "p_correct", "answer_index",
+            for needle in ("Simplify: −4x + 3", "Combining like terms",
+                           "Browser worked prompt?", "pool_q1",
+                           "p_correct", "answer_index",
                            "item_id", "Samanmuotoisten"):
                 self.assertNotIn(needle, released)
             self.assertFalse(b.js(
@@ -2861,7 +2880,9 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual(posts[0]["message_sha256"], saved_hash)
         self.navigate(result["student_url"])
         summary = "document.querySelector('#end-summary')"
-        b.wait(f"{summary}.textContent.includes({json.dumps(unique)})")
+        b.wait(f"{summary}.textContent.includes('Educator workspace')")
+        self.assertFalse(b.js(
+            f"{summary}.textContent.includes({json.dumps(unique)})"))
         self.assertEqual(b.errors, [])
 
     def test_teacher_feedback_editing_flow(self):
@@ -2951,12 +2972,16 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait(f"{release}.textContent.includes('Released to the student')")
         self.navigate(result["student_url"])
         summary = "document.querySelector('#end-summary')"
-        b.wait(f"{summary}.textContent.includes('Teacher rephrased summary for the class.')")
+        b.wait(f"{summary}.textContent.includes('Educator workspace')")
         self.assertTrue(b.js(
             f"{summary}.textContent.includes('20 of 40')"))
+        self.assertFalse(b.js(
+            f"{summary}.textContent.includes('Teacher rephrased summary for the class.')"))
         b.screenshot("student-released-edited.png")
         self.navigate(result["student_url"])
-        b.wait(f"{summary}.textContent.includes('Teacher rephrased summary for the class.')")
+        b.wait(f"{summary}.textContent.includes('Educator workspace')")
+        self.assertFalse(b.js(
+            f"{summary}.textContent.includes('Teacher rephrased summary for the class.')"))
         self.navigate("/teacher")
         b.wait("!document.querySelector('#teacher-app').hidden")
         b.wait(f"Boolean({pick_alt})")
@@ -3117,21 +3142,18 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait(f"{release}.textContent.includes('Released to the student')")
         self.navigate(f"/?session={sid}#token={token}")
         summary = "document.querySelector('#end-summary')"
-        b.wait(f"{summary}.textContent.includes('Teacher step <b>one</b>.')")
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Teacher practice note.')"))
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Explain the edited reasoning.')"))
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Teacher heading')"))
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Edited first prompt text?')"))
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Simplify: 3x + 2x')"))
-        self.assertTrue(b.js(
-            f"{summary}.textContent.includes('Teacher-edited worked review')"))
-        self.assertFalse(b.js(
-            f"{summary}.textContent.includes('verify before release')"))
+        b.wait(f"{summary}.textContent.includes('Educator workspace')")
+        for needle in ("Teacher step <b>one</b>.",
+                       "Teacher practice note.",
+                       "Explain the edited reasoning.",
+                       "Teacher heading",
+                       "Edited first prompt text?",
+                       "Simplify: 3x + 2x",
+                       "Teacher-edited worked review",
+                       "verify before release"):
+            self.assertFalse(b.js(
+                f"{summary}.textContent.includes({json.dumps(needle)})"),
+                needle)
         self.assertFalse(b.js(
             "Boolean(document.querySelector('#end-summary b'))"))
         b.screenshot("student-grounded-full-edit.png")
@@ -3261,16 +3283,16 @@ class ResearchBrowserTests(unittest.TestCase):
         b.wait(f"{release}.textContent.includes('Released to the student')")
         self.navigate(f"/?session={sid}#token={token}")
         summary = "document.querySelector('#end-summary')"
-        b.wait(f"{summary}.textContent.includes('Teacher practice question?')")
-        for needle in ("Teacher instruction text.", "Teacher option A",
+        b.wait(f"{summary}.textContent.includes('Educator workspace')")
+        for needle in ("Teacher practice question?",
+                       "Teacher instruction text.", "Teacher option A",
                        "Teacher practice status note.",
                        "Teacher relationship note.",
-                       "Teacher-edited practice"):
-            self.assertTrue(b.js(
+                       "Teacher-edited practice",
+                       "verify before release"):
+            self.assertFalse(b.js(
                 f"{summary}.textContent.includes({json.dumps(needle)})"),
                 needle)
-        self.assertFalse(b.js(
-            f"{summary}.textContent.includes('verify before release')"))
         b.screenshot("student-selected-practice-edit.png")
         self.assertEqual(b.errors, [])
 
@@ -3300,19 +3322,25 @@ class ResearchBrowserTests(unittest.TestCase):
                           else (question["answer_index"] + 1) % len(question["options"]))
                 b.js(f"document.querySelector('#q-options input[value=\"{chosen}\"]').click(); document.querySelector('#submit-answer').click()")
             b.wait("!document.querySelector('#end-panel').hidden")
-            b.wait("document.querySelector('#end-summary').textContent.includes('reviewing your feedback')")
+            b.wait("document.querySelector('#end-summary').textContent.includes('Educator workspace')")
             sid = self.service.list_sessions()[0]["session_id"]
             view = self.service.teacher_session(sid)
             self.service.release_feedback(sid, {
                 "message_sha256":
                     view["feedback_delivery"]["preview_sha256"]})
-            b.wait("document.querySelector('#end-summary').textContent.includes('20 of 40')")
+            self.assertTrue(b.js(
+                "document.querySelector('#end-summary').textContent"
+                ".includes('20 of 40')"))
+            self.assertFalse(b.js(
+                "document.querySelector('#end-summary').textContent"
+                ".includes('Assessment summary')"))
             b.js("document.querySelector('#new-session').click(); document.querySelector('#display-language').value='en'")
             b.wait("!document.querySelector('#start-panel').hidden")
         self.navigate("/teacher")
         b.wait("document.querySelector('#unlock-panel')")
         b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
         b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
         b.js("document.querySelector('#session-list button').click()")
         b.wait("!document.querySelector('#ws-detail').hidden")
         b.js("document.querySelector('#ws-tabs [data-tab=graph]').click()")
@@ -3643,7 +3671,10 @@ class ResearchBrowserTests(unittest.TestCase):
             return run
 
         def provider_status(run):
-            sid = run["cases"][0]["session_id"]
+            # The admission snapshot's session_id can still be None; the
+            # worker fills it in later, so always read the live record.
+            current = self.service.replays.get(run["id"])
+            sid = current["cases"][0]["session_id"]
             if not sid:
                 return None
             try:
@@ -3722,6 +3753,9 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertTrue(wait_for(
             lambda: provider_status(run_a) == "ready"),
             "provider job did not reach ready")
+        stale_run = copy.deepcopy(run_a)
+        stale_run["cases"][0]["session_id"] = None
+        self.assertEqual(provider_status(stale_run), "ready")
         self.assertEqual(
             self.service.replays.get(run_a["id"])["status"], "running")
         b.js(f"document.querySelector('.run-record[data-run-id=\"{run_a['id']}\"] .run-case').click()")

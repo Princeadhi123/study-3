@@ -169,13 +169,15 @@ authentication.
   at 20 answers; in hosted mode an Aitta-phrased check-in may replace
   the deterministic wording automatically when the asynchronous draft
   is ready (shape-checked only, never teacher-approved);
-- shows only observed totals at the end until the teacher approves;
-- displays the approved end package — review-focus narrative, worked review
+- shows only the observed total and a completion note at the end;
+  teacher-approved end feedback — review-focus narrative, worked review
   cards revisiting the student's own earliest incorrect assessment answers
   (with the recorded selection, correct answer, and the reviewed worked
   steps — provider-drafted wording the teacher approved, or the local
   checked solution when no provider wording was accepted), and all
-  included aligned practice activities (up to two each) — after release.
+  included aligned practice activities (up to two each) — is visible only
+  in the educator workspace after release and is never rendered on the
+  assessment page.
 
 ### Teacher dashboard
 
@@ -206,9 +208,10 @@ for terminal selection, practice, and generation before it can be approved:
 the teacher edits only the four narrative sections (scores, worked examples,
 and practice questions are fixed), saves through the preview hash, and one
 **Approve feedback and activities** action releases the whole package —
-the same approved narrative, worked-example and practice content reaches
-the student, while delivery metadata (for example the review-required flag)
-changes on release. Stale-hash submissions return 409; tested queue, worker,
+the approved narrative, worked-example and practice content stays in the
+educator workspace for this prototype rather than rendering on the
+assessment page, while delivery metadata (for example the review-required
+flag) changes on release. Stale-hash submissions return 409; tested queue, worker,
 and restart paths settle to terminal fallback/unavailable states rather than
 remaining pending, and never fabricate questions. Saved educator-review
 ledger records are unscored and do not constitute release approval.
@@ -225,7 +228,7 @@ paragraphs, bullet and numbered lists), while the score table and totals
 stay fixed outside the editable text. The document is stored and released
 as a safe block model plus its canonical plain-text serialization — never
 as markup — so pasted or typed formatting cannot inject HTML; the saved
-document reaches the student verbatim once approved and the educator is
+document is released verbatim once approved and the educator is
 responsible for checking the mathematical content before approval. A
 collapsed "Advanced
 field-by-field editor" remains for troubleshooting: merely expanding it only

@@ -4,7 +4,6 @@ import secrets
 import subprocess
 import tempfile
 import threading
-import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -16,6 +15,8 @@ from demo_service import DemoService
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator)
 from replay_provider_scenarios import CaptureCache
+from tests.browser_runtime import (
+    cleanup_browser_directory, read_devtools_port)
 from tests.helpers import make_bank, make_taxonomy
 from tests.test_demo_service import fake_diagnostics
 from tests.test_research_browser import Browser
@@ -33,7 +34,7 @@ class ReplayRetryBrowserTests(unittest.TestCase):
         if not edge.is_file():
             self.skipTest("Microsoft Edge is not installed")
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(cleanup_browser_directory, self.tmp)
         self.root = Path(self.tmp.name)
         self.bank = make_bank()
         self.taxonomy = make_taxonomy(self.bank)
@@ -69,17 +70,14 @@ class ReplayRetryBrowserTests(unittest.TestCase):
         self.process = subprocess.Popen([
             str(edge), "--remote-debugging-port=0",
             f"--user-data-dir={profile}", "--headless=new",
-            "--disable-gpu", "--no-first-run",
+            "--disable-gpu", "--no-first-run", "--disable-extensions",
+            "--disable-component-update",
+            "--disable-background-networking",
             "--no-default-browser-check", "--window-size=1440,1100",
             "about:blank"], stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_browser)
-        port_file = profile / "DevToolsActivePort"
-        for _ in range(100):
-            if port_file.exists():
-                break
-            time.sleep(.1)
-        port = port_file.read_text().splitlines()[0]
+        port = read_devtools_port(profile)
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/json", timeout=10) as response:
             pages = json.load(response)

@@ -17,7 +17,10 @@ from tests.test_kt_adapter import FakeKT
 from tests.test_assessment_worked_review import (
     grounded_rows, make_grounded_bank, make_grounded_taxonomy,
     positions)
+from tests.browser_runtime import (
+    cleanup_browser_directory, read_devtools_port)
 from tests.test_research_browser import Browser
+from tests.test_demo_service import wait_for
 
 
 @unittest.skipUnless(os.environ.get("RUN_BROWSER_TESTS") == "1",
@@ -30,7 +33,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         if not edge.is_file():
             self.skipTest("Microsoft Edge is not installed")
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(cleanup_browser_directory, self.tmp)
         self.bank = make_grounded_bank()
         self.bank["questions"][0]["text"] += (
             " <img src=x onerror=alert(1)>")
@@ -55,17 +58,14 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.process = subprocess.Popen([
             str(edge), "--remote-debugging-port=0",
             f"--user-data-dir={profile}", "--headless=new",
-            "--disable-gpu", "--no-first-run",
+            "--disable-gpu", "--no-first-run", "--disable-extensions",
+            "--disable-component-update",
+            "--disable-background-networking",
             "--no-default-browser-check", "--window-size=1440,1100",
             "about:blank"], stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         self.addCleanup(self.stop_browser)
-        port_file = profile / "DevToolsActivePort"
-        for _ in range(100):
-            if port_file.exists():
-                break
-            time.sleep(.1)
-        port = port_file.read_text().splitlines()[0]
+        port = read_devtools_port(profile)
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/json", timeout=10) as response:
             pages = json.load(response)
@@ -172,9 +172,133 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
                "typeof api === 'function'")
-        b.wait("document.body.textContent.includes('Worked review')",
+        b.wait("!document.querySelector('#end-panel').hidden",
                timeout=30)
-        self._assert_card_rendered()
+        # Released worked-review cards stay in the educator workspace;
+        # the assessment page shows only completion and the score.
+        summary = "document.querySelector('#end-summary')"
+        b.wait(f"{summary}.textContent.includes('Educator workspace')",
+               timeout=30)
+        student_text = b.js(f"{summary}.textContent")
+        self.assertIn("questions correctly", student_text)
+        self.assertNotIn("Worked review", student_text)
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.review-example'))"))
+
+    def test_legacy_released_snapshot_key_is_ignored(self):
+        b = self.browser
+        marker = "LEGACY-RELEASED-SNAPSHOT-MARKER-9f3b"
+        b.command("Page.navigate", {"url": f"{self.url}/"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.js(
+            "localStorage.setItem('demoReleasedSnapshot', "
+            "JSON.stringify({session_id:'legacy-sid', synthetic:true,"
+            " bank_mode:'demo', bank_label:'Demo bank',"
+            " status:'complete', answered_count:40,"
+            " assessment_total:{correct:39,out_of:40},"
+            " current_question:null,"
+            " feedback:{midpoint:null, end:{sections:[{kind:"
+            "'assessment_summary', text:" + json.dumps(marker)
+            + "}]}},"
+            " feedback_delivery:{status:'released'},"
+            " provider_job:{status:'ready'}}))")
+        # The stored release is never rendered: the page shows setup on
+        # first load and after reload, and no end content appears.
+        b.command("Page.reload", {"ignoreCache": True})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("!document.querySelector('#start-panel').hidden")
+        self.assertTrue(b.js(
+            "document.querySelector('#end-panel').hidden"))
+        body = b.js("document.body.textContent")
+        self.assertNotIn(marker, body)
+        self.assertNotIn("39 of 40", body)
+        self.assertFalse(b.js(
+            "document.querySelector('#end-summary').textContent"
+            ".includes('questions correctly')"))
+        b.command("Page.reload", {"ignoreCache": True})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("!document.querySelector('#start-panel').hidden")
+        self.assertNotIn(marker, b.js("document.body.textContent"))
+        self.assertEqual(b.errors, [])
+
+    def test_release_view_writes_no_snapshot_and_keeps_token_link(self):
+        b = self.browser
+        # An unrelated in-progress credential must survive viewing and
+        # releasing feedback in the educator workspace. It is seeded on
+        # the teacher page, which never reads or clears demoSession.
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.js("localStorage.setItem('demoSession', JSON.stringify("
+             "{sid:'unrelated-sid', token:'unrelated-token'}))")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        # UI-driven simulation keeps its tokenized "Open student view"
+        # link for answering the assessment.
+        b.js("document.querySelector('#sim-form').requestSubmit()")
+        b.wait("!document.querySelector('#ws-detail').hidden",
+               timeout=30)
+        b.wait("Boolean(document.querySelector('#ws-student-link a'))",
+               timeout=30)
+        sim_link = b.js(
+            "document.querySelector('#ws-student-link a').href")
+        self.assertIn("session=", sim_link)
+        self.assertIn("token=", sim_link)
+        sid = sim_link.split("session=")[1].split("&")[0].split("#")[0]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]
+            ["status"] in ("ready", "fallback")))
+        view = self.service.teacher_session(sid)
+        released = self.service.release_feedback(sid, {
+            "message_sha256": view["feedback_delivery"]
+            ["preview_sha256"], "reviewer_label": "browser-test"})
+        self.assertTrue(released["released"])
+        release = "document.querySelector('#tab-feedback .release-card')"
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]')"
+             ".click()")
+        b.wait(f"{release}.textContent.includes('Released to the "
+               "student')", timeout=30)
+        # Viewing or releasing educator feedback writes no student
+        # snapshot and leaves the unrelated credential untouched.
+        self.assertIsNone(b.js(
+            "localStorage.getItem('demoReleasedSnapshot')"))
+        self.assertEqual(
+            b.js("JSON.parse(localStorage.getItem('demoSession'))"),
+            {"sid": "unrelated-sid", "token": "unrelated-token"})
+        # No fallback link opens released feedback on the assessment
+        # page; only the tokenized simulation link remains.
+        links = b.js(
+            "[...document.querySelectorAll('#ws-detail a, "
+            "#tab-feedback a')].map((a) => a.getAttribute('href'))")
+        self.assertNotIn("/", links)
+        self.assertNotIn(
+            "Open in Assessment view",
+            b.js("document.body.textContent"))
+        # The tokenized link opens a completed session that shows the
+        # score and the educator-workspace note, never released content.
+        b.command("Page.navigate", {"url": sim_link})
+        b.wait("document.readyState === 'complete' && "
+               "typeof api === 'function'")
+        b.wait("!document.querySelector('#end-panel').hidden",
+               timeout=30)
+        text = b.js(
+            "document.querySelector('#end-summary').textContent")
+        self.assertIn("questions correctly", text)
+        self.assertIn("Educator workspace", text)
+        self.assertNotIn("Assessment summary", text)
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.review-example, "
+            "#end-summary .practice-activity, "
+            "#end-summary .feedback-section'))"))
+        self.assertIsNone(b.js(
+            "localStorage.getItem('demoReleasedSnapshot')"))
+        self.assertEqual(b.errors, [])
 
     def test_rendered_feedback_dedup_disclaimer_injection(self):
         b = self.browser
@@ -184,12 +308,22 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "review_examples": [
                 {"source": "incorrect_assessment_response",
                  "question_id": "q1", "prompt": "Alkuluku?",
+                 "teacher_edited": True,
                  "options": ["2 <img src=x onerror=alert(1)>",
                              "4", "9"],
                  "selected_answer": "4",
                  "correct_answer": "2 <img src=x onerror=alert(1)>",
                  "steps": ["Prime numbers have two divisors."],
                  "reasoning_question": "Explain your choice.",
+                 "original_content": {
+                     "prompt": "Alkuluku?",
+                     "options": ["2 <img src=x onerror=alert(1)>",
+                                 "4", "9"],
+                     "selected_answer": "4",
+                     "correct_answer":
+                         "2 <img src=x onerror=alert(1)>",
+                     "steps": ["Prime numbers have two divisors."],
+                     "reasoning_question": "Explain your choice."},
                  "notice": "Shared checked warning."},
                 {"source": "incorrect_assessment_response",
                  "question_id": "q2", "prompt": "Alkuluku?",
@@ -299,7 +433,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         b.wait("document.readyState === 'complete'")
         summary = "#end-summary"
         b.wait("document.querySelector('" + summary + "')"
-               ".textContent.includes('reviewing your feedback')")
+               ".textContent.includes('Educator workspace')")
         self.assertFalse(b.js(
             "Boolean(document.querySelector('" + summary +
             " .assessment-results'))"))
@@ -352,24 +486,28 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "message_sha256": detail["feedback_delivery"]
             ["preview_sha256"], "reviewer_label": "browser-test"})
         self.assertTrue(released["released"])
+        self.assertIn("Overall: 38 of 40", teacher_table)
         b.command("Page.navigate", {
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete'")
-        b.wait("Boolean(document.querySelector('" + summary +
-               " .assessment-results'))", timeout=30)
-        student_table = b.js(
-            "document.querySelector('" + summary +
-            " .assessment-results').textContent")
-        self.assertEqual(student_table, teacher_table)
+        b.wait("!document.querySelector('#end-panel').hidden",
+               timeout=30)
+        # The released package stays in the educator workspace; the
+        # student sees the observed score and a pointer note only.
         student_text = b.js(
             "document.querySelector('" + summary + "').textContent")
-        for needle in ("Assessment complete", "What went well",
-                       "Answers to review", "What to do next"):
-            self.assertIn(needle, student_text)
+        self.assertIn("38 of 40", student_text)
+        self.assertIn("Educator workspace", student_text)
+        for needle in ("What went well", "Answers to review",
+                       "What to do next", "Assessment summary"):
+            self.assertNotIn(needle, student_text)
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('" + summary +
+            " .assessment-results'))"))
         self.assertEqual(b.js(
             "document.querySelectorAll('" + summary +
-            " .review-example').length"), 2)
-        self.assertTrue(b.js(
+            " .review-example').length"), 0)
+        self.assertFalse(b.js(
             "Boolean(document.querySelector('" + summary +
             " details.raw'))"))
         b.viewport(390, 844)
@@ -492,37 +630,41 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "url": f"{self.url}/?session={sid}#token={token}"})
         b.wait("document.readyState === 'complete' && "
                "typeof api === 'function'")
-        b.wait("document.querySelectorAll('.review-example').length"
-               " >= 2", timeout=30)
+        b.wait("!document.querySelector('#end-panel').hidden",
+               timeout=30)
+        # Released worked-review content never reaches the assessment
+        # page; only the completion score renders.
         student = b.js(
-            "(() => { const cards = Array.from("
-            "document.querySelectorAll('.review-example'));"
-            "return {solutions: cards.filter(c => c.querySelector("
-            "'details.worked-solution')).length,"
-            "open: cards.filter(c => c.querySelector("
-            "'details.worked-solution') && c.querySelector("
-            "'details.worked-solution').open).length,"
-            "thinkFirst: cards.filter(c => c.querySelector("
-            "'.think-first')).length,"
+            "(() => ({"
+            "released: document.querySelectorAll('.review-example')"
+            ".length,"
+            "practice: document.querySelectorAll('#end-summary "
+            ".practice-activity').length,"
+            "complete: document.querySelector('#end-summary')"
+            ".textContent.includes('Educator workspace'),"
+            "score: document.querySelector('#end-summary').textContent"
+            ".includes('questions correctly'),"
+            "teacherEdit: document.querySelector('#end-summary')"
+            ".textContent.includes('Teacher reworded prompt.'),"
             "literal: document.body.textContent.includes("
             "'<img src=x onerror=alert(1)>'),"
             "injected: Boolean(document.querySelector("
-            "'.review-example img, .review-example script'))}; })()")
-        self.assertEqual(student["solutions"], 2)
-        self.assertEqual(student["open"], 0)
-        self.assertEqual(student["thinkFirst"], 2)
-        self.assertTrue(student["literal"])
+            "'.review-example img, .review-example script'))}))()")
+        self.assertEqual(student["released"], 0)
+        self.assertEqual(student["practice"], 0)
+        self.assertTrue(student["complete"])
+        self.assertTrue(student["score"])
+        self.assertFalse(student["teacherEdit"])
+        self.assertFalse(student["literal"])
         self.assertFalse(student["injected"])
-        b.js("document.querySelector('.review-example')"
-             ".scrollIntoView()")
+        b.js("document.querySelector('#end-panel').scrollIntoView()")
         b.screenshot("question-first-student.png")
         b.viewport(390, 844)
         b.wait("document.readyState === 'complete'")
         self.assertFalse(b.js(
             "document.documentElement.scrollWidth > "
             "document.documentElement.clientWidth"))
-        b.js("document.querySelectorAll('.review-example')"
-             f"[{ready_index}].scrollIntoView()")
+        b.js("document.querySelector('#end-panel').scrollIntoView()")
         b.screenshot("question-first-mobile.png")
         self.assertEqual(b.errors, [])
 
@@ -666,6 +808,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
                 "subtopic_id": leaf,
                 "steps": solved["steps"],
                 "reasoning_question": solved["reasoning_question"],
+                "solution_version": solved["solution_version"],
                 "notice": awr.CONCISE_READY_NOTICE})
         preview = awr.question_first_preview(
             {"sections": [], "review_examples": cards})
