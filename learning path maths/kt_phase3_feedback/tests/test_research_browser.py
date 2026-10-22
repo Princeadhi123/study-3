@@ -12,6 +12,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from demo_api import make_server
 from demo_service import DemoService
@@ -50,6 +51,7 @@ class Browser:
         self.socket = websocket.create_connection(socket_url, timeout=30, suppress_origin=True)
         self.sequence = 0
         self.errors = []
+        self.extension_errors = []
         self.command("Runtime.enable")
         self.command("Page.enable")
         self.command("Log.enable")
@@ -66,7 +68,15 @@ class Browser:
                     raise RuntimeError(result["error"])
                 return result.get("result", {})
             if result.get("method") == "Runtime.exceptionThrown":
-                self.errors.append(result["params"]["exceptionDetails"])
+                details = result["params"]["exceptionDetails"]
+                # Browser extensions can inject scripts despite
+                # --disable-extensions. Retain their errors separately
+                # from application exceptions.
+                if details.get("url", "").startswith(
+                        "chrome-extension://"):
+                    self.extension_errors.append(details)
+                else:
+                    self.errors.append(details)
             if result.get("method") == "Log.entryAdded":
                 entry = result["params"]["entry"]
                 if "Content Security Policy" in entry.get("text", ""):
@@ -105,6 +115,53 @@ class Browser:
                 raise ValueError("screenshot directory must already exist")
             data = self.command("Page.captureScreenshot", {"format": "png"})
             (directory / name).write_bytes(base64.b64decode(data["data"]))
+
+
+class BrowserExceptionTests(unittest.TestCase):
+    """Unit coverage for the Browser console collector: extension
+    exceptions are retained separately; page errors are never lost.
+    No real browser or network is used."""
+
+    def _browser(self, messages):
+        browser = Browser.__new__(Browser)
+        browser.socket = mock.Mock()
+        browser.socket.recv.side_effect = [
+            json.dumps(message) for message in messages]
+        browser.sequence = 0
+        browser.errors = []
+        browser.extension_errors = []
+        return browser
+
+    def test_extension_errors_kept_apart_from_page_errors(self):
+        extension = {"exceptionId": 1, "text": "Uncaught",
+                     "url": "chrome-extension://abc/inject.js"}
+        local = {"exceptionId": 2, "text": "Uncaught",
+                 "url": "http://127.0.0.1:1/app.js"}
+        missing = {"exceptionId": 3, "text": "Uncaught"}
+        csp = {"text": "Refused: Content Security Policy violation",
+               "level": "error"}
+        browser = self._browser([
+            {"method": "Runtime.exceptionThrown",
+             "params": {"exceptionDetails": extension}},
+            {"method": "Runtime.exceptionThrown",
+             "params": {"exceptionDetails": local}},
+            {"method": "Runtime.exceptionThrown",
+             "params": {"exceptionDetails": missing}},
+            {"method": "Log.entryAdded", "params": {"entry": csp}},
+            {"id": 1, "result": {}}])
+        browser.command("Runtime.enable")
+        self.assertEqual(browser.errors, [local, missing, csp])
+        self.assertEqual(browser.extension_errors, [extension])
+
+    def test_evaluate_exception_still_raises(self):
+        detail = {"text": "Uncaught ReferenceError",
+                  "url": "http://127.0.0.1:1/app.js"}
+        browser = self._browser([
+            {"id": 1, "result": {"exceptionDetails": detail}}])
+        with self.assertRaises(AssertionError):
+            browser.js("boom()")
+        self.assertEqual(browser.errors, [])
+        self.assertEqual(browser.extension_errors, [])
 
 
 @unittest.skipUnless(os.environ.get("RUN_BROWSER_TESTS") == "1",

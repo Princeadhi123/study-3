@@ -6,7 +6,9 @@ feedback remains a draft requiring educator review, and KT
 values stay private research diagnostics that never reach student
 payloads.
 
-Provider calls are optional, bounded, and never retried automatically.
+Provider calls are optional and bounded; transient transport failures
+retry a bounded number of times, and a failed replay case cancels all
+future provider work for that session.
 The single provider worker owns the Cached* adapters so provider state
 is shared by exactly one thread; the diagnostics worker owns the frozen
 model. Neither pool blocks student submissions.
@@ -271,6 +273,10 @@ class DemoService:
         self.max_pending_jobs = max_pending_jobs
         self._pending_provider = 0
         self._pending_diag = 0
+        # Per-session cancellation signals for replay background work;
+        # set when a replay case fails so late midpoint/end provider
+        # jobs stop retrying and never publish.
+        self._provider_session_stops = {}
         self.diagnostics = (diagnostics if diagnostics is not None
                             else LiveDiagnostics())
         if provider_mode not in ("rules", "hosted"):
@@ -1162,6 +1168,83 @@ class DemoService:
             practice_contexts=[c["context"] for c in contexts])
         end["provider_job"] = copy.deepcopy(meta["provider_job"])
 
+    def _provider_session_event(self, session_id, meta=None):
+        """Persistent per-session cancel event; set once a replay case
+        fails and re-armed on load via the persisted marker."""
+        with self.lock:
+            event = self._provider_session_stops.get(session_id)
+            if event is None:
+                event = threading.Event()
+                self._provider_session_stops[session_id] = event
+            if meta is None:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    meta = None
+            if meta is not None and meta.get("background_work_cancelled"):
+                event.set()
+            return event
+
+    @contextlib.contextmanager
+    def _provider_session_scope(self, session_id):
+        """Bind this thread's provider calls to the session's cancel
+        event so a failed replay case stops future retries."""
+        with self.lock:
+            try:
+                meta = self._load_meta(session_id)
+            except FileNotFoundError:
+                meta = None
+            event = self._provider_session_event(session_id, meta)
+            replay_id = ((meta or {}).get("replay") or {}).get("run_id")
+        if self.cache is not None:
+            with self.cache.session_scope(
+                    session_id, replay_id=replay_id,
+                    cancel_event=event):
+                yield event
+        else:
+            yield event
+
+    def cancel_replay_session(self, session_id,
+                              reason="replay_case_failed"):
+        """Mark a replay session's background work as cancelled: pending
+        midpoint/end provider jobs stop and late results are discarded.
+        The event is set before persistence; if saving fails the
+        cancellation still stands and the error propagates."""
+        if reason != "replay_case_failed":
+            raise ValueError("unknown cancellation reason")
+        with self.lock:
+            event = self._provider_session_stops.get(session_id)
+            if event is None:
+                event = threading.Event()
+                self._provider_session_stops[session_id] = event
+            # Set before any metadata I/O: even if persistence fails
+            # the session's provider work is cancelled.
+            event.set()
+            meta = self._load_meta(session_id)
+            if not meta.get("background_work_cancelled"):
+                meta["background_work_cancelled"] = {
+                    "reason": reason, "cancelled_at": utc_now()}
+            block = meta["checkpoints"]["midpoint"]
+            phrasing = block.get("phrasing_job") or {}
+            if phrasing.get("status") == "pending":
+                phrasing.update({
+                    "status": "cancelled",
+                    "reason": "replay_case_failed",
+                    "finished_at": utc_now()})
+                block["phrasing_job"] = phrasing
+                block["provider_draft"] = None
+                block["provider_draft_version"] = None
+            job = meta["provider_job"]
+            if job.get("status") in (
+                    "pending", "waiting_for_practice",
+                    "waiting_for_diagnostics"):
+                job.update({"status": "fallback",
+                            "reason": "replay_case_failed",
+                            "finished_at": utc_now()})
+                meta["checkpoints"]["end"]["provider_job"] = (
+                    copy.deepcopy(job))
+            self._save_meta(meta)
+
     def _admit_provider_job(self, session_id, meta, evidence):
         end = meta["checkpoints"]["end"]
         mode = meta["provider_job"]["provider_mode"]
@@ -1169,6 +1252,21 @@ class DemoService:
         ctx = (end.get("practice_context")
                if meta.get("feedback_bundle_version")
                == FEEDBACK_BUNDLE_VERSION else None)
+        if self._provider_session_event(session_id, meta).is_set():
+            meta["provider_job"] = {
+                "status": "fallback",
+                "provider_mode": mode,
+                "queued_at": utc_now(), "finished_at": utc_now(),
+                "reason": "replay_case_failed"}
+            if multi:
+                self._multi_fallback(meta, evidence,
+                                     "replay_case_failed")
+            else:
+                for audience in ("student",):
+                    end[f"{audience}_review"] = self._baseline_review(
+                        evidence, audience, "replay_case_failed", ctx)
+            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            return
         if self._closing:
             meta["provider_job"] = {
                 "status": "fallback",
@@ -1289,6 +1387,12 @@ class DemoService:
                            else "midpoint_provider_not_configured"),
                 "finished_at": utc_now()}
             return
+        if self._provider_session_event(session_id, meta).is_set():
+            block["phrasing_job"] = {
+                "status": "cancelled",
+                "reason": "replay_case_failed",
+                "queued_at": utc_now(), "finished_at": utc_now()}
+            return
         if self._closing:
             block["phrasing_job"] = {
                 "status": "fallback", "reason": "service_closing",
@@ -1328,52 +1432,70 @@ class DemoService:
         return record
 
     def _run_midpoint_phrasing(self, session_id, evidence):
-        """Worker: one midpoint draft call; stores provider_draft."""
+        """Worker: one midpoint draft call; stores provider_draft.
+
+        Scoped to the session's cancellation event: a replay case
+        failure stops queued/scheduled calls before they run and
+        suppresses any late publication."""
         adapter = self.midpoint_generator
         draft = None
         try:
-            with self._adapter_scope(adapter):
-                if hasattr(adapter, "execution"):
-                    adapter.execution = None
-                self._reset_rejected_draft(adapter)
-                try:
-                    reply = adapter.generate(
-                        build_midpoint_input(evidence))
-                    draft = compose_midpoint_draft(evidence, reply)
-                    job = {"status": "ready",
-                           "prompt_version": MIDPOINT_PROMPT_VERSION,
-                           "message_version": MIDPOINT_DRAFT_VERSION,
-                           "finished_at": utc_now()}
-                except SystemExit:
-                    job = {"status": "fallback",
-                           "reason": "demo_call_budget_exhausted",
-                           "finished_at": utc_now()}
-                except Exception:
-                    job = {"status": "fallback",
-                           "reason": "provider_error",
-                           "finished_at": utc_now()}
-                # Read per-thread adapter state while still inside the
-                # adapter scope so a later request cannot overwrite it.
-                execution = copy.deepcopy(
-                    getattr(adapter, "execution", None))
-                if execution is None:
-                    execution = self._midpoint_exec_record(adapter)
-            job["execution"] = execution
-            with self.lock:
-                try:
-                    meta = self._load_meta(session_id)
-                except FileNotFoundError:
+            with self._provider_session_scope(session_id) as event:
+                if event.is_set():
                     return
-                block = meta["checkpoints"]["midpoint"]
-                queued = (block.get("phrasing_job") or {}).get("queued_at")
-                if queued is not None:
-                    job["queued_at"] = queued
-                block["provider_draft"] = draft
-                block["provider_draft_version"] = (
-                    MIDPOINT_DRAFT_VERSION
-                    if draft is not None else None)
-                block["phrasing_job"] = job
-                self._save_meta(meta)
+                with self._adapter_scope(adapter):
+                    if event.is_set():
+                        return
+                    if hasattr(adapter, "execution"):
+                        adapter.execution = None
+                    self._reset_rejected_draft(adapter)
+                    try:
+                        reply = adapter.generate(
+                            build_midpoint_input(evidence))
+                        draft = compose_midpoint_draft(evidence, reply)
+                        job = {"status": "ready",
+                               "prompt_version": MIDPOINT_PROMPT_VERSION,
+                               "message_version": MIDPOINT_DRAFT_VERSION,
+                               "finished_at": utc_now()}
+                    except SystemExit:
+                        job = {"status": "fallback",
+                               "reason": "demo_call_budget_exhausted",
+                               "finished_at": utc_now()}
+                    except Exception:
+                        job = {"status": "fallback",
+                               "reason": "provider_error",
+                               "finished_at": utc_now()}
+                    # Read per-thread adapter state while still inside
+                    # the adapter scope so a later request cannot
+                    # overwrite it.
+                    execution = copy.deepcopy(
+                        getattr(adapter, "execution", None))
+                    if execution is None:
+                        execution = self._midpoint_exec_record(adapter)
+                if event.is_set():
+                    return
+                job["execution"] = execution
+                with self.lock:
+                    if event.is_set():
+                        return
+                    try:
+                        meta = self._load_meta(session_id)
+                    except FileNotFoundError:
+                        return
+                    block = meta["checkpoints"]["midpoint"]
+                    if (block.get("phrasing_job") or {}).get(
+                            "status") == "cancelled":
+                        return
+                    queued = (block.get("phrasing_job") or {}).get(
+                        "queued_at")
+                    if queued is not None:
+                        job["queued_at"] = queued
+                    block["provider_draft"] = draft
+                    block["provider_draft_version"] = (
+                        MIDPOINT_DRAFT_VERSION
+                        if draft is not None else None)
+                    block["phrasing_job"] = job
+                    self._save_meta(meta)
         finally:
             with self.lock:
                 self._pending_provider = max(
@@ -1667,7 +1789,7 @@ class DemoService:
             clear()
 
     def _audience_result(self, evidence, audience, provider_mode=None,
-                         practice_context=None):
+                         practice_context=None, cancel_event=None):
         """One audience through providers; isolated failures per audience."""
         executions = {"selector": None, "generator": None}
         if (provider_mode or self.provider_mode) == "rules":
@@ -1678,6 +1800,9 @@ class DemoService:
             executions["generator"] = {"status": "rules_mode_no_providers"}
             return review, executions
         with self._adapter_scope(self.selector, self.generator):
+            if (cancel_event is not None
+                    and cancel_event.is_set()):
+                return None, {}
             try:
                 if hasattr(self.selector, "execution"):
                     self.selector.execution = None
@@ -1733,14 +1858,18 @@ class DemoService:
         return review, executions
 
     def _run_provider_job_for_session(self, session_id):
-        with self.lock:
-            meta = self._load_meta(session_id)
-            multi = self._is_multi(meta)
-        (self._run_multi_provider_job if multi
-         else self._run_provider_job)(session_id)
+        with self._provider_session_scope(session_id):
+            with self.lock:
+                meta = self._load_meta(session_id)
+                multi = self._is_multi(meta)
+            (self._run_multi_provider_job if multi
+             else self._run_provider_job)(session_id)
 
     def _run_provider_job(self, session_id):
         try:
+            event = self._provider_session_event(session_id)
+            if event.is_set():
+                return
             try:
                 with self.lock:
                     rows = self._rows(session_id)
@@ -1753,7 +1882,12 @@ class DemoService:
                 for audience in ("student",):
                     review, executions = self._audience_result(
                         evidence, audience, mode,
-                        practice_context=practice_context)
+                        practice_context=practice_context,
+                        cancel_event=event)
+                    if event.is_set():
+                        # Cancelled while the audience call was in
+                        # flight; discard the late result entirely.
+                        return
                     results[audience] = {"review": review,
                                          "executions": executions}
                 any_fallback = any(
@@ -1768,6 +1902,8 @@ class DemoService:
                 try:
                     meta = self._load_meta(session_id)
                 except FileNotFoundError:
+                    return
+                if event.is_set():
                     return
                 end = meta["checkpoints"]["end"]
                 if results is None:
@@ -1877,9 +2013,10 @@ class DemoService:
         """Worked-first authoring waits for terminal model diagnostics so
         the provider context can carry their real (or explicitly
         unavailable) projections. Returns a checkpoint snapshot or None."""
+        event = self._provider_session_event(session_id)
         while True:
             with self.lock:
-                if self._closing:
+                if self._closing or event.is_set():
                     return None
                 try:
                     meta = self._load_meta(session_id)
@@ -1901,6 +2038,9 @@ class DemoService:
     def _run_multi_provider_job(self, session_id):
         selector_exec = generator_exec = None
         try:
+            event = self._provider_session_event(session_id)
+            if event.is_set():
+                return
             try:
                 with self.lock:
                     rows = self._rows(session_id)
@@ -1909,6 +2049,8 @@ class DemoService:
                 evidence = self._evidence(meta, rows)
                 with self._adapter_scope(
                         self.selector if mode == "hosted" else None):
+                    if event.is_set():
+                        return
                     if (self.selector is not None
                             and hasattr(self.selector, "execution")):
                         self.selector.execution = None
@@ -1946,6 +2088,8 @@ class DemoService:
                 try:
                     meta = self._load_meta(session_id)
                 except FileNotFoundError:
+                    return
+                if event.is_set():
                     return
                 end = meta["checkpoints"]["end"]
                 if selection is not None:
@@ -1987,6 +2131,8 @@ class DemoService:
                             meta = self._load_meta(session_id)
                         except FileNotFoundError:
                             return
+                        if event.is_set():
+                            return
                         end = meta["checkpoints"]["end"]
                         if self._pending_diag >= self.max_pending_jobs:
                             rec_result = {
@@ -2020,6 +2166,8 @@ class DemoService:
                                     0, self._pending_diag - 1)
                 with self.lock:
                     meta = self._load_meta(session_id)
+                    if event.is_set():
+                        return
                     end = meta["checkpoints"]["end"]
                     end["recommendation"] = rec_result
                     end["recommendation_job"] = rec_job
@@ -2053,6 +2201,8 @@ class DemoService:
                             meta = self._load_meta(session_id)
                         except FileNotFoundError:
                             return
+                        if event.is_set():
+                            return
                         self._freeze_worked_example_selection(meta, rows)
                         meta["provider_job"]["status"] = "pending"
                         meta["checkpoints"]["end"]["provider_job"] = (
@@ -2081,6 +2231,8 @@ class DemoService:
                                 meta = self._load_meta(session_id)
                             except FileNotFoundError:
                                 return
+                            if event.is_set():
+                                return
                             meta["provider_job"]["status"] = "pending"
                             meta["checkpoints"]["end"]["provider_job"] = (
                                 copy.deepcopy(meta["provider_job"]))
@@ -2089,6 +2241,8 @@ class DemoService:
                         evidence, assessment_ctx, diagnostic_blocks)
                 with self._adapter_scope(
                         self.generator if mode == "hosted" else None):
+                    if event.is_set():
+                        return
                     if (self.generator is not None
                             and hasattr(self.generator, "execution")):
                         self.generator.execution = None
@@ -2142,6 +2296,8 @@ class DemoService:
                               if review["trace"]["fallback_reason"]
                               else "ready")
                 baseline_review = None
+                if event.is_set():
+                    return
                 if (meta.get("worked_example_selection_policy")
                         == worked_example_selection.POLICY):
                     # Refresh the deterministic baseline with the same
@@ -2159,6 +2315,8 @@ class DemoService:
                 try:
                     meta = self._load_meta(session_id)
                 except FileNotFoundError:
+                    return
+                if event.is_set():
                     return
                 end = meta["checkpoints"]["end"]
                 if selection is None:
@@ -2209,6 +2367,11 @@ class DemoService:
             try:
                 meta = self._load_meta(session_id)
             except FileNotFoundError:
+                return
+            if self._provider_session_event(
+                    session_id, meta).is_set():
+                # A cancelled session keeps its cancellation record; a
+                # racing worker exception must not replace it.
                 return
             end = meta["checkpoints"]["end"]
             if meta["provider_job"].get("status") not in (

@@ -192,8 +192,9 @@ class CachedMidpointGenerator:
 
     Execution and rejected-draft state are thread-local only: a thread
     that never generated sees no other thread's record. Replayed replies
-    are revalidated; a failed capture returns None and is never retried
-    automatically.
+    are revalidated; a failed capture returns None and is retried only
+    for transient transport failures up to a bounded limit, and never
+    after the owning replay session has been cancelled.
     """
     supports_full_feedback = False
     thread_safe = True

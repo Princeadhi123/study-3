@@ -144,6 +144,14 @@ def _automatic_retryable(execution):
             and transport.get("http_status") in _RETRYABLE_HTTP)
 
 
+class ProviderCallCancelled(Exception):
+    """Internal unwind when the owning replay session was cancelled;
+    never serialized into captures or surfaced with provider detail."""
+
+    def __init__(self):
+        super().__init__("provider call cancelled: replay_case_failed")
+
+
 class CaptureCache:
     def __init__(self, root, budget, automatic_retries=False,
                  reuse_captures=True):
@@ -155,6 +163,74 @@ class CaptureCache:
         self._key_locks = {}
         self._retry_failed = contextvars.ContextVar(
             f"retry_failed_{id(self)}", default=False)
+        self._call_context = contextvars.ContextVar(
+            f"call_context_{id(self)}", default=None)
+
+    @contextlib.contextmanager
+    def session_scope(self, session_id, replay_id=None,
+                      cancel_event=None):
+        """Bind a (session, replay, cancellation) context to the
+        request chains this thread runs inside the scope. Scoped via
+        ContextVar: unrelated threads and calls after the scope exits
+        see no context. Only session_id/replay_id are whitelisted into
+        capture metadata — never labels, user text, or tokens."""
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session scope requires a session id")
+        if replay_id is not None and not isinstance(replay_id, str):
+            raise ValueError("session scope replay_id must be a string")
+        if cancel_event is not None and not isinstance(
+                cancel_event, threading.Event):
+            raise ValueError("cancel_event must be a threading.Event")
+        token = self._call_context.set(
+            {"session_id": session_id, "replay_id": replay_id,
+             "cancel_event": cancel_event})
+        try:
+            yield
+        finally:
+            self._call_context.reset(token)
+
+    def _scoped_cancel_event(self):
+        context = self._call_context.get()
+        return (context or {}).get("cancel_event")
+
+    def _scope_cancelled(self):
+        event = self._scoped_cancel_event()
+        return event is not None and event.is_set()
+
+    @staticmethod
+    def _whitelisted_context(context):
+        """Only session_id/replay_id may leave a scope; the cancel
+        event and any other values never enter persisted metadata."""
+        return {key: context[key]
+                for key in ("session_id", "replay_id")
+                if context.get(key) is not None}
+
+    @staticmethod
+    def _log_suffix(context, chain_attempt, cancelled_late):
+        suffix = ""
+        if context is not None:
+            suffix = f" [session={context['session_id']}"
+            if context.get("replay_id"):
+                suffix += f" replay={context['replay_id']}"
+            suffix += f" attempt={chain_attempt}]"
+        if cancelled_late:
+            suffix += " (session cancelled; response ignored)"
+        return suffix
+
+    def _cancelled_result(self, last, attempts):
+        execution = copy.deepcopy(last) if last is not None else {}
+        context = self._call_context.get()
+        if context is not None:
+            execution["call_context"] = self._whitelisted_context(
+                context)
+        execution.update({
+            "status": "cancelled",
+            "cancellation_reason": "replay_case_failed",
+            "automatic_retry": {
+                "attempts": attempts,
+                "max_attempts": AUTOMATIC_RETRY_MAX,
+                "stop_reason": "session_cancelled"}})
+        return None, execution
 
     def stop_retries(self):
         """Cancel automatic retry chains; an in-flight network call
@@ -222,8 +298,14 @@ class CaptureCache:
             return None
         return max(backoff, float(requested))
 
-    def _obtain_once(self, provider, base, request, callback, adapter):
+    def _obtain_once(self, provider, base, request, callback, adapter,
+                     chain_attempt=1):
         """The original single-attempt capture/reuse semantics."""
+        context = self._call_context.get()
+        event = (context or {}).get("cancel_event")
+        if event is not None and event.is_set():
+            raise ProviderCallCancelled()
+        cancelled_late = False
         with self._lock:
             if self._reuse_captures:
                 path, record, number = self._latest_record(
@@ -236,6 +318,11 @@ class CaptureCache:
             reused = record is not None and (
                 record["ok"] or not self._retry_failed.get())
             if not reused:
+                # Recheck before charging a new call: a request queued
+                # behind the same-key lock must not execute after its
+                # session has failed.
+                if event is not None and event.is_set():
+                    raise ProviderCallCancelled()
                 retry = record is not None
                 if retry:
                     path = self._attempt_path(base, number + 1)
@@ -244,6 +331,8 @@ class CaptureCache:
                 self.new_calls += 1
                 call_number = self.new_calls
         if not reused:
+            # Once reserved, this attempt is in flight; cancellation
+            # discards its result and prevents any retry.
             start = time.perf_counter()
             try:
                 reply = callback()
@@ -255,7 +344,12 @@ class CaptureCache:
             record = {"provider": provider, "request": request, "ok": ok,
                       "reply": reply, "metadata": metadata,
                       "original_call_latency_ms": latency_ms,
-                      "origin": "hosted_replay"}
+                      "origin": "hosted_replay",
+                      "call_number": call_number,
+                      "chain_attempt": chain_attempt}
+            if context is not None:
+                record["call_context"] = self._whitelisted_context(
+                    context)
             if not ok:
                 rejected_draft = getattr(
                     adapter, "last_rejected_draft", None)
@@ -266,15 +360,23 @@ class CaptureCache:
                     "attempt_number": number + 1,
                     "retry_of_failed_capture": True,
                     "previous_capture_file": previous})
+            # A request already sent may finish; the capture is always
+            # retained for auditing, but a late answer to a cancelled
+            # session is never returned as usable.
+            cancelled_late = event is not None and event.is_set()
+            suffix = self._log_suffix(context, chain_attempt,
+                                      cancelled_late)
             with self._lock:
                 write_new(path, record)
                 print(f"Captured {provider} call {call_number}: "
-                      f"{'completed' if ok else 'failed'}", flush=True)
+                      f"{'completed' if ok else 'failed'}{suffix}",
+                      flush=True)
         execution = {"capture_file": path.name, "reused": reused,
                      "origin": record["origin"], "metadata": record["metadata"],
                      "original_call_latency_ms": record["original_call_latency_ms"]}
         for key in ("attempt_number", "retry_of_failed_capture",
-                    "previous_capture_file"):
+                    "previous_capture_file", "call_number",
+                    "chain_attempt", "call_context"):
             if key in record:
                 execution[key] = record[key]
         if not record["ok"]:
@@ -282,10 +384,15 @@ class CaptureCache:
                 execution["rejected_draft"] = copy.deepcopy(
                     record["rejected_draft"])
             return None, execution
+        if cancelled_late:
+            return None, execution
         return copy.deepcopy(record["reply"]), execution
 
     def _next_retry_stop(self, execution, attempts):
         """Decide the next wait, or the reason the chain ends."""
+        event = self._scoped_cancel_event()
+        if event is not None and event.is_set():
+            return "session_cancelled"
         if self._stop_retries.is_set():
             return "shutdown"
         if not _automatic_retryable(execution):
@@ -295,29 +402,52 @@ class CaptureCache:
         delay = self._retry_delay(attempts, execution)
         if delay is None:
             return "retry_after_too_long"
-        return "shutdown" if self._stop_retries.wait(delay) else None
+        if event is None:
+            return ("shutdown"
+                    if self._stop_retries.wait(delay) else None)
+        # Scoped sessions wake as soon as either the session cancel or
+        # the global shutdown event fires.
+        deadline = time.monotonic() + delay
+        while True:
+            if self._stop_retries.is_set():
+                return "shutdown"
+            if event.is_set():
+                return "session_cancelled"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            event.wait(min(0.05, remaining))
 
     def obtain(self, provider, request, callback, adapter):
         base = self.path(provider, request)
         with self._key_lock(base):
-            reply, execution = self._obtain_once(
-                provider, base, request, callback, adapter)
+            try:
+                reply, execution = self._obtain_once(
+                    provider, base, request, callback, adapter)
+            except ProviderCallCancelled:
+                return self._cancelled_result(None, 0)
+            attempts = 1
             if not (self._automatic_retries
                     and provider in AUTOMATIC_RETRY_PROVIDERS
                     and not execution["reused"]):
+                if reply is None and self._scope_cancelled():
+                    return self._cancelled_result(execution, attempts)
                 return reply, execution
-            attempts, stop = 1, "success" if reply is not None else None
+            stop = "success" if reply is not None else None
             while stop is None:
                 stop = self._next_retry_stop(execution, attempts)
                 if stop is not None:
                     break
-                with self.retry_failed_scope(True):
-                    try:
+                try:
+                    with self.retry_failed_scope(True):
                         reply, execution = self._obtain_once(
-                            provider, base, request, callback, adapter)
-                    except SystemExit:
-                        stop = "budget_exhausted"
-                        break
+                            provider, base, request, callback, adapter,
+                            chain_attempt=attempts + 1)
+                except ProviderCallCancelled:
+                    return self._cancelled_result(execution, attempts)
+                except SystemExit:
+                    stop = "budget_exhausted"
+                    break
                 attempts += 1
                 if reply is not None:
                     stop = "success"
@@ -325,6 +455,13 @@ class CaptureCache:
                 "attempts": attempts,
                 "max_attempts": AUTOMATIC_RETRY_MAX,
                 "stop_reason": stop}
+            if stop == "session_cancelled":
+                execution["status"] = "cancelled"
+                execution["cancellation_reason"] = "replay_case_failed"
+            if self._scope_cancelled():
+                # Cancellation observed after the final attempt (even a
+                # successful one) never yields a usable reply.
+                return self._cancelled_result(execution, attempts)
             return reply, execution
 
 

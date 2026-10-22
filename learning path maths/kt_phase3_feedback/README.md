@@ -463,6 +463,12 @@ real-learner validation.
    recomputing scores, observed evidence, maps, feedback, and requesting fresh
    frozen-model diagnostics at 20 and 40 answers. No retraining occurs.
    Fallbacks, unavailable diagnostics, and failed cases remain visibly labelled.
+   When a replay case fails, all queued or retrying provider work for that case's
+   session is cancelled so no orphan requests continue in the background.
+   An in-flight hosted call cannot be forcibly stopped — it may still finish and
+   its capture is retained for audit — but the late result is discarded and never
+   published. Provider call logs and captures are correlated with
+   `[session=… replay=… attempt=…]` so each attempt can be traced to its case.
 5. Select **Result version** to switch between the retained original and new runs.
    Summary shows score changes, changed candidate/text per audience, before/after
    wording, and maximum KT probability difference where both traces are available.

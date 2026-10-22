@@ -51,6 +51,7 @@ class ScenarioReplays:
                  "shadow_practice.py",
                  "assessment_worked_review.py", "worked_review_math.py",
                  "worked_first_context.py",
+                 "midpoint_feedback.py", "worked_example_selection.py",
                  "research_runtime.py", "active_payload.py")
         root = Path(__file__).parent
         paths = {name: root / name for name in names}
@@ -272,6 +273,9 @@ class ScenarioReplays:
                 "interpretation": "Changes relative to the retained original, not evidence of improvement."}
 
     def _run_case(self, run_id, index, row, submissions):
+        session_id = None
+        stage = "create_session"
+        submitted_count = 0
         try:
             with self.lock:
                 record = self._read(run_id)
@@ -288,29 +292,55 @@ class ScenarioReplays:
                                                   bank_mode=bank_mode,
                                                   feedback_variant=feedback_variant)
             session_id, token = created["session_id"], created["student_token"]
+            stage = "record_session"
             with self.lock:
                 record = self._read(run_id)
                 record["cases"][index]["session_id"] = session_id
                 self._save(record)
+            stage = "submit_response"
             for submission in submissions[row["scenario_id"]]:
                 if self.stop.is_set():
                     break
                 self.service.submit_response(session_id, token, submission)
+                submitted_count += 1
+            stage = "wait_for_jobs"
             while not self.stop.is_set():
                 if self.service._jobs_complete(session_id):
                     break
                 self.stop.wait(.05)
             if self.stop.is_set():
                 return
+            stage = "save_result"
             with self.service.lock:
                 detail = self.service.teacher_session(session_id)
                 self._save_result(detail)
+            stage = "compare_result"
             changes = self._changes(row["scenario_id"], detail)
             outcome = {"status": "complete", "changes": changes,
                        "diagnostics": {cp: block["diagnostics_job"]["status"] for cp, block in detail["checkpoints"].items()},
                        "provider_status": detail["provider_job"]["status"], "finished_at": utc_now()}
-        except Exception:
-            outcome = {"status": "failed", "reason": "replay_case_failed", "finished_at": utc_now()}
+        except Exception as exc:
+            failure_details = {"exception_type": type(exc).__name__,
+                               "stage": stage,
+                               "submitted_count": submitted_count}
+            # Stop any queued/in-flight provider work for this session
+            # so a failed case never leaves orphan retries running.
+            if session_id is not None:
+                try:
+                    self.service.cancel_replay_session(session_id)
+                except Exception as cleanup_exc:
+                    failure_details["cleanup_error_type"] = (
+                        type(cleanup_exc).__name__)
+            line = (f"Replay case failed [replay={run_id} "
+                    f"session={session_id or 'none'} stage={stage} "
+                    f"error={type(exc).__name__}]")
+            if "cleanup_error_type" in failure_details:
+                line += (f" cleanup="
+                         f"{failure_details['cleanup_error_type']}")
+            print(line, flush=True)
+            outcome = {"status": "failed", "reason": "replay_case_failed",
+                       "failure_details": failure_details,
+                       "finished_at": utc_now()}
         with self.lock:
             record = self._read(run_id)
             record["cases"][index].update(outcome)

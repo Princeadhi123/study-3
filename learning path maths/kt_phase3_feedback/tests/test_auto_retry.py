@@ -396,6 +396,209 @@ class AutomaticRetryTests(unittest.TestCase):
         self.assertNotIn("X-Upstream-Secret", blob)
 
 
+class SessionCancellationTests(AutomaticRetryTests):
+    """Per-session cancellation inside session_scope: a failed replay
+    case stops future attempts for its session only."""
+
+    def _real_cache(self, **kwargs):
+        kwargs.setdefault("automatic_retries", True)
+        return CaptureCache(self.root, None, **kwargs)
+
+    def _records(self):
+        return sorted(
+            (json.loads(path.read_text(encoding="utf-8"))
+             for path in self._captures()),
+            key=lambda record: record.get("chain_attempt", 0))
+
+    def test_scoped_retry_success_correlated_and_isolated(self):
+        # a: timeout then success under one scope; context is attached
+        # to both attempts, does not leak, and a healthy session with
+        # the same payload still makes its own call.
+        opener = SequenceOpener([TimeoutError("net"), _midpoint_reply()])
+        cache = self._real_cache(reuse_captures=False)
+        native = self._native(opener)
+        with cache.session_scope("sess-a", replay_id="run-1",
+                                 cancel_event=threading.Event()):
+            reply, execution = self._obtain(cache, native)
+        self.assertIsNotNone(reply)
+        self.assertEqual(len(opener.calls), 2)
+        self.assertEqual(execution["automatic_retry"], {
+            "attempts": 2, "max_attempts": AUTOMATIC_RETRY_MAX,
+            "stop_reason": "success"})
+        self.assertEqual(execution["chain_attempt"], 2)
+        self.assertEqual(execution["call_context"],
+                         {"session_id": "sess-a", "replay_id": "run-1"})
+        records = self._records()
+        self.assertEqual([r["chain_attempt"] for r in records], [1, 2])
+        self.assertEqual(len({r["call_number"] for r in records}), 2)
+        self.assertTrue(all(
+            r["call_context"] == {"session_id": "sess-a",
+                                  "replay_id": "run-1"}
+            for r in records))
+        # No context leak after the manager exits or into other threads.
+        self.assertIsNone(cache._call_context.get())
+        leaked = []
+        thread = threading.Thread(
+            target=lambda: leaked.append(cache._call_context.get()))
+        thread.start()
+        thread.join(timeout=10)
+        self.assertEqual(leaked, [None])
+        # Healthy session B, same payload, fresh calls: executes its own
+        # callback under its own context — never deduplicated across
+        # sessions.
+        opener_b = SequenceOpener([_midpoint_reply()])
+        native_b = self._native(opener_b)
+        with cache.session_scope("sess-b", replay_id="run-1",
+                                 cancel_event=threading.Event()):
+            reply_b, execution_b = self._obtain(cache, native_b)
+        self.assertIsNotNone(reply_b)
+        self.assertEqual(len(opener_b.calls), 1)
+        self.assertEqual(execution_b["call_context"],
+                         {"session_id": "sess-b", "replay_id": "run-1"})
+        self.assertEqual(execution_b["automatic_retry"]["attempts"], 1)
+
+    def test_scoped_pre_cancelled_never_calls(self):
+        # b: session already cancelled before obtain: zero callbacks,
+        # zero budget, no capture files.
+        opener = SequenceOpener([_midpoint_reply()])
+        cache = CaptureCache(self.root, 5, automatic_retries=True)
+        event = threading.Event()
+        event.set()
+        with cache.session_scope("sess-a", replay_id="run-1",
+                                 cancel_event=event):
+            reply, execution = self._obtain(cache, self._native(opener))
+        self.assertIsNone(reply)
+        self.assertEqual(len(opener.calls), 0)
+        self.assertEqual(cache.new_calls, 0)
+        self.assertEqual(self._captures(), [])
+        self.assertEqual(execution["status"], "cancelled")
+        self.assertEqual(execution["cancellation_reason"],
+                         "replay_case_failed")
+        self.assertEqual(execution["automatic_retry"], {
+            "attempts": 0, "max_attempts": AUTOMATIC_RETRY_MAX,
+            "stop_reason": "session_cancelled"})
+
+    def test_scoped_cancel_on_first_failure_stops_chain(self):
+        # c: first attempt fails retryable while the session cancels;
+        # no retry runs, the failure capture is retained.
+        event = threading.Event()
+
+        class CancellingOpener:
+            def __init__(self):
+                self.calls = []
+
+            def open(self, request, timeout=None):
+                self.calls.append(request)
+                event.set()
+                raise TimeoutError("net")
+
+        opener = CancellingOpener()
+        cache = self._real_cache()
+        with cache.session_scope("sess-a", cancel_event=event):
+            reply, execution = self._obtain(cache, self._native(opener))
+        self.assertIsNone(reply)
+        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(len(self._captures()), 1)
+        self.assertEqual(execution["status"], "cancelled")
+        self.assertEqual(execution["cancellation_reason"],
+                         "replay_case_failed")
+        self.assertEqual(execution["automatic_retry"]["attempts"], 1)
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "session_cancelled")
+        self.assertFalse(self._records()[0]["ok"])
+
+    def test_scoped_cancel_during_backoff_joins_promptly(self):
+        # d: cancelled while waiting out a long backoff; the worker
+        # wakes within the 50ms slice and exits.
+        opener = SequenceOpener([TimeoutError("n"), _midpoint_reply()])
+        cache = self._real_cache(reuse_captures=False)
+        cache._retry_delay = lambda attempts, execution: 10.0
+        event = threading.Event()
+        results = {}
+
+        def worker():
+            with cache.session_scope("sess-a", replay_id="run-1",
+                                     cancel_event=event):
+                results["a"] = self._obtain(cache, self._native(opener))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self._captures():
+            time.sleep(0.02)
+        self.assertTrue(self._captures())
+        event.set()
+        thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        reply, execution = results["a"]
+        self.assertIsNone(reply)
+        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "session_cancelled")
+        # A healthy parallel scope is unaffected by the cancelled one.
+        healthy_opener = SequenceOpener([_midpoint_reply()])
+        with cache.session_scope("sess-b",
+                                 cancel_event=threading.Event()):
+            reply_b, _ = self._obtain(cache, self._native(healthy_opener))
+        self.assertIsNotNone(reply_b)
+        self.assertEqual(len(healthy_opener.calls), 1)
+
+    def test_scoped_waiter_cancelled_behind_same_key_lock(self):
+        # e: B queued behind A on the same request key is cancelled
+        # while waiting; when A releases, B never runs a callback and
+        # never borrows A's execution.
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingOpener:
+            def __init__(self):
+                self.calls = []
+
+            def open(self, request, timeout=None):
+                self.calls.append(request)
+                entered.set()
+                release.wait(timeout=30)
+                return FakeResponse(_midpoint_reply())
+
+        opener = BlockingOpener()
+        native = self._native(opener)
+        cache = CaptureCache(self.root, 5, automatic_retries=True)
+        event_a, event_b = threading.Event(), threading.Event()
+        results = {}
+
+        def worker(tag, sid, event):
+            with cache.session_scope(sid, replay_id="run-1",
+                                     cancel_event=event):
+                results[tag] = self._obtain(cache, native)
+
+        thread_a = threading.Thread(
+            target=worker, args=("a", "sess-a", event_a))
+        thread_a.start()
+        self.assertTrue(entered.wait(timeout=10))
+        thread_b = threading.Thread(
+            target=worker, args=("b", "sess-b", event_b))
+        thread_b.start()
+        time.sleep(0.1)
+        event_b.set()
+        release.set()
+        thread_a.join(timeout=30)
+        thread_b.join(timeout=30)
+        self.assertFalse(thread_a.is_alive() or thread_b.is_alive())
+        reply_a, execution_a = results["a"]
+        reply_b, execution_b = results["b"]
+        self.assertIsNotNone(reply_a)
+        self.assertIsNone(reply_b)
+        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(cache.new_calls, 1)
+        self.assertEqual(execution_b["status"], "cancelled")
+        self.assertEqual(execution_b["automatic_retry"]["attempts"], 0)
+        self.assertNotIn("call_number", execution_b)
+        self.assertEqual(execution_b["call_context"]["session_id"],
+                         "sess-b")
+        self.assertNotEqual(execution_a.get("call_number"),
+                            execution_b.get("call_number"))
+
+
 class RetryAfterParsingTests(unittest.TestCase):
     """Malformed external Retry-After values never break telemetry."""
 
