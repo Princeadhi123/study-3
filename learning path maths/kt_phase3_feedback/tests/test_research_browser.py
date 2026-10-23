@@ -1477,6 +1477,114 @@ class ResearchBrowserTests(unittest.TestCase):
             f"document.querySelector('{card} input, {card} button')"))
         self.assertEqual(b.errors, [])
 
+    def test_failed_replay_overview(self):
+        # A case that fails mid-submission keeps its recorded answers
+        # but the overview must say the replay stopped — not that it is
+        # still in progress with a provider job never requested.
+        b = self.browser
+        library = self.service.research.library()
+        scenario_id = library["scenarios"][0]["id"]
+        original = self.service.submit_response
+        calls = {"count": 0}
+
+        def wrapped(session_id, token, submission):
+            calls["count"] += 1
+            if calls["count"] == 28:
+                raise PermissionError("test failure")
+            return original(session_id, token, submission)
+
+        with mock.patch.object(self.service, "submit_response",
+                               side_effect=wrapped):
+            with contextlib.redirect_stdout(io.StringIO()):
+                run = self.service.replays.start({
+                    "request_id": secrets.token_hex(16),
+                    "report_sha256": library["report_sha256"],
+                    "scenario_ids": [scenario_id],
+                    "provider_mode": "rules",
+                    "allow_provider_calls": False})
+                self.assertTrue(wait_for(
+                    lambda: self.service.replays.get(run["id"])["status"]
+                    not in ("queued", "running", "cancelling"),
+                    timeout=30))
+        finished = self.service.replays.get(run["id"])
+        self.assertEqual(finished["status"], "complete_with_errors")
+        case = finished["cases"][0]
+        self.assertEqual(case["status"], "failed")
+        sid = case["session_id"]
+        detail = self.service.replays.result(run["id"], scenario_id)
+        self.assertEqual(detail["answered_count"], 27)
+        self.assertEqual(detail["replay_execution"]["status"], "failed")
+        # Midpoint diagnostics are separate from generation and finish
+        # deterministically; read the detail only once they are ready.
+        self.assertTrue(wait_for(
+            lambda: (self.service._load_meta(sid)["checkpoints"]
+                     ["midpoint"].get("diagnostics_job") or {})
+                    .get("status") == "ready",
+            timeout=30))
+        detail = self.service.replays.result(run["id"], scenario_id)
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("Boolean(document.querySelector('#ws-detail'))")
+        b.js("const host = document.querySelector('#ws-detail')"
+             ".cloneNode(true); host.id = 'fixture-ws';"
+             " host.querySelectorAll('[id]').forEach(n => n.id = 'fx-' + n.id);"
+             " host.hidden = false; document.body.appendChild(host);"
+             " window.__fxView = createDetailView(host, {prefix: 'fx-'});")
+        ov = "document.querySelector('#fx-tab-overview')"
+        notice = f"{ov}.querySelector('.replay-failure-notice')"
+        b.js(f"window.__fxView.update({json.dumps(detail)})")
+        self.assertIn("Replay failed after 27 of 40 answers were "
+                      "recorded.", b.js(f"{notice}.textContent"))
+        stats = b.js(
+            f"[...{ov}.querySelectorAll('.ui-stat')]"
+            ".map(n => n.textContent)")
+        self.assertIn("StatusReplay failed", stats)
+        self.assertIn("Answered27/40", stats)
+        total = detail["observed_total"]
+        self.assertIn(
+            f"Observed total{total['correct']} / {total['out_of']}",
+            stats)
+        text = b.js(f"{ov}.textContent")
+        self.assertFalse(b.js(f"{ov}.textContent.includes"
+                              "('In progress')"))
+        self.assertFalse(b.js(f"{ov}.textContent.includes"
+                              "('resubmitted')"))
+        self.assertIn("End-feedback generation", text)
+        self.assertIn("Not started - replay stopped before completion",
+                      text)
+        self.assertIn("Unavailable - replay failed", text)
+        rows = b.js(
+            f"[...{ov}.querySelectorAll('.kv')]"
+            ".map(n => n.textContent)")
+        self.assertIn("midpoint diagnosticsready", rows)
+        # A plain teacher view of the same session has no
+        # replay_execution; the cancellation marker alone still conveys
+        # the failure.
+        teacher_view = self.service.teacher_session(sid)
+        self.assertNotIn("replay_execution", teacher_view)
+        b.js(f"window.__fxView.update({json.dumps(teacher_view)})")
+        self.assertIn("Replay failed after 27 of 40 answers were "
+                      "recorded.", b.js(f"{notice}.textContent"))
+        # A healthy in-progress session shows neither notice nor the
+        # failed status label.
+        fresh = self.service.create_session()
+        fresh_view = self.service.teacher_session(fresh["session_id"])
+        b.js(f"window.__fxView.update({json.dumps(fresh_view)})")
+        self.assertIsNone(b.js(notice))
+        self.assertIn("StatusIn progress",
+                      b.js(f"[...{ov}.querySelectorAll('.ui-stat')]"
+                           ".map(n => n.textContent)"))
+        # A retained original carries no failure warning.
+        retained = b.js("fetch('/api/teacher/scenarios/' "
+                        f"+ {json.dumps(scenario_id)})"
+                        ".then(r => r.json())")["detail"]
+        b.js(f"window.__fxView.update({json.dumps(retained)})")
+        self.assertIsNone(b.js(notice))
+        b.js("document.querySelector('#fixture-ws').remove()")
+        self.assertEqual(b.errors, [])
+
     def test_english_midpoint_display_student_and_teacher(self):
         b = self.browser
         bank = make_bank()

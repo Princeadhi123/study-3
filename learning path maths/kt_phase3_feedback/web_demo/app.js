@@ -2350,9 +2350,17 @@ function createDetailView(root, options = {}) {
 
   /* ---------- tabs ---------- */
 
+  function replayFailed() {
+    return (detail.replay_execution || {}).status === "failed" ||
+      (detail.background_work_cancelled || {}).reason === "replay_case_failed";
+  }
+
   function releaseStatusLabel() {
     if (detail.read_only) return "Saved read-only feedback";
     const status = (detail.feedback_delivery || {}).status;
+    if (replayFailed() && status === "not_ready") {
+      return "Unavailable - replay failed";
+    }
     if (!status) return "Not recorded";
     return {not_ready: "Not ready — the assessment is incomplete",
             awaiting_teacher_review:
@@ -2387,9 +2395,17 @@ function createDetailView(root, options = {}) {
     card.appendChild(DemoUI.heading("Session summary",
       "A quick view of recorded answers, feedback release, and diagnostics.",
       {eyebrow: "Session overview"}));
-    card.appendChild(el("p", detail.read_only ? detail.read_only_reason || "Retained original results — no computation was run when opening this case." :
-      detail.replay ? "New replay — the original answers were resubmitted through the running pipeline." :
-      "Live synthetic session.", "boundary-note"));
+    const failed = replayFailed();
+    const replayNotice = failed
+      ? `Replay failed after ${detail.answered_count} of 40 answers were recorded. ` +
+        "This replay has stopped. Start a new replay to try again."
+      : detail.read_only
+        ? detail.read_only_reason || "Retained original results — no computation was run when opening this case."
+        : detail.replay
+          ? "Replay session — answers are resubmitted through the running pipeline."
+          : "Live synthetic session.";
+    card.appendChild(el("p", replayNotice,
+      failed ? "boundary-note warn replay-failure-notice" : "boundary-note"));
     const snapshot = DemoUI.section("Assessment snapshot",
       "Observed outcomes recorded for this session.");
     const stats = el("div", null, "ui-stats");
@@ -2400,13 +2416,24 @@ function createDetailView(root, options = {}) {
     stats.appendChild(DemoUI.stat("Observed total",
       Number.isFinite(total.correct) && Number.isFinite(total.out_of)
         ? `${total.correct} / ${total.out_of}` : null));
-    stats.appendChild(DemoUI.stat("Status", statusLabel(detail.status)));
+    stats.appendChild(DemoUI.stat("Status",
+      failed ? "Replay failed" : statusLabel(detail.status)));
     snapshot.appendChild(stats);
     card.appendChild(snapshot);
     const feedback = DemoUI.section("Feedback & diagnostics",
       "Generation and release state for this session.");
-    feedback.appendChild(kv("Provider job",
-      `${detail.provider_job.status} (${detail.provider_job.provider_mode})`));
+    const endJob = detail.provider_job || {};
+    const endStatus = failed && endJob.status === "not_requested"
+      ? "Not started - replay stopped before completion"
+      : statusLabel(endJob.status || "not_requested");
+    feedback.appendChild(kv("End-feedback generation",
+      `${endStatus} (${endJob.provider_mode || "not recorded"})`));
+    const midpointJob = ((detail.checkpoints.midpoint || {}).phrasing_job || {});
+    if (midpointJob.status) {
+      feedback.appendChild(kv("Midpoint feedback generation",
+        failed && midpointJob.status === "cancelled"
+          ? "Cancelled - replay failed" : statusLabel(midpointJob.status)));
+    }
     feedback.appendChild(kv("Release status", releaseStatusLabel()));
     ["midpoint", "end"].forEach((cp) => {
       const block = detail.checkpoints[cp] || {};
@@ -2435,7 +2462,8 @@ function createDetailView(root, options = {}) {
     explore.appendChild(actions);
     card.appendChild(explore);
     card.appendChild(jsonDetails("Technical identity and provenance", {...detail.provenance,
-      technical_label: detail.label, session_id: detail.session_id, simulation: detail.simulated, replay: detail.replay},
+      technical_label: detail.label, session_id: detail.session_id, simulation: detail.simulated, replay: detail.replay,
+      replay_execution: detail.replay_execution, background_work_cancelled: detail.background_work_cancelled},
       "provenance"));
     pane.appendChild(card);
   }

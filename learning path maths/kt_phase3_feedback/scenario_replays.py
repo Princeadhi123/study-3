@@ -174,6 +174,10 @@ class ScenarioReplays:
                 detail = json.loads(self._result_path(row["session_id"]).read_text(encoding="utf-8"))
             detail.update({"read_only": True, "review_hashes": {}, "source_mode": "saved_replay",
                            "read_only_reason": "This replay belongs to an older bank, taxonomy, or policy version. Its result and review notes are preserved. Replay the scenario under the current version to add new reviews."})
+        detail["replay_execution"] = {
+            "status": row["status"],
+            "reason": row.get("reason"),
+            "failure_details": copy.deepcopy(row.get("failure_details"))}
         detail["replay_changes"] = row.get("changes")
         detail["export_url"] = f"/api/teacher/replays/{run_id}/cases/{case_id}/export"
         return detail

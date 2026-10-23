@@ -186,8 +186,9 @@ class ScenarioReplayTests(unittest.TestCase):
 
     def test_code_changes_require_server_restart(self):
         with patch.object(self.service.replays, "current_code", return_value={"changed": "digest"}):
+            body = self.request()
             with self.assertRaises(ResearchConflict):
-                self.service.replays.start(self.request())
+                self.service.replays.start(body)
 
     def test_cancel_stops_admitting_more_cases_and_busy_start_is_rejected(self):
         import threading
@@ -203,8 +204,9 @@ class ScenarioReplayTests(unittest.TestCase):
         with patch.object(self.service.diagnostics, "evaluate", side_effect=slow):
             run = self.service.replays.start(dict(self.request(3), max_parallel=1))
             self.assertTrue(entered.wait(5))
+            busy_request = self.request()
             with self.assertRaises(ResearchConflict):
-                self.service.replays.start(self.request())
+                self.service.replays.start(busy_request)
             self.service.replays.cancel(run["id"])
             release.set()
             final = self.wait(run["id"])
@@ -225,14 +227,15 @@ class ScenarioReplayTests(unittest.TestCase):
         self.addCleanup(self.service.close, wait=True)
         library = self.service.research.library()
         for invalid in (0, 9, "6", True, False):
+            body = {
+                "request_id": secrets.token_hex(16),
+                "report_sha256": library["report_sha256"],
+                "scenario_ids": [s["id"] for s in library["scenarios"]],
+                "provider_mode": "rules",
+                "allow_provider_calls": False,
+                "max_parallel": invalid}
             with self.assertRaises(ValueError):
-                self.service.replays.start({
-                    "request_id": secrets.token_hex(16),
-                    "report_sha256": library["report_sha256"],
-                    "scenario_ids": [s["id"] for s in library["scenarios"]],
-                    "provider_mode": "rules",
-                    "allow_provider_calls": False,
-                    "max_parallel": invalid})
+                self.service.replays.start(body)
         barrier = threading.Barrier(6, timeout=10)
         release = threading.Event()
         self.addCleanup(release.set)
@@ -534,6 +537,20 @@ class ReplaySessionCancellationTests(unittest.TestCase):
         service.cancel_replay_session(sid)
         self.assertEqual(
             service._load_meta(sid)["background_work_cancelled"], marker)
+        # The teacher view surfaces the marker, and the replay result
+        # carries sanitized execution state while the underlying
+        # recorded answers and in-progress status stay intact.
+        teacher = service.teacher_session(sid)
+        self.assertEqual(teacher["background_work_cancelled"], marker)
+        result = service.replays.result(run["id"], case["scenario_id"])
+        self.assertEqual(result["replay_execution"]["status"], "failed")
+        self.assertEqual(result["replay_execution"]["reason"],
+                         "replay_case_failed")
+        self.assertEqual(result["replay_execution"]["failure_details"]
+                         ["submitted_count"], 21)
+        self.assertEqual(result["status"], "in_progress")
+        self.assertEqual(result["answered_count"], 21)
+        self.assertNotIn("sk-secret-do-not-log", json.dumps(result))
         healthy = _BlockingOpener(
             self._fakes["response"](self._fakes["midpoint_reply"]()))
         healthy.release.set()
@@ -552,6 +569,12 @@ class ReplaySessionCancellationTests(unittest.TestCase):
         self.assertIsNotNone(fresh_meta["checkpoints"]["midpoint"]
                              ["provider_draft"])
         self.assertEqual(len(healthy.calls), 1)
+        self.assertIsNone(service.teacher_session(fresh)
+                          ["background_work_cancelled"])
+        fresh_result = service.replays.result(
+            second["id"], second["cases"][0]["scenario_id"])
+        self.assertEqual(fresh_result["replay_execution"]["status"],
+                         "complete")
 
     def test_late_midpoint_success_is_captured_but_discarded(self):
         # d: the in-flight call succeeds after the case already failed;

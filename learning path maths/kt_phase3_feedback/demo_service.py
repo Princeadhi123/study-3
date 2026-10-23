@@ -2789,6 +2789,8 @@ class DemoService:
                 "display_name": self._session_display(meta),
                 "created_at": meta["created_at"],
                 "replay": copy.deepcopy(meta.get("replay")),
+                "background_work_cancelled": copy.deepcopy(
+                    meta.get("background_work_cancelled")),
                 "simulated": meta["simulated"],
                 "feedback_variant": meta.get("feedback_variant"),
                 "status": session["status"],
