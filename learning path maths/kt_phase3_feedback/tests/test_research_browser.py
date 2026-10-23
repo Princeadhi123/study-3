@@ -3846,6 +3846,191 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
+    def test_completed_replay_refreshes_scoped_worked_example(self):
+        # A completed replay's aggregate row never changes again, but a
+        # teacher-triggered scoped worked-example job still mutates the
+        # live session detail. Natural polling must keep reloading the
+        # displayed case so the pending job resolves to each terminal
+        # state without a manual refresh or re-selection.
+        self.service.close(wait=True)
+        fixture_root = self.root / "scoped_fixture"
+        fixture_root.mkdir()
+        bank = make_grounded_bank()
+        source, report, _ = replay_fixture(
+            fixture_root, bank, make_grounded_taxonomy(bank), count=4)
+        gate = threading.Event()
+        calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+            fail = False
+
+            def generate(self, card):
+                calls.append(card["question_id"])
+                if not gate.wait(30):
+                    raise RuntimeError("test gate timed out")
+                if self.fail:
+                    raise RuntimeError("test provider failure")
+                return {"question_id": card["question_id"],
+                        "steps": ["Scoped replay explanation."],
+                        "reasoning_question": "Explain this checked step?"}
+
+        scoped = Scoped()
+        self.service = DemoService(
+            root=self.root / "scoped_data", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            diagnostics=fake_diagnostics(bank),
+            replay_report=report, replay_source=source,
+            provider_mode="hosted", generator=FullStubGenerator(),
+            worked_example_generator=scoped)
+        self.addCleanup(self.service.close, wait=True)
+        # Registered after close so it runs first and releases any
+        # parked adapter call before the service shuts down.
+        self.addCleanup(gate.set)
+        self.server.RequestHandlerClass.service = self.service
+        b = self.browser
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.js("document.querySelector('[data-workspace=library]').click()")
+        b.wait("document.querySelectorAll('.scenario-row').length === 4")
+
+        # Scenario index 1 is all-incorrect, producing ready worked cards.
+        known = {r["id"] for r in self.service.replays.list()["runs"]}
+        b.js("document.querySelectorAll('.scenario-row')[1].click()")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        b.js("document.querySelector('#replay-selected').click()")
+        b.wait("document.querySelector('dialog[open]')")
+        b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+             "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+        b.js("document.querySelector('#replay-provider-mode').value='hosted';"
+             "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+        b.js("document.querySelector('#replay-hosted-consent').click()")
+        b.js("document.querySelector('#confirm-replay').click()")
+        b.wait("!document.querySelector('dialog[open]')")
+        self.assertTrue(wait_for(
+            lambda: any(r["id"] not in known
+                        for r in self.service.replays.list()["runs"])),
+            "new replay run was not admitted")
+        run = next(r for r in self.service.replays.list()["runs"]
+                   if r["id"] not in known)
+        self.assertTrue(wait_for(
+            lambda: self.service.replays.get(run["id"])["status"]
+            == "complete"),
+            f"replay run {run['id']} did not complete")
+        b.wait(f"document.querySelector('.run-record[data-run-id=\"{run['id']}\"] > summary')"
+               ".textContent.includes('Complete')")
+        # Let one natural poll settle latestRunPayload on the completed
+        # list before the card is selected, so the polling path under
+        # test (unchanged run JSON) is the only one that can refresh
+        # the displayed detail afterwards.
+        b.js("new Promise((resolve) => setTimeout(resolve, 2200))")
+
+        case = self.service.replays.get(run["id"])["cases"][0]
+        sid = case["session_id"]
+        view = self.service.replays.result(run["id"], case["scenario_id"])
+        delivery = view["feedback_delivery"]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if any(cand["question_id"] != c["selected_question_id"]
+                   and cand.get("checked_solution_available")
+                   for cand in c["candidates"]))
+        target = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != choice["selected_question_id"]
+            and c.get("checked_solution_available"))
+
+        b.js(f"document.querySelector('#scenario-version').value={json.dumps(run['id'])};"
+             "document.querySelector('#scenario-version').dispatchEvent(new Event('change'))")
+        b.wait("!document.querySelector('#scenario-ws-detail').hidden")
+        ws = "#scenario-ws-detail"
+        b.js(f"document.querySelector('{ws} #scenario-ws-tabs "
+             "[data-tab=feedback]').click()")
+        cid = json.dumps(choice["candidate_id"])
+        sel = (f"document.querySelector('{ws} "
+               f".worked-example-select[data-candidate-id={cid}]')")
+        apply_btn = (f"{sel}.closest('fieldset')"
+                     ".querySelector('.worked-example-apply')")
+        b.wait(sel, timeout=30)
+
+        def apply_selection(question_id):
+            b.js(f"{sel}.value = {json.dumps(question_id)}; "
+                 f"{sel}.dispatchEvent(new Event('change'))")
+            b.wait(f"{apply_btn} && !{apply_btn}.disabled", timeout=15)
+            b.js(f"{apply_btn}.click()")
+            b.wait(f"document.querySelector('{ws} "
+                   ".end-feedback-waiting')", timeout=30)
+            self.assertFalse(b.js(
+                f"Boolean(document.querySelector('{ws} "
+                ".feedback-preview'))"))
+            self.assertFalse(b.js(
+                f"Boolean([...document.querySelectorAll('{ws} "
+                "button.primary')].find((n) => "
+                "n.textContent.startsWith('Approve')))"))
+
+        def example_job():
+            return self.service._load_meta(sid)["checkpoints"]["end"][
+                "worked_example_job"]
+
+        def release_status():
+            return b.js(f"document.querySelector('{ws} .release-status')"
+                        " && "
+                        f"document.querySelector('{ws} .release-status')"
+                        ".textContent") or ""
+
+        # Pending: the run list cannot change again, so only a reload of
+        # the live detail can resolve the busy state.
+        apply_selection(target["question_id"])
+        saved_list = copy.deepcopy(self.service.replays.list())
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: example_job()["status"] == "ready", timeout=30),
+            "scoped worked-example job did not reach ready")
+        b.wait(f"document.querySelector('{ws}').textContent"
+               ".includes('Scoped replay explanation.')", timeout=30)
+        self.assertFalse(b.js(
+            f"Boolean(document.querySelector('{ws} "
+            ".end-feedback-waiting'))"))
+        self.assertIn("Worked example generation", release_status())
+        self.assertIn("Ready", release_status())
+        b.wait(f"{sel} && !{sel}.closest('fieldset').disabled",
+               timeout=30)
+        choice_text = b.js(
+            f"document.querySelector('{ws} .worked-example-choice')"
+            ".textContent")
+        self.assertIn("explanation was regenerated", choice_text)
+        self.assertNotIn("being generated", choice_text)
+        self.assertEqual(saved_list, self.service.replays.list())
+        self.assertEqual([target["question_id"]], calls)
+        self.assertEqual(b.errors, [])
+
+        # Fallback: a failing adapter publishes the checked-steps warning
+        # through the same natural refresh, still without a manual
+        # refresh, re-selection, or any change to the run list.
+        gate.clear()
+        scoped.fail = True
+        another = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != target["question_id"]
+            and c.get("checked_solution_available"))
+        apply_selection(another["question_id"])
+        saved_list = copy.deepcopy(self.service.replays.list())
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: "application-checked steps because AI generation "
+                    "did not complete" in release_status(), timeout=30),
+            "fallback warning did not appear through natural polling")
+        self.assertFalse(b.js(
+            f"Boolean(document.querySelector('{ws} "
+            ".end-feedback-waiting'))"))
+        self.assertEqual("fallback", example_job()["status"])
+        self.assertEqual(saved_list, self.service.replays.list())
+        self.assertEqual([target["question_id"], another["question_id"]],
+                         calls)
+        self.assertEqual(b.errors, [])
+
     def test_replay_progress_refresh_and_stage_notice(self):
         # Question-first grounded sessions now wait for terminal end
         # diagnostics before the provider call, like worked-first: a

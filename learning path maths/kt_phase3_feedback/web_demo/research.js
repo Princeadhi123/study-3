@@ -362,14 +362,10 @@ function initResearchWorkspace({mountDetail, getConfig}) {
         runs = payload.runs;
         renderRuns(payload);
         updateVersions();
-        if (chosen && selectedRun) await loadCase(chosen);
-      } else if (chosen && selectedRun) {
-        const row = runs.find((r) => r.id === selectedRun)
-          ?.cases.find((c) => c.scenario_id === chosen);
-        if (row && (row.status === "queued" || row.status === "running")) {
-          await loadCase(chosen);
-        }
       }
+      // A completed replay can still have teacher-triggered generation
+      // running. Its live detail changes independently of the run list.
+      if (chosen && selectedRun) await loadCase(chosen);
     } catch (err) {
       const node = $("#replay-history");
       if (node) {

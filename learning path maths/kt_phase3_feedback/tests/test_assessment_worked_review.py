@@ -3207,13 +3207,38 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
             provider_mode="hosted", generator=Full(),
             worked_example_generator=Scoped(),
             diagnostics=self._diagnostics())
-        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self.addCleanup(gate.set)
+        created = service.create_session(feedback_variant="worked_first")
+        sid, token = created["session_id"], created["student_token"]
+        for row in grounded_rows(self.bank, SELECTION_WRONG):
+            service.submit_response(sid, token, row)
         self._wait(service, sid)
         before_job = copy.deepcopy(
             service._load_meta(sid)["provider_job"])
         self.assertEqual(
             before_job["executions"]["student"]["generator"],
             full_execution)
+        before_review = copy.deepcopy(
+            service._load_meta(sid)["checkpoints"]["end"]["student_review"])
+        self.assertEqual(
+            before_review["trace"]["guardrails_version"],
+            "provider_full_narrative_shape_checked_v2")
+        self.assertEqual(
+            set(before_review["message"]["section_sources"].values()),
+            {"provider"})
+
+        def assert_narrative_preserved():
+            review = service._load_meta(sid)["checkpoints"]["end"][
+                "student_review"]
+            self.assertEqual(review["message"], before_review["message"])
+            self.assertEqual(review.get("provider_context"),
+                             before_review.get("provider_context"))
+            for key in ("phrasing_source", "guardrails_version",
+                        "section_sources", "generation_prompt_version",
+                        "validation", "generation_context_version"):
+                self.assertEqual(review["trace"].get(key),
+                                 before_review["trace"].get(key), key)
+
         pct, delivery = self._pct_choice(service, sid)
         res = service.select_worked_example(sid, {
             "message_sha256": delivery["preview_sha256"],
@@ -3223,10 +3248,15 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                          "pending")
         self.assertEqual(service._load_meta(sid)["provider_job"],
                          before_job)
+        assert_narrative_preserved()
         gate.set()
         self._wait_scoped(service, sid, {"ready"})
         self.assertEqual(service._load_meta(sid)["provider_job"],
                          before_job)
+        self.assertEqual(
+            service._load_meta(sid)["checkpoints"]["end"]
+            ["provider_job"], before_job)
+        assert_narrative_preserved()
 
     def test_hosted_scoped_success_keeps_saved_structured_edit(self):
         gate = threading.Event()

@@ -2950,8 +2950,8 @@ class DemoService:
                     "preview_sha256": current}
 
     def select_worked_example(self, session_id, body):
-        """Teacher override of the recommended worked example; rebuilds
-        the whole draft deterministically before approval only."""
+        """Replace one worked-example card before approval, preserving
+        the feedback narrative and its generation provenance."""
         if (not isinstance(body, dict)
                 or not {"message_sha256", "candidate_id",
                         "question_id"} <= set(body)
