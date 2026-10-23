@@ -1553,6 +1553,80 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertEqual(result["original"], 0)
         self.assertEqual(b.errors, [])
 
+    def test_math_text_is_readable_and_safe(self):
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        R_SQRT = r"\(\sqrt{4}\)"
+        R_TEX = r"\(x\)"
+        R_NESTED = r"\frac{1}{\frac{2}{3}}"
+        payload = {
+            "sections": [
+                {"title": "Review focus",
+                 "text": "Fraction work such as 3⁄6 is revisited below."}],
+            "review_examples": [
+                {"source": "incorrect_assessment_response",
+                 "question_id": "q1",
+                 "prompt": "3⁄6 · 10⁄1",
+                 "options": ["30⁄6", "6⁄24"],
+                 "selected_answer": "6⁄24",
+                 "correct_answer": "30⁄6",
+                 "steps": [
+                     r"Multiply: \(\frac{3\times10}{6\times1}"
+                     r"=\frac{30}{6}=5\).",
+                     r"A mixed number example: \(3\tfrac{4}{5}\)."],
+                 "reasoning_question":
+                     r"Why is \(\frac{30}{6}\) equal to 5? "
+                     "<img src=x onerror=alert(1)>"}],
+            "practice_activities": [
+                {"status": "selected",
+                 "message": "Selected practice.",
+                 "question": {"skill_name": "Fractions",
+                              "concept_name": "Adding fractions",
+                              "text": "1⁄2 + 1⁄4",
+                              "options": ["3⁄4", "2⁄6"]}}]}
+        result = b.js(
+            "(() => { const host = document.createElement('div');"
+            "document.body.appendChild(host);"
+            f"const payload = {json.dumps(payload)};"
+            "const before = JSON.stringify(payload);"
+            "renderStructuredFeedback(host, payload);"
+            "const text = host.textContent;"
+            f"const ta = el('textarea', {json.dumps(R_TEX)});"
+            "return {has36: text.includes('3/6'),"
+            "has101: text.includes('10/1'),"
+            "has306: text.includes('30/6'),"
+            "hasGrouped: text.includes('(3 × 10)/(6 × 1)'),"
+            "hasMixed: text.includes('3 4/5'),"
+            "hasCalc: text.includes('Calculate: 1/2 + 1/4.'),"
+            f"noFrac: !text.includes({json.dumps(chr(92) + 'frac')}),"
+            f"noTfrac: !text.includes({json.dumps(chr(92) + 'tfrac')}),"
+            f"noDelim: !text.includes({json.dumps(chr(92) + '(')}),"
+            "imgLiteral: text.includes('<img src=x onerror=alert(1)>'),"
+            "imgs: host.querySelectorAll('img').length,"
+            "scripts: host.querySelectorAll('script').length,"
+            "unchanged: JSON.stringify(payload) === before,"
+            f"sqrtRaw: readableMathText({json.dumps(R_SQRT)}),"
+            f"nested: readableMathText({json.dumps(R_NESTED)}),"
+            "taRaw: ta.value}; })()")
+        self.assertTrue(result["has36"])
+        self.assertTrue(result["has101"])
+        self.assertTrue(result["has306"])
+        self.assertTrue(result["hasGrouped"])
+        self.assertTrue(result["hasMixed"])
+        self.assertTrue(result["hasCalc"])
+        self.assertTrue(result["noFrac"])
+        self.assertTrue(result["noTfrac"])
+        self.assertTrue(result["noDelim"])
+        self.assertTrue(result["imgLiteral"])
+        self.assertEqual(result["imgs"], 0)
+        self.assertEqual(result["scripts"], 0)
+        self.assertTrue(result["unchanged"])
+        self.assertEqual(result["sqrtRaw"], "\\(\\sqrt{4}\\)")
+        self.assertEqual(result["nested"], "1/(2/3)")
+        self.assertEqual(result["taRaw"], "\\(x\\)")
+        self.assertEqual(b.errors, [])
+
     def test_concise_summary_table_teacher_and_student(self):
         b = self.browser
         wrong = [positions(self.bank, "pct", 0)[0],

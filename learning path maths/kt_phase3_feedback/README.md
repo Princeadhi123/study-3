@@ -284,7 +284,7 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v7`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v8`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the selected review questions (recorded prompt, options,
@@ -336,11 +336,17 @@ recorded at creation and never reinterpreted afterwards:
   midpoint and end feedback; there is no phrase-based wording warning.
   Structural and security checks remain hard rejections. Wording is not
   fact-verified, and prompt instructions do not guarantee that internal
-  terminology never appears. Prompt versions (single-topic v5,
-  two-topic v9, midpoint v3, worked-first v7) distinguish new requests
-  from prior
-  captures. Existing captures remain unchanged; a fresh hosted call
-  happens only when the user explicitly starts one.
+  terminology never appears. Prompt versions (single-topic v6,
+  two-topic v10, midpoint v4, worked-first v8, selected worked-example v3)
+  distinguish new requests from prior captures. Existing captures remain
+  unchanged; a fresh hosted call happens only when the user explicitly
+  starts one.
+
+  Generated mathematics is requested as plain text with explicit grouping.
+  The display normalizes fraction slashes and converts supported LaTeX
+  fractions and arithmetic operators to readable text. Unsupported notation
+  stays visible, and text is never interpreted as HTML. Stored question and
+  answer records, saved drafts, and editable source text are preserved.
 
   Midpoint has a hosted Aitta rewording path: after answer 20 a hosted
   session queues one midpoint generation job — up to three provider
@@ -639,7 +645,7 @@ Aitta (current `aligned_two_topic` mode):
   deterministic steps, explanations, reasoning questions, or the
   baseline sections), and safe per-topic practice status/task
   descriptions (prompt
-  `aitta_assessment_grounded_two_topic_feedback_v9`) — **no** raw bank or
+  `aitta_assessment_grounded_two_topic_feedback_v10`) — **no** raw bank or
   responses, answer indices, practice answer keys, raw practice
   question/options, or KT probabilities;
 - does not score or select questions or topics; it authors worked-review

@@ -293,12 +293,13 @@ class FullFeedbackTests(unittest.TestCase):
             self.assertEqual(
                 reply["sections"]["next_steps"], accepted)
 
-    def test_prompt_version_v5_request_and_isolation(self):
+    def test_prompt_version_v6_request_and_isolation(self):
         self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION,
-                         "aitta_feedback_with_practice_v5")
+                         "aitta_feedback_with_practice_v6")
         for stale in ("aitta_feedback_with_practice_v2",
                       "aitta_feedback_with_practice_v3",
-                      "aitta_feedback_with_practice_v4"):
+                      "aitta_feedback_with_practice_v4",
+                      "aitta_feedback_with_practice_v5"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1038,10 +1039,10 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
-    def test_v9_prompt_wording_contract(self):
+    def test_v10_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v9")
+            "aitta_assessment_grounded_two_topic_feedback_v10")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1072,7 +1073,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v9")
+            "aitta_assessment_grounded_two_topic_feedback_v10")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
@@ -1081,7 +1082,8 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 "aitta_assessment_grounded_two_topic_feedback_v5",
                 "aitta_assessment_grounded_two_topic_feedback_v6",
                 "aitta_assessment_grounded_two_topic_feedback_v7",
-                "aitta_assessment_grounded_two_topic_feedback_v8"):
+                "aitta_assessment_grounded_two_topic_feedback_v8",
+                "aitta_assessment_grounded_two_topic_feedback_v9"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale

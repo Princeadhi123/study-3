@@ -4,12 +4,13 @@ import json
 import threading
 
 from aitta_generator import AittaGenerationError
+from feedback_language import MATH_NOTATION_INSTRUCTIONS
 from full_feedback import (
     FullFeedbackAittaGenerator, provider_review_examples,
     validate_worked_reviews)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
-PROMPT_VERSION = "aitta_selected_worked_example_v2"
+PROMPT_VERSION = "aitta_selected_worked_example_v3"
 MAX_TOKENS = 1800
 INSTRUCTIONS = (
     "Write an English teaching explanation for exactly one synthetic "
@@ -43,6 +44,7 @@ INSTRUCTIONS = (
     "reasoning_question must be one nonempty English plain-text string of "
     "at most 600 characters asking the student to explain the mathematics "
     "in this question. Do not include markup or extra keys."
+    + MATH_NOTATION_INSTRUCTIONS
 )
 
 SCHEMA = "phase3_selected_worked_example_v2"

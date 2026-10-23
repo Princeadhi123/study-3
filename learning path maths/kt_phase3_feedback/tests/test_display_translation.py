@@ -84,6 +84,38 @@ class DisplayTranslationTests(unittest.TestCase):
         for raw, wanted in zip(escaped, expected):
             self.assertEqual(self.question_en(raw), wanted)
 
+    def test_fraction_question_translations_preserve_operands(self):
+        cases = (
+            ("3/6 · 6/5", "Calculate: 3/6 × 6/5."),
+            ("2/3 + 2/6", "Calculate: 2/3 + 2/6."),
+            ("2/3 · 10/8", "Calculate: 2/3 × 10/8."),
+            ("1/2 + 1/4", "Calculate: 1/2 + 1/4."),
+        )
+        for raw, expected in cases:
+            for text in (raw, raw.replace("/", "⁄")):
+                with self.subTest(text=text):
+                    self.assertEqual(self.question_en(text), expected)
+        self.assertEqual(self.question_en("12⁄7"), "12/7")
+
+    def test_readable_math_grouping_and_unsupported_notation(self):
+        cases = (
+            (r"\(\frac{3\times10}{6\times1}=\frac{30}{6}=5\)",
+             "(3 × 10)/(6 × 1)=30/6=5"),
+            (r"\(3\tfrac{4}{5}\)", "3 4/5"),
+            (r"\frac{1}{\frac{2}{3}}", "1/(2/3)"),
+            (r"\frac{\frac{1}{2}}{3}", "(1/2)/3"),
+            (r"6\div2", "6 ÷ 2"),
+            (r"3\cdot4", "3 × 4"),
+            (r"\(\sqrt{4}\)", r"\(\sqrt{4}\)"),
+            (r"\frac{1}{2}+\sqrt{4}", r"\frac{1}{2}+\sqrt{4}"),
+            (r"\timescale", r"\timescale"),
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    self.js(f"readableMathText({json.dumps(raw)})")[0],
+                    expected)
+
     def test_real_whitespace_normalizes(self):
         actual = "Sievennä lauseke:\r\n\n  5v + 2v"
         self.assertEqual(self.question_en(actual), "Simplify: 5v + 2v")

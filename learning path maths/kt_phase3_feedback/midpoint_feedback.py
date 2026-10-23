@@ -18,7 +18,7 @@ from full_feedback import (
     validate_full_reply)
 
 SCHEMA = "phase3_midpoint_feedback_generation_v1"
-PROMPT_VERSION = "aitta_midpoint_check_in_v3"
+PROMPT_VERSION = "aitta_midpoint_check_in_v4"
 MESSAGE_VERSION = "phase3_student_midpoint_llm_v1"
 CANDIDATE_ID = "midpoint_check_in"
 MIDPOINT_MAX_TOKENS = 1536

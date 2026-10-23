@@ -1,4 +1,18 @@
 """Shared plain-language guidance for generated assessment feedback."""
+MATH_NOTATION_INSTRUCTIONS = (
+    "\nMathematical notation: the Unicode fraction slash (⁄) means division, "
+    "just like /. Read all digits on each side as the numerator and "
+    "denominator of one fraction. For example, 12⁄7 means 12/7, not a "
+    "mixed number. Do not invent a whole-number part, change any digits, "
+    "or substitute a different fraction. Before solving, read the exact "
+    "operands and operation from the supplied question. Only introduce "
+    "mixed-number conversion when a mixed number is explicitly present. "
+    "Write generated mathematics as readable plain text, such as 2/3, "
+    "(2 × 4)/(3 × 5), and 1 2/3 for a mixed number. Use parentheses to "
+    "preserve grouping. Do not use LaTeX commands or math delimiters in "
+    "sections, steps, or reasoning questions. Preserve copied identifiers "
+    "and the supplied question and answer records exactly."
+)
 PLAIN_LANGUAGE_INSTRUCTIONS = (
     "\nLanguage check before returning the JSON: write all narrative sections "
     "and any worked-review steps or reasoning questions in everyday English "
@@ -19,4 +33,5 @@ PLAIN_LANGUAGE_INSTRUCTIONS = (
     "terminology before returning it. Preserve the required JSON keys and "
     "copied identifiers exactly, and return only the requested JSON without "
     "a report of this language check."
+    + MATH_NOTATION_INSTRUCTIONS
 )

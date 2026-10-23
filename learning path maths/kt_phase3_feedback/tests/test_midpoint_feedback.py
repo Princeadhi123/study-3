@@ -95,6 +95,17 @@ class MidpointInputTests(unittest.TestCase):
         self.assertEqual(self.input["checkpoint"], "midpoint")
         self.assertEqual(self.input["evidence"]["total"]["out_of"], 20)
 
+    def test_prompt_version_v4_rejects_previous_requests(self):
+        self.assertEqual(PROMPT_VERSION, "aitta_midpoint_check_in_v4")
+        opener = RecordingOpener(
+            wire_reply(candidate_id=CANDIDATE_ID, sections=AUTHORED))
+        generator = MidpointAittaGenerator(
+            AittaGenerator(API_KEY, BASE_URL, model=MODEL, opener=opener))
+        payload = dict(self.input, prompt_version="aitta_midpoint_check_in_v3")
+        with self.assertRaises(ValueError):
+            generator.generate(payload)
+        self.assertEqual(opener.calls, [])
+
     def test_end_evidence_rejected(self):
         with self.assertRaises(ValueError):
             build_midpoint_input(self.end_evidence)

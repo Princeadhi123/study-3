@@ -80,6 +80,30 @@ class BuildInputTests(unittest.TestCase):
         self.assertNotIn("sections", built)
         self.assertNotIn("review_examples", built)
 
+    def test_math_notation_instructions_in_all_prompts(self):
+        from feedback_language import MATH_NOTATION_INSTRUCTIONS
+        from full_feedback import (
+            FULL_FEEDBACK_INSTRUCTIONS, MULTI_FULL_FEEDBACK_INSTRUCTIONS)
+        from worked_first_context import INSTRUCTIONS as WF_INSTRUCTIONS
+        from midpoint_feedback import INSTRUCTIONS as MIDPOINT_INSTRUCTIONS
+        for instructions in (FULL_FEEDBACK_INSTRUCTIONS,
+                             MULTI_FULL_FEEDBACK_INSTRUCTIONS,
+                             WF_INSTRUCTIONS,
+                             MIDPOINT_INSTRUCTIONS,
+                             worked_example_generation.INSTRUCTIONS):
+            self.assertIn(MATH_NOTATION_INSTRUCTIONS, instructions)
+
+    def test_fraction_records_not_mutated(self):
+        card = make_card(prompt="3⁄6 · 10⁄1",
+                         options=["30⁄6", "6⁄24"],
+                         selected_answer="6⁄24",
+                         correct_answer="30⁄6")
+        built = build_input(card)
+        self.assertEqual(built["prompt"], "3⁄6 · 10⁄1")
+        self.assertEqual(built["options"], ["30⁄6", "6⁄24"])
+        self.assertEqual(built["selected_answer"], "6⁄24")
+        self.assertEqual(built["correct_answer"], "30⁄6")
+
     def test_no_solution_fields_reach_request(self):
         card = make_card(checked_steps=["DISTINCT CHECKED STEP"],
                          checked_reasoning_question="DISTINCT CHECKED WHY",

@@ -1,7 +1,7 @@
 from feedback_language import PLAIN_LANGUAGE_INSTRUCTIONS
 
 FULL_FEEDBACK_SCHEMA = "phase3_full_feedback_generation_v2"
-FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v5"
+FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v6"
 FULL_FEEDBACK_MAX_TOKENS = 3072
 FULL_FEEDBACK_SECTION_MAX_CHARS = 2000
 FULL_FEEDBACK_SECTION_KEYS = (
@@ -91,7 +91,7 @@ FULL_FEEDBACK_INSTRUCTIONS = (
 
 
 MULTI_FULL_FEEDBACK_SCHEMA = "phase3_multi_topic_feedback_generation_v2"
-MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v9"
+MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v10"
 MULTI_FEEDBACK_GUARDRAILS_VERSION = "application_owned_multi_feedback_v1"
 PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION = (
     "provider_full_narrative_shape_checked_v2")

@@ -281,7 +281,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v7")
+                         "aitta_worked_first_evidence_author_v8")
         # The wire context carries one shared task description per
         # graph leaf; the 40 records still join only by ids.
         wf = context["worked_first_context"]
@@ -856,7 +856,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
         self.assertEqual(context["prompt_version"],
                          MULTI_FULL_FEEDBACK_PROMPT_VERSION)
-        self.assertTrue(context["prompt_version"].endswith("_v9"))
+        self.assertTrue(context["prompt_version"].endswith("_v10"))
         self.assertNotIn("assessment_context", context)
         self.assertNotIn("worked_first_context", context)
         instructions = body["messages"][0]["content"]

@@ -35,7 +35,7 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Calculate: 8 \u00d7 (7 + 1 \u00d7 1).",
   "10 litraa mansikoita maksaa 25 euroa. Kuinka paljon yksi litra mansikoita maksaa?":
     "Ten litres of strawberries cost EUR 25. How much does one litre cost?",
-  "3\u20446 \u00b7 6\u20445":
+  "3/6 \u00b7 6/5":
     "Calculate: 3/6 \u00d7 6/5.",
   "Kuinka paljon on 25 % luvusta 100?":
     "What is 25% of 100?",
@@ -75,7 +75,7 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Calculate: 4 \u00d7 (2 + 2) \u00f7 4.",
   "Elsa ostaa 12 kappaletta haarukoita. 20 haarukkaa maksaa 40 euroa. Paljonko Elsan ostokset maksavat?":
     "Elsa buys 12 forks. Twenty forks cost EUR 40. How much do Elsa's forks cost?",
-  "2\u20443 + 2\u20446":
+  "2/3 + 2/6":
     "Calculate: 2/3 + 2/6.",
   "Mist\u00e4 luvusta 10 % on luku 7?":
     "10% of what number is 7?",
@@ -91,7 +91,7 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Calculate: 7 + 22 + 3 \u00d7 5.",
   "2,5 desilitran limut\u00f6lkki maksaa 2,65 euroa. Mik\u00e4 on limun litrahinta?":
     "A 2.5-decilitre can of soft drink costs EUR 2.65. What is its price per litre?",
-  "2\u20443 \u00b7 10\u20448":
+  "2/3 \u00b7 10/8":
     "Calculate: 2/3 \u00d7 10/8.",
   "Mist\u00e4 raham\u00e4\u00e4r\u00e4st\u00e4 95 % on 760 \u20ac?":
     "95% of what amount of money is EUR 760?",
@@ -99,7 +99,7 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Calculate: 110 \u00f7 10.",
   "2 litraa limua maksaa 3 euroa. Puolen litran pullo samaa limua maksaa 1,50 euroa. Kuinka paljon kalliimpi litrahinta on puolen litran pullossa kuin kahden litra pullossa?":
     "Two litres of soft drink cost EUR 3. A half-litre bottle of the same drink costs EUR 1.50. How much higher is the price per litre in the half-litre bottle than in the two-litre bottle?",
-  "1\u20442 + 1\u20444":
+  "1/2 + 1/4":
     "Calculate: 1/2 + 1/4.",
   "Montako prosenttia luku 4 on luvusta 200?":
     "What percentage of 200 is 4?",
@@ -107,11 +107,34 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
     "Norwegian dragons practise making loops in the air. Younger dragons can naturally make more consecutive loops than older dragons. The highest number of consecutive loops is 28. At their best, the oldest dragons make only one quarter of that record. What is the greatest number of consecutive loops the old dragons can make?",
 });
 
+// Presentation only. Keep stored drafts and editable source text unchanged.
+// Unsupported notation stays visible; never interpret generated text as HTML.
+function readableMathText(value) {
+  const original = String(value ?? "").replace(/⁄/g, "/");
+  if (!/\\(?:[dt]?frac|times|cdot|div)(?![a-zA-Z])/.test(original))
+    return original;
+  let text = original.replace(/(\d)(?=\\[dt]?frac\b)/g, "$1 ")
+    .replace(/\\(?:times|cdot)(?![a-zA-Z])/g, " × ")
+    .replace(/\\div(?![a-zA-Z])/g, " ÷ ");
+  const operand = (part) => /^-?\d+(?:\.\d+)?$/.test(part.trim())
+    ? part.trim() : `(${part.trim()})`;
+  for (let i = 0; i < 12; i += 1) {
+    const next = text.replace(/\\[dt]?frac\{([^{}]*)\}\{([^{}]*)\}/g,
+      (_, numerator, denominator) => `${operand(numerator)}/${operand(denominator)}`);
+    if (next === text) break;
+    text = next;
+  }
+  text = text.replace(/\\[()[\]]/g, "");
+  // Do not partially rewrite an expression we cannot represent faithfully.
+  if (/\\[a-zA-Z]|[{}]/.test(text)) return original;
+  return text;
+}
+
 /* Presentation only: some frozen source prompts carry literal backslash-n
    sequences; fold them (and real whitespace) away before display. Does not
    decode other escapes or alter stored data. */
 function normalizeDisplayText(value) {
-  return String(value ?? "")
+  return readableMathText(value)
     .replace(/\\r\\n|\\r|\\n/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -241,7 +264,10 @@ const statusLabel = (value) => ({not_requested: "Not started", pending: "Process
 
 function el(tag, text, className) {
   const node = document.createElement(tag);
-  if (text !== undefined && text !== null) node.textContent = text;
+  if (text !== undefined && text !== null) {
+    node.textContent = /^(textarea|input|pre|code)$/i.test(tag)
+      ? text : readableMathText(text);
+  }
   if (className) node.className = className;
   return node;
 }

@@ -440,7 +440,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v7")
+            "aitta_worked_first_evidence_author_v8")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")
