@@ -2,11 +2,12 @@
 import copy
 import math
 
+from feedback_language import PLAIN_LANGUAGE_INSTRUCTIONS
 from research_content_descriptions import MATHEMATICAL_TASKS
 
 CONTEXT_VERSION = "worked_first_assessment_research_context_v2"
 SCHEMA = "phase3_worked_first_feedback_generation_v1"
-PROMPT_VERSION = "aitta_worked_first_evidence_author_v6"
+PROMPT_VERSION = "aitta_worked_first_evidence_author_v7"
 WF_MAX_TOKENS = 4096
 KT_BOUNDARY = (
     "Experimental pre-answer predictions, not post-assessment mastery, "
@@ -121,6 +122,7 @@ INSTRUCTIONS = (
     "match that template. Neither a match nor a difference establishes "
     "factual correctness. Ground every student-facing claim in the supplied "
     "evidence and leave unsupported interpretations unstated."
+    + PLAIN_LANGUAGE_INSTRUCTIONS
 )
 
 

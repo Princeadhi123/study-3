@@ -33,7 +33,7 @@ from feedback_practice import resolve_practice
 from full_feedback import (
     CachedFullFeedbackGenerator, FullFeedbackAittaGenerator,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
-    build_multi_full_input, feedback_wording_warnings,
+    build_multi_full_input,
     validate_worked_reviews)
 from replay_provider_scenarios import CaptureCache
 from worked_first_context import (
@@ -281,7 +281,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v6")
+                         "aitta_worked_first_evidence_author_v7")
         # The wire context carries one shared task description per
         # graph leaf; the 40 records still join only by ids.
         wf = context["worked_first_context"]
@@ -849,13 +849,14 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(len(opener.calls), 1)
         body = opener.calls[0]["body"]
         context = json.loads(body["messages"][1]["content"])
-        # The grounded multi request keeps the multi schema/v7 version;
-        # the raw 40-record assessment context stays worked-first-only
-        # and is never placed on the question-first wire.
+        # The grounded multi request keeps the multi schema/current
+        # version; the raw 40-record assessment context stays
+        # worked-first-only and is never placed on the question-first
+        # wire.
         self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
         self.assertEqual(context["prompt_version"],
                          MULTI_FULL_FEEDBACK_PROMPT_VERSION)
-        self.assertTrue(context["prompt_version"].endswith("_v8"))
+        self.assertTrue(context["prompt_version"].endswith("_v9"))
         self.assertNotIn("assessment_context", context)
         self.assertNotIn("worked_first_context", context)
         instructions = body["messages"][0]["content"]
@@ -1045,11 +1046,11 @@ class WorkedReviewWireTests(unittest.TestCase):
         snapshot = service.snapshot(sid, token)
         self.assertNotIn("rejected_draft", json.dumps(snapshot))
 
-    def test_internal_process_wording_reaches_teacher_as_warning(self):
+    def test_internal_process_wording_does_not_add_warning(self):
         # A provider draft carrying internal application terminology is
-        # accepted end to end: the job completes with no rejected draft
-        # and the teacher delivery carries the wording warning while
-        # the student still sees nothing before release.
+        # accepted end to end: the job completes with no rejected draft,
+        # the teacher delivery carries no wording warning, and the
+        # student still sees nothing before release.
         opener = WorkedReviewOpener(
             sections=dict(VALID_SECTIONS,
                           next_steps="Review the practice contexts "
@@ -1073,8 +1074,9 @@ class WorkedReviewWireTests(unittest.TestCase):
                     ["executions"]["student"]["generator"])
         self.assertIsNone(gen_exec.get("rejected_draft"))
         delivery = service.teacher_session(sid)["feedback_delivery"]
-        self.assertEqual(delivery["wording_warnings"],
-                         ["internal_process_language"])
+        self.assertNotIn("wording_warnings", delivery)
+        self.assertIn("practice contexts",
+                      json.dumps(delivery["preview"]))
         self.assertIsNone(service.snapshot(sid, token)
                           ["feedback"]["end"])
 
@@ -2179,10 +2181,10 @@ class WorkedReviewBrowserTests(unittest.TestCase):
                       comparison)
         self.assertEqual(b.errors, [])
 
-    def test_internal_process_wording_warning_teacher_view(self):
+    def test_internal_process_wording_has_no_warning_teacher_view(self):
         # A provider draft containing internal application terminology
-        # is accepted and reaches the teacher preview with a wording
-        # warning; editing the flagged sentence clears the warning and
+        # is accepted and reaches the teacher preview with no wording
+        # warning; editing the flagged sentence still adds none and
         # release stays an explicit educator approval.
         self.opener.sections = dict(
             VALID_SECTIONS,
@@ -2203,12 +2205,9 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         b = self._teacher_feedback_tab()
         warning = ("document.querySelector('#tab-feedback "
                    ".feedback-wording-warning')")
-        b.wait(f"Boolean({warning})")
-        self.assertEqual(
-            b.js(f"{warning}.textContent"),
-            "Wording review: this draft contains internal application "
-            "terminology. Check and edit it before approval. This is a "
-            "review warning, not a validation failure.")
+        b.wait("Boolean(document.querySelector('#tab-feedback "
+               ".feedback-preview'))")
+        self.assertIsNone(b.js(warning))
         # The flagged provider narrative is the current preview, not a
         # deterministic fallback.
         release_card = ("document.querySelector('#tab-feedback "
@@ -2222,8 +2221,8 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         # The student still sees nothing before explicit release.
         self.assertIsNone(self.service.snapshot(sid, token)
                           ["feedback"]["end"])
-        # Editing the flagged wording clears the warning on the next
-        # poll; the hash changes only because the edit was saved.
+        # Editing the flagged wording still shows no warning on the
+        # next poll; the hash changes only because the edit was saved.
         hash_before = (self.service.teacher_session(sid)
                        ["feedback_delivery"]["preview_sha256"])
         detail = self.service.teacher_session(sid)

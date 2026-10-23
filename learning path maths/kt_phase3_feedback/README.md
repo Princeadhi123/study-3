@@ -284,7 +284,7 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v6`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v7`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the selected review questions (recorded prompt, options,
@@ -331,13 +331,15 @@ recorded at creation and never reinterpreted afterwards:
   titles, length, markup, control characters,
   candidate match, and secrets; it does not verify that a numerical claim
   matches the observed evidence, so educator review stays required and
-  scored results/cards remain application-owned. Internal-process style
-  terminology is no longer a validation rejection: it surfaces as a
-  wording review warning on the teacher approval card and clears when
-  the flagged wording is removed, while structural and security checks
-  remain hard rejections. Wording is not fact-verified. The prompt version bumps
-  (`..._v4`, `..._v8`, `..._v2`, `shape_checked_v2`) leave prior captures
-  untouched and never trigger a retry implicitly — a fresh hosted call
+  scored results/cards remain application-owned. Internal application
+  terminology is handled through plain-language prompt instructions at
+  midpoint and end feedback; there is no phrase-based wording warning.
+  Structural and security checks remain hard rejections. Wording is not
+  fact-verified, and prompt instructions do not guarantee that internal
+  terminology never appears. Prompt versions (single-topic v5,
+  two-topic v9, midpoint v3, worked-first v7) distinguish new requests
+  from prior
+  captures. Existing captures remain unchanged; a fresh hosted call
   happens only when the user explicitly starts one.
 
   Midpoint has a hosted Aitta rewording path: after answer 20 a hosted
@@ -637,7 +639,7 @@ Aitta (current `aligned_two_topic` mode):
   deterministic steps, explanations, reasoning questions, or the
   baseline sections), and safe per-topic practice status/task
   descriptions (prompt
-  `aitta_assessment_grounded_two_topic_feedback_v8`) — **no** raw bank or
+  `aitta_assessment_grounded_two_topic_feedback_v9`) — **no** raw bank or
   responses, answer indices, practice answer keys, raw practice
   question/options, or KT probabilities;
 - does not score or select questions or topics; it authors worked-review

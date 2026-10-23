@@ -54,7 +54,7 @@ from full_feedback import (
     FULL_FEEDBACK_INSTRUCTIONS, FULL_FEEDBACK_PROMPT_VERSION,
     FULL_FEEDBACK_SECTION_KEYS, FULL_FEEDBACK_SECTION_TITLES,
     MULTI_FULL_FEEDBACK_INSTRUCTIONS,
-    MULTI_FULL_FEEDBACK_PROMPT_VERSION, feedback_wording_warnings,
+    MULTI_FULL_FEEDBACK_PROMPT_VERSION,
     structured_sections)
 from live_diagnostics import LiveDiagnostics
 from mcq_service import HALF_LENGTH, FULL_LENGTH, MCQSessionService
@@ -2741,7 +2741,6 @@ class DemoService:
                                    if preview is not None else None),
                 "deterministic_preview":
                     self._deterministic_preview(meta),
-                "wording_warnings": feedback_wording_warnings(preview),
                 "worked_example_choices": (
                     self._worked_example_choices(end)),
                 "released_feedback": None,

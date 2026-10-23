@@ -1,5 +1,7 @@
+from feedback_language import PLAIN_LANGUAGE_INSTRUCTIONS
+
 FULL_FEEDBACK_SCHEMA = "phase3_full_feedback_generation_v2"
-FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v4"
+FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v5"
 FULL_FEEDBACK_MAX_TOKENS = 3072
 FULL_FEEDBACK_SECTION_MAX_CHARS = 2000
 FULL_FEEDBACK_SECTION_KEYS = (
@@ -84,11 +86,12 @@ FULL_FEEDBACK_INSTRUCTIONS = (
     "learner. Do not infer mastery, misconceptions, diagnosis, fatigue, "
     "learning gains, decline, or an optimal learning path. This is a draft; "
     "never claim educator approval, release, or proven educational benefit."
+    + PLAIN_LANGUAGE_INSTRUCTIONS
 )
 
 
 MULTI_FULL_FEEDBACK_SCHEMA = "phase3_multi_topic_feedback_generation_v2"
-MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v8"
+MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v9"
 MULTI_FEEDBACK_GUARDRAILS_VERSION = "application_owned_multi_feedback_v1"
 PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION = (
     "provider_full_narrative_shape_checked_v2")
@@ -198,6 +201,7 @@ MULTI_FULL_FEEDBACK_INSTRUCTIONS = (
     "sections are suggestions and may be replaced using the supplied "
     "evidence and cards. The completion wording is retained only after "
     "validation. Do not include the application-owned scope notice."
+    + PLAIN_LANGUAGE_INSTRUCTIONS
 )
 GROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "\nWorked-review output contract: return exactly three top-level fields: "
@@ -258,12 +262,6 @@ _FULL_KIND_GROUP = {
 _FULL_SECTION_TITLES = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
                                 FULL_FEEDBACK_SECTION_TITLES))
 _MARKUP = re.compile(r"<[^>]+>")
-_INTERNAL_PROCESS_LANGUAGE = re.compile(
-    r"\b(?:feedback plans?|review plans?|practice contexts?|priority "
-    r"groups?|selected candidate|selection policy|routing|system "
-    r"prompt|jev|aitta)\b|\b(?:follows|according to|based on|guided "
-    r"by)\s+(?:the|this|our|its)\s+plan\b",
-    re.IGNORECASE)
 
 
 def structured_sections(review):
@@ -927,35 +925,6 @@ def full_reply_rejection_code(reply, selected_id, review_examples=None):
                 reply["worked_reviews"], review_examples) is None):
         return "invalid_worked_reviews"
     return None
-
-
-def feedback_wording_warnings(preview):
-    """Teacher-facing wording warnings for the currently displayed
-    feedback draft.
-
-    Internal application terminology is a style concern, not a
-    structural or security failure: it produces a review warning on the
-    approval card rather than rejecting the generation. Only displayed
-    narrative/explanation text is scanned - a single edited document
-    overrides the structured sections, and questions, options, labels
-    and identifiers are never wording the provider authored.
-    """
-    if not isinstance(preview, dict):
-        return []
-    if isinstance(preview.get("document_text"), str):
-        texts = [preview["document_text"]]
-    else:
-        texts = [s.get("text") for s in preview.get("sections") or []
-                 if isinstance(s, dict)]
-        for example in preview.get("review_examples") or []:
-            if not isinstance(example, dict):
-                continue
-            texts.extend(example.get("steps") or [])
-            texts.append(example.get("reasoning_question"))
-    flagged = any(isinstance(text, str)
-                  and _INTERNAL_PROCESS_LANGUAGE.search(text)
-                  for text in texts)
-    return ["internal_process_language"] if flagged else []
 
 
 def full_message_sections(sections):

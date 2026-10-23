@@ -48,7 +48,7 @@ Key contracts:
 - **Aitta** writes one shared student-facing draft through
   `FullFeedbackAittaGenerator`'s multi schema
   `phase3_multi_topic_feedback_generation_v2`, prompt
-  `aitta_assessment_grounded_two_topic_feedback_v6`. It receives observed
+  `aitta_assessment_grounded_two_topic_feedback_v9`. It receives observed
   aggregate evidence, the validated bundle and per-focus plans, the
   deterministic baseline, the grounded review cards (see below), and safe
   practice status/task descriptions — never the whole bank, raw responses,
@@ -165,7 +165,7 @@ Key contracts:
   `phase3_student_feedback_template_v4`. Retained
   single-mode identifiers:
   full schema `phase3_full_feedback_generation_v2`, prompt
-  `aitta_feedback_with_practice_v4`, template
+  `aitta_feedback_with_practice_v5`, template
   `phase3_student_feedback_template_v3`. Practice context schema
   `phase3_feedback_practice_context_v1` and bundle version
   `phase3_feedback_practice_bundle_v1` remain unchanged for compatibility.
@@ -206,7 +206,7 @@ Key contracts:
   (`waiting_for_diagnostics`, which explains added latency) and then calls
   Aitta under a separate wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v3`, context version
+  `aitta_worked_first_evidence_author_v7`, context version
   `worked_first_assessment_research_context_v1`) carrying all 40 answered
   records with recorded/correct options, a descriptive
   membership-only concept graph, the checked review cards, practice
@@ -238,7 +238,7 @@ Key contracts:
   bounded retry policy (shared budget/capture cache,
   `aitta_midpoint` namespace,
   `phase3_midpoint_feedback_generation_v1`, prompt
-  `aitta_midpoint_check_in_v2`) carrying only first-20 broad-topic
+  `aitta_midpoint_check_in_v3`) carrying only first-20 broad-topic
   aggregate counts — no raw answers, identifiers, baselines, or
   second-half data. The validated four-section reply is overlaid onto
   the deterministic headings/counts/table via `compose_midpoint_draft`
@@ -261,7 +261,7 @@ Key contracts:
 focus, one independently selected practice question (the independent
 practice recommendation is computed before review selection), the full
 four-section Aitta draft through `FullFeedbackAittaGenerator` (prompt
-`aitta_feedback_with_practice_v4`, schema
+`aitta_feedback_with_practice_v5`, schema
 `phase3_full_feedback_generation_v2`), the same narrative-edit/preview-hash/
 approval-release gate, and template `phase3_student_feedback_template_v3`.
 It still produces no teacher-addressed end draft; legacy batch tools and old

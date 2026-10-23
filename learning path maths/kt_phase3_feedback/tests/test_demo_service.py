@@ -3580,7 +3580,7 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
             "worked_first_assessment_research_context_v2")
         self.assertEqual(
             meta["provider_job"]["prompt_versions"]["generation"],
-            "aitta_worked_first_evidence_author_v6")
+            "aitta_worked_first_evidence_author_v7")
         preview = service.teacher_session(sid)["feedback_delivery"][
             "preview"]
         self.assertNotIn("provider_context", json.dumps(preview))

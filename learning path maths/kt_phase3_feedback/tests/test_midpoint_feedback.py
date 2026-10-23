@@ -27,6 +27,7 @@ from demo_service import DemoService
 from evidence_feedback import (
     MIDPOINT_MESSAGE_VERSION as STUDENT_MESSAGE_VERSION,
     build_evidence, compose_midpoint_message)
+from full_feedback import PLAIN_LANGUAGE_INSTRUCTIONS
 from midpoint_feedback import (
     CANDIDATE_ID, INSTRUCTIONS, MESSAGE_VERSION, MIDPOINT_MAX_TOKENS,
     PROMPT_VERSION, SCHEMA, CachedMidpointGenerator,
@@ -127,6 +128,8 @@ class MidpointInputTests(unittest.TestCase):
         self.assertEqual(body["max_tokens"], MIDPOINT_MAX_TOKENS)
         self.assertEqual(body["messages"][0]["role"], "system")
         self.assertEqual(body["messages"][0]["content"], INSTRUCTIONS)
+        self.assertIn(PLAIN_LANGUAGE_INSTRUCTIONS,
+                      body["messages"][0]["content"])
         wire = json.loads(body["messages"][1]["content"])
         self.assertEqual(set(wire), {
             "schema", "prompt_version", "checkpoint", "answered_count",

@@ -3762,14 +3762,6 @@ function createDetailView(root, options = {}) {
           "AI authored selected wording; remaining text is " +
           "application-owned.", "meta"));
       }
-      if ((delivery.wording_warnings || [])
-          .includes("internal_process_language")) {
-        strip.appendChild(el("p",
-          "Wording review: this draft contains internal application " +
-          "terminology. Check and edit it before approval. This is a " +
-          "review warning, not a validation failure.",
-          "warn feedback-wording-warning"));
-      }
     }
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
     if (exampleJob.status) {

@@ -21,9 +21,10 @@ from full_feedback import (
     _provider_full_sections,
     MULTI_FULL_FEEDBACK_INSTRUCTIONS,
     MULTI_FULL_FEEDBACK_PROMPT_VERSION, MULTI_FULL_FEEDBACK_SCHEMA,
+    PLAIN_LANGUAGE_INSTRUCTIONS,
     UNGROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS,
     build_full_input, build_multi_full_input,
-    feedback_wording_warnings, full_message_sections,
+    full_message_sections,
     full_reply_rejection_code, FULL_FEEDBACK_REJECTION_CODES,
     guarded_multi_message, validate_full_input, validate_full_reply)
 from replay_provider_scenarios import CaptureCache
@@ -246,11 +247,11 @@ class FullFeedbackTests(unittest.TestCase):
             self._reject(wire_reply(sections=sections,
                                     candidate_id=self.selected_id))
 
-    def test_internal_process_language_warns_not_rejects(self):
-        # Internal application terminology is a teacher review warning,
-        # not a hard rejection: flagged sections pass validation
-        # unchanged, generation completes without a rejected draft, and
-        # the wording-warning helper marks the displayed preview.
+    def test_internal_process_language_is_not_a_validation_failure(self):
+        # Internal application terminology is prompted against via the
+        # shared plain-language instructions, not a validation gate:
+        # flagged sections pass validation unchanged and generation
+        # completes without a rejected draft.
         for key in FULL_FEEDBACK_SECTION_KEYS:
             sections = dict(VALID_SECTIONS)
             sections[key] = "This section follows the plan."
@@ -280,9 +281,6 @@ class FullFeedbackTests(unittest.TestCase):
             reply = self._generator(opener).generate(self.full_input)
             self.assertEqual(reply["sections"]["next_steps"],
                              sections["next_steps"])
-            preview = {"sections": full_message_sections(sections)}
-            self.assertEqual(feedback_wording_warnings(preview),
-                             ["internal_process_language"])
         for accepted in ("Plan your calculation before answering.",
                          "Review these topics with your teacher.",
                          "Try the selected practice activities below."):
@@ -294,68 +292,13 @@ class FullFeedbackTests(unittest.TestCase):
             reply = self._generator(opener).generate(self.full_input)
             self.assertEqual(
                 reply["sections"]["next_steps"], accepted)
-            preview = {"sections": full_message_sections(sections)}
-            self.assertEqual(feedback_wording_warnings(preview), [])
 
-    def test_feedback_wording_warnings_helper(self):
-        clean_section = [{"kind": "next_steps",
-                          "text": "Review the activities below with "
-                                  "your teacher."}]
-        flagged_section = [{"kind": "next_steps",
-                            "text": "Review the practice contexts "
-                                    "with your teacher."}]
-        # None and clean previews produce no warnings.
-        self.assertEqual(feedback_wording_warnings(None), [])
-        self.assertEqual(feedback_wording_warnings({}), [])
-        self.assertEqual(feedback_wording_warnings(
-            {"sections": clean_section}), [])
-        # Worked-review steps and reasoning questions are scanned.
-        step_flagged = {"review_examples": [
-            {"question_id": "q1",
-             "steps": ["Redo it following the feedback plan."],
-             "reasoning_question": "Why does the method work?"}]}
-        self.assertEqual(feedback_wording_warnings(step_flagged),
-                         ["internal_process_language"])
-        reasoning_flagged = {"review_examples": [
-            {"question_id": "q1", "steps": ["A clean step."],
-             "reasoning_question":
-                 "Why does the selection policy order matter?"}]}
-        self.assertEqual(feedback_wording_warnings(reasoning_flagged),
-                         ["internal_process_language"])
-        # Multiple flagged texts still emit the code exactly once.
-        both = {"sections": flagged_section,
-                "review_examples": step_flagged["review_examples"]}
-        self.assertEqual(feedback_wording_warnings(both),
-                         ["internal_process_language"])
-        # Options, prompts, labels and identifiers are not scanned.
-        meta_only = {"sections": clean_section,
-                     "review_examples": [
-                         {"question_id": "practice contexts",
-                          "prompt": "practice contexts",
-                          "options": ["the feedback plan"],
-                          "steps": ["Clean step."],
-                          "reasoning_question": "Why?"}]}
-        self.assertEqual(feedback_wording_warnings(meta_only), [])
-        # A single edited document overrides stale structured wording;
-        # a flagged document warns.
-        document = {"document_text": "Review the activities below.",
-                    "sections": flagged_section}
-        self.assertEqual(feedback_wording_warnings(document), [])
-        document["document_text"] = "Review the practice contexts."
-        self.assertEqual(feedback_wording_warnings(document),
-                         ["internal_process_language"])
-        # The preview is never mutated.
-        preview = {"sections": flagged_section,
-                   "review_examples": step_flagged["review_examples"]}
-        snapshot = copy.deepcopy(preview)
-        feedback_wording_warnings(preview)
-        self.assertEqual(preview, snapshot)
-
-    def test_prompt_version_v4_request_and_isolation(self):
+    def test_prompt_version_v5_request_and_isolation(self):
         self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION,
-                         "aitta_feedback_with_practice_v4")
+                         "aitta_feedback_with_practice_v5")
         for stale in ("aitta_feedback_with_practice_v2",
-                      "aitta_feedback_with_practice_v3"):
+                      "aitta_feedback_with_practice_v3",
+                      "aitta_feedback_with_practice_v4"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -368,6 +311,7 @@ class FullFeedbackTests(unittest.TestCase):
                          FULL_FEEDBACK_PROMPT_VERSION)
         system = body["messages"][0]["content"]
         self.assertEqual(system, FULL_FEEDBACK_INSTRUCTIONS)
+        self.assertIn(PLAIN_LANGUAGE_INSTRUCTIONS, system)
         self.assertIn("Digits and number words are both allowed, "
                       "including 20 and twenty.", system)
         self.assertIn("Every numerical claim must match the supplied "
@@ -1094,10 +1038,10 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
-    def test_v8_prompt_wording_contract(self):
+    def test_v9_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v8")
+            "aitta_assessment_grounded_two_topic_feedback_v9")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1110,6 +1054,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         self.assertEqual(system,
                          MULTI_FULL_FEEDBACK_INSTRUCTIONS
                          + UNGROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS)
+        self.assertIn(PLAIN_LANGUAGE_INSTRUCTIONS, system)
         for needle in (
                 "write 'On this assessment, ...'",
                 "separate topic names clearly",
@@ -1127,7 +1072,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v8")
+            "aitta_assessment_grounded_two_topic_feedback_v9")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
@@ -1135,7 +1080,8 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 "aitta_assessment_grounded_two_topic_feedback_v4",
                 "aitta_assessment_grounded_two_topic_feedback_v5",
                 "aitta_assessment_grounded_two_topic_feedback_v6",
-                "aitta_assessment_grounded_two_topic_feedback_v7"):
+                "aitta_assessment_grounded_two_topic_feedback_v7",
+                "aitta_assessment_grounded_two_topic_feedback_v8"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1778,6 +1724,8 @@ class WorkedFirstWireTests(unittest.TestCase):
         body = opener.calls[0]["body"]
         self.assertEqual(body["messages"][0]["role"], "system")
         self.assertEqual(body["messages"][0]["content"], WF_INSTRUCTIONS)
+        self.assertIn(PLAIN_LANGUAGE_INSTRUCTIONS,
+                      body["messages"][0]["content"])
         context = json.loads(body["messages"][1]["content"])
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
