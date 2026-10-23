@@ -3602,14 +3602,24 @@ function createDetailView(root, options = {}) {
   function workedSelectFor(sid) {
     if (!workedSelects.has(sid)) {
       workedSelects.set(sid, {sending: false, awaitingJobId: null,
-                              awaitingJobQueuedAt: null, note: null});
+                              awaitingJobQueuedAt: null, awaitingPreviewHash: null,
+                              activeCandidateId: null, choices: new Map()});
     }
     return workedSelects.get(sid);
   }
 
+  function workedChoiceFor(sid, candidateId) {
+    const state = workedSelectFor(sid);
+    if (!state.choices.has(candidateId)) {
+      state.choices.set(candidateId, {questionId: null, note: null});
+    }
+    return state.choices.get(candidateId);
+  }
+
   function workedSelectionBusy(sid) {
     const state = workedSelectFor(sid);
-    return state.sending || Boolean(state.awaitingJobId);
+    return state.sending || Boolean(state.awaitingJobId)
+      || Boolean(state.awaitingPreviewHash);
   }
 
   function workedJobNote(job) {
@@ -3698,6 +3708,10 @@ function createDetailView(root, options = {}) {
     const workedState = workedSelectFor(selected);
     const exampleJob = ((detail.checkpoints.end || {})
                         .worked_example_job) || {};
+    if (workedState.awaitingPreviewHash
+        && delivery.preview_sha256 === workedState.awaitingPreviewHash) {
+      workedState.awaitingPreviewHash = null;
+    }
     if (workedState.awaitingJobId && exampleJob.job_id) {
       // Clear only when the observed record is the same job reaching a
       // terminal state, or a strictly newer queued job superseded it;
@@ -3710,7 +3724,10 @@ function createDetailView(root, options = {}) {
         // Reflect the observed terminal outcome of the accepted job
         // so the chooser note cannot claim generation is still
         // running next to a Ready/fallback status row.
-        workedState.note = workedJobNote(exampleJob);
+        if (workedState.activeCandidateId !== null) {
+          workedChoiceFor(selected, workedState.activeCandidateId).note =
+            workedJobNote(exampleJob);
+        }
       }
       if ((sameJob && exampleJob.status !== "pending") || superseded) {
         workedState.awaitingJobId = null;
@@ -3968,7 +3985,6 @@ function createDetailView(root, options = {}) {
     }
     const choices = delivery.worked_example_choices || [];
     if (choices.length) {
-      const sel = workedSelectFor(selected);
       const editState = editDraftFor(selected, delivery);
       choices.forEach((choice, choiceIndex) => {
         const fieldset = el("fieldset", null,
@@ -4002,6 +4018,15 @@ function createDetailView(root, options = {}) {
         const selectLabel = el("label", "Worked example question");
         selectLabel.htmlFor = select.id;
         fieldset.appendChild(selectLabel);
+        const choiceState = workedChoiceFor(selected, choice.candidate_id);
+        if (choiceState.questionId && (
+            choiceState.questionId === choice.selected_question_id
+            || !(choice.candidates || []).some(
+              (cand) => cand.question_id === choiceState.questionId))) {
+          choiceState.questionId = null;
+        }
+        const chosenQuestionId =
+          choiceState.questionId || choice.selected_question_id;
         (choice.candidates || []).forEach((cand) => {
           const option = document.createElement("option");
           option.value = cand.question_id;
@@ -4015,7 +4040,7 @@ function createDetailView(root, options = {}) {
           }
           option.textContent = text;
           option.selected =
-            cand.question_id === choice.selected_question_id;
+            cand.question_id === chosenQuestionId;
           select.appendChild(option);
         });
         fieldset.appendChild(select);
@@ -4045,7 +4070,7 @@ function createDetailView(root, options = {}) {
         const apply = el("button", "Choose example and rebuild draft",
           "worked-example-apply");
         apply.type = "button";
-        const applyStatus = el("p", sel.note || null, "meta");
+        const applyStatus = el("p", choiceState.note || null, "meta");
         const updateApply = () => {
           apply.disabled =
             select.value === choice.selected_question_id
@@ -4055,7 +4080,14 @@ function createDetailView(root, options = {}) {
             || editState.awaitingPreview
             || releaseDraftFor(selected).sending;
         };
-        select.addEventListener("change", updateApply);
+        select.addEventListener("change", () => {
+          choiceState.questionId =
+            select.value === choice.selected_question_id
+              ? null : select.value;
+          choiceState.note = null;
+          applyStatus.textContent = "";
+          updateApply();
+        });
         apply.addEventListener("click", async () => {
           const sid = selected;
           const chosenId = select.value;
@@ -4071,7 +4103,8 @@ function createDetailView(root, options = {}) {
             return;
           }
           state.sending = true;
-          state.note = "Rebuilding the draft…";
+          state.activeCandidateId = choice.candidate_id;
+          choiceState.note = "Rebuilding the draft…";
           // Re-render now so apply/save/approval/editor controls all
           // reflect the busy state before the request leaves.
           if (selected === sid) {
@@ -4090,7 +4123,9 @@ function createDetailView(root, options = {}) {
               ? scoped.job_id : null;
             state.awaitingJobQueuedAt = state.awaitingJobId
               ? scoped.queued_at : null;
-            state.note = workedJobNote(scoped);
+            state.awaitingPreviewHash = state.awaitingJobId
+              ? null : res.preview_sha256 || null;
+            choiceState.note = workedJobNote(scoped);
             // The server preserved unrelated saved edits; drop the
             // local draft copy only when it holds no unsaved wording
             // so the editor resyncs to the returned preview.
@@ -4099,11 +4134,12 @@ function createDetailView(root, options = {}) {
             }
           } catch (err) {
             if (err.status === 409) {
-              state.note = "The draft changed before the new " +
+              choiceState.note = "The draft changed before the new " +
                 "example was applied. Re-read the updated preview, " +
                 "then choose again.";
             } else {
-              state.note = "The new worked example was not accepted.";
+              choiceState.note =
+                "The new worked example was not accepted.";
             }
           } finally {
             state.sending = false;

@@ -453,6 +453,216 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "Boolean(document.querySelector('.review-example'))"))
         self.assertEqual(b.errors, [])
 
+    def test_two_worked_example_choices_survive_refresh_and_apply(self):
+        # Both choosers keep their own unsaved selection across
+        # re-renders: picking an alternative on card A must not drop
+        # the pending choice on card B, notes are card-scoped, and a
+        # failed apply stays retryable without touching the other
+        # card's state.
+        wrong = (positions(self.bank, "pct", 0)[:1] + [8, 12]
+                 + positions(self.bank, "alg", 0)[:3])
+        sid, token, cards = self._complete_pending(wrong)
+        delivery = self.service.teacher_session(sid)["feedback_delivery"]
+        initial_sections = [dict(s) for s in
+                            delivery["preview"]["sections"]]
+        initial_practice = json.loads(json.dumps(
+            delivery["preview"].get("practice_activities")))
+        choices = delivery["worked_example_choices"]
+        self.assertEqual(len(choices), 2)
+        chosen = {}
+        for choice in choices:
+            alts = [c for c in choice["candidates"]
+                    if c["question_id"]
+                    != choice["selected_question_id"]]
+            self.assertGreaterEqual(
+                len(alts), 2,
+                f"choice {choice['candidate_id']} needs two "
+                "alternatives")
+            target = next(
+                (c for c in alts
+                 if c.get("checked_solution_available")), alts[0])
+            chosen[choice["candidate_id"]] = target["question_id"]
+
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("document.querySelector('#pin-input')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(self.pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelectorAll('.session-row').length >= 1",
+               timeout=30)
+        b.js("document.querySelectorAll('.session-row')[0].click()")
+        b.wait("document.querySelector('#ws-tabs [data-tab=feedback]')",
+               timeout=30)
+        b.js("document.querySelector("
+             "'#ws-tabs [data-tab=feedback]').click()")
+
+        def sel_for(cid):
+            return ("document.querySelector("
+                    "'.worked-example-select"
+                    f"[data-candidate-id={json.dumps(cid)}]')")
+
+        def fs_for(cid):
+            return f"{sel_for(cid)}.closest('fieldset')"
+
+        def apply_for(cid):
+            return (f"{fs_for(cid)}"
+                    ".querySelector('.worked-example-apply')")
+
+        cid_a, cid_b = (choices[0]["candidate_id"],
+                        choices[1]["candidate_id"])
+        b.wait(sel_for(cid_a), timeout=30)
+        b.wait(sel_for(cid_b), timeout=30)
+
+        # Choose an alternative on both cards.
+        for cid in (cid_a, cid_b):
+            b.js(f"{sel_for(cid)}.value = "
+                 f"{json.dumps(chosen[cid])}; "
+                 f"{sel_for(cid)}.dispatchEvent(new Event('change'))")
+        self.assertTrue(b.js(
+            f"!{apply_for(cid_a)}.disabled"
+            f" && !{apply_for(cid_b)}.disabled"))
+
+        # A full re-render (tab switch, same as a poll refresh) must
+        # not drop either unsaved choice.
+        b.js("document.querySelector("
+             "'#ws-tabs [data-tab=overview]').click()")
+        b.js("document.querySelector("
+             "'#ws-tabs [data-tab=feedback]').click()")
+        b.wait(sel_for(cid_a), timeout=30)
+        b.wait(sel_for(cid_b), timeout=30)
+        self.assertEqual(b.js(f"{sel_for(cid_a)}.value"),
+                         chosen[cid_a])
+        self.assertEqual(b.js(f"{sel_for(cid_b)}.value"),
+                         chosen[cid_b])
+        self.assertTrue(b.js(
+            f"!{apply_for(cid_a)}.disabled"
+            f" && !{apply_for(cid_b)}.disabled"))
+        for cid in (cid_a, cid_b):
+            text = b.js(f"{fs_for(cid)}.textContent")
+            self.assertNotIn("updated", text)
+            self.assertNotIn("Rebuilding", text)
+
+        # Hold the first override POST; a synthetic 409 can later be
+        # injected once for the second card's apply.
+        b.js(
+            "window.__workedRelease = null; window.__workedHold = true;"
+            "window.__workedFailOnce = false;"
+            "const __origFetch = window.fetch.bind(window);"
+            "window.fetch = (input, init) => {"
+            "  const u = String(input);"
+            "  if (u.indexOf('worked-example-selection') !== -1) {"
+            "    if (window.__workedFailOnce) {"
+            "      window.__workedFailOnce = false;"
+            "      return Promise.resolve(new Response("
+            "        JSON.stringify({error: 'conflict'}),"
+            "        {status: 409, headers: {"
+            "          'Content-Type': 'application/json'}}));"
+            "    }"
+            "    const req = __origFetch(input, init);"
+            "    if (window.__workedHold) {"
+            "      window.__workedHold = false;"
+            "      return req.then((res) => new Promise((resolve) => {"
+            "        window.__workedRelease = () => resolve(res);"
+            "      }));"
+            "    }"
+            "    return req;"
+            "  }"
+            "  return __origFetch(input, init);"
+            "};")
+        b.js(f"{apply_for(cid_a)}.click()")
+        b.wait("window.__workedRelease !== null", timeout=30)
+        # While the first rebuild is in flight the whole session is
+        # busy, but the second card's pending choice is kept.
+        self.assertTrue(b.js(
+            f"{fs_for(cid_a)}.disabled && {fs_for(cid_b)}.disabled"))
+        self.assertEqual(b.js(f"{sel_for(cid_b)}.value"),
+                         chosen[cid_b])
+        self.assertIn("Rebuilding", b.js(f"{fs_for(cid_a)}.textContent"))
+        self.assertNotIn("Rebuilding",
+                         b.js(f"{fs_for(cid_b)}.textContent"))
+
+        # Resolve the first request; the authoritative update lands on
+        # card A only, and card B is still pending its own apply.
+        b.js("window.__workedRelease()")
+        self.assertTrue(wait_for(
+            lambda: len(self.service._load_meta(sid)
+                        ["worked_example_selection_history"]) == 1,
+            timeout=15))
+        b.wait(f"!{fs_for(cid_a)}.disabled", timeout=30)
+        self.assertEqual(b.js(f"{sel_for(cid_a)}.value"),
+                         chosen[cid_a])
+        self.assertIn("updated", b.js(f"{fs_for(cid_a)}.textContent"))
+        self.assertEqual(b.js(f"{sel_for(cid_b)}.value"),
+                         chosen[cid_b])
+        self.assertFalse(b.js(f"{apply_for(cid_b)}.disabled"))
+        text_b = b.js(f"{fs_for(cid_b)}.textContent")
+        self.assertNotIn("updated", text_b)
+        self.assertNotIn("Rebuilding", text_b)
+
+        # A failed apply on card B reports on card B only, keeps both
+        # selections, writes no history, and stays retryable.
+        b.js("window.__workedFailOnce = true")
+        b.js(f"{apply_for(cid_b)}.click()")
+        self.assertTrue(wait_for(
+            lambda: "draft changed" in b.js(
+                f"{fs_for(cid_b)}.textContent"), timeout=15))
+        self.assertEqual(b.js(f"{sel_for(cid_a)}.value"),
+                         chosen[cid_a])
+        self.assertEqual(b.js(f"{sel_for(cid_b)}.value"),
+                         chosen[cid_b])
+        self.assertIn("updated", b.js(f"{fs_for(cid_a)}.textContent"))
+        self.assertNotIn("draft changed",
+                         b.js(f"{fs_for(cid_a)}.textContent"))
+        self.assertEqual(
+            len(self.service._load_meta(sid)
+                ["worked_example_selection_history"]), 1)
+        b.wait(f"!{apply_for(cid_b)}.disabled", timeout=15)
+
+        # Retry card B for real; both cards end on the teacher-chosen
+        # examples with scoped notes and an untouched narrative.
+        b.js(f"{apply_for(cid_b)}.click()")
+        self.assertTrue(wait_for(
+            lambda: len(self.service._load_meta(sid)
+                        ["worked_example_selection_history"]) == 2,
+            timeout=15))
+        b.wait(f"!{fs_for(cid_a)}.disabled"
+               f" && !{fs_for(cid_b)}.disabled", timeout=30)
+        after = self.service.teacher_session(sid)["feedback_delivery"]
+        preview_cards = {c["candidate_id"]: c["question_id"]
+                         for c in after["preview"]["review_examples"]}
+        self.assertEqual(preview_cards[cid_a], chosen[cid_a])
+        self.assertEqual(preview_cards[cid_b], chosen[cid_b])
+        self.assertEqual([dict(s) for s in after["preview"]["sections"]],
+                         initial_sections)
+        self.assertEqual(json.loads(json.dumps(
+            after["preview"].get("practice_activities"))),
+            initial_practice)
+        self.assertEqual(b.js(f"{sel_for(cid_a)}.value"),
+                         chosen[cid_a])
+        self.assertEqual(b.js(f"{sel_for(cid_b)}.value"),
+                         chosen[cid_b])
+        self.assertIn("updated", b.js(f"{fs_for(cid_a)}.textContent"))
+        self.assertIn("updated", b.js(f"{fs_for(cid_b)}.textContent"))
+
+        # Approval releases a snapshot carrying both chosen examples.
+        approve = ("[...document.querySelectorAll('button.primary')]"
+                   ".find(b => b.textContent.startsWith('Approve'))")
+        b.wait(f"Boolean({approve} && !{approve}.disabled)",
+               timeout=30)
+        b.js(f"{approve}.click()")
+        b.wait("document.body.textContent.includes('Released to the "
+               "student')", timeout=30)
+        released = self.service.teacher_session(sid)[
+            "feedback_delivery"]["released_feedback"]
+        released_cards = {c["candidate_id"]: c["question_id"]
+                          for c in released["review_examples"]}
+        self.assertEqual(released_cards[cid_a], chosen[cid_a])
+        self.assertEqual(released_cards[cid_b], chosen[cid_b])
+        self.assertEqual(b.errors, [])
+
     def test_hosted_scoped_example_processing_and_fallback(self):
         # Hosted flow: a blocking scoped adapter holds the card-level
         # job pending so the waiting UI is observable, then completes
@@ -504,8 +714,12 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         url = f"http://127.0.0.1:{server.server_address[1]}"
 
+        # Two wrong answers per skill give BOTH choosers an eligible
+        # alternative; the second choice is preselected before the
+        # first scoped job starts to prove it survives the pending
+        # overlay.
         wrong = (positions(bank, "pct", 0)[:2]
-                 + [positions(bank, "alg", 0)[0]])
+                 + positions(bank, "alg", 0)[:2])
         created = service.create_session()
         sid, token = created["session_id"], created["student_token"]
         for row in grounded_rows(bank, wrong):
@@ -531,6 +745,16 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             c for c in choice["candidates"]
             if c["question_id"] != choice["selected_question_id"]
             and c.get("checked_solution_available"))
+        second_choice = next(
+            c for c in delivery["worked_example_choices"]
+            if c["candidate_id"] != choice["candidate_id"]
+            and any(cand["question_id"] != c["selected_question_id"]
+                    and cand.get("checked_solution_available")
+                    for cand in c["candidates"]))
+        second_target = next(
+            c for c in second_choice["candidates"]
+            if c["question_id"] != second_choice["selected_question_id"]
+            and c.get("checked_solution_available"))
 
         b = self.browser
         b.command("Page.navigate", {"url": f"{url}/teacher"})
@@ -548,13 +772,25 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         b.js("document.querySelector("
              "'#ws-tabs [data-tab=feedback]').click()")
         cid = json.dumps(choice["candidate_id"])
+        cid2 = json.dumps(second_choice["candidate_id"])
         sel = ("document.querySelector("
                f"'.worked-example-select[data-candidate-id={cid}]')")
+        sel2 = ("document.querySelector("
+                f"'.worked-example-select[data-candidate-id={cid2}]')")
         b.wait(sel, timeout=30)
+        b.wait(sel2, timeout=30)
         preview_text = ("document.querySelector('.feedback-preview')"
                         " && document.querySelector("
                         "'.feedback-preview').textContent")
         self.assertIn(before_sections[0], b.js(preview_text))
+        # Preselect the second card's alternative before the first
+        # scoped job starts; it must survive the pending overlay.
+        b.js(f"{sel2}.value = "
+             f"{json.dumps(second_target['question_id'])}; "
+             f"{sel2}.dispatchEvent(new Event('change'))")
+        apply2_btn = (f"{sel2}.closest('fieldset')"
+                      ".querySelector('.worked-example-apply')")
+        self.assertFalse(b.js(f"{apply2_btn}.disabled"))
         b.js(f"{sel}.value = {json.dumps(target['question_id'])}; "
              f"{sel}.dispatchEvent(new Event('change'))")
         apply_btn = (f"{sel}.closest('fieldset')"
@@ -615,6 +851,36 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertNotIn("being generated", choice_text)
         self.assertIn("explanation was regenerated", choice_text)
 
+        # The preselection on the other card survived the pending
+        # overlay and can now be applied on its own.
+        self.assertEqual(b.js(f"{sel2}.value"),
+                         second_target["question_id"])
+        self.assertFalse(b.js(f"{apply2_btn}.disabled"))
+        second_text = b.js(
+            f"{sel2}.closest('fieldset').textContent")
+        self.assertNotIn("regenerated", second_text)
+        b.js(f"{apply2_btn}.click()")
+        self.assertTrue(wait_for(
+            lambda: scoped_calls == [target["question_id"],
+                                     second_target["question_id"]],
+            timeout=30))
+        b.wait(f"{sel2} && !{sel2}.closest('fieldset').disabled",
+               timeout=30)
+        self.assertEqual(b.js(f"{sel2}.value"),
+                         second_target["question_id"])
+        # The second overlay stayed scoped: card A still shows the
+        # first applied example and its own outcome note.
+        self.assertEqual(b.js(f"{sel}.value"), target["question_id"])
+        first_text = b.js(f"{sel}.closest('fieldset').textContent")
+        self.assertIn("explanation was regenerated", first_text)
+        second_text = b.js(
+            f"{sel2}.closest('fieldset').textContent")
+        self.assertIn("explanation was regenerated", second_text)
+        self.assertEqual(
+            [s["text"] for s in service.teacher_session(sid)[
+                "feedback_delivery"]["preview"]["sections"]],
+            before_sections)
+
         # A failing scoped adapter publishes the explicit checked
         # fallback warning, still without touching the narrative.
         class Failing:
@@ -634,7 +900,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         b.wait(f"{apply_btn} && !{apply_btn}.disabled", timeout=15)
         b.js(f"{apply_btn}.click()")
         self.assertTrue(wait_for(
-            lambda: "application-checked steps because AI generation "
+            lambda: "AI generation for the selected worked example "
                     "did not complete" in b.js(
                 "document.querySelector('.release-status')"
                 ".textContent"), timeout=30))
@@ -647,7 +913,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             if c["question_id"] == another["question_id"])
         self.assertEqual(card["explanation_source"], "application")
         # The chooser note also reports the checked-steps fallback.
-        self.assertIn("application-checked steps", b.js(
+        self.assertIn("AI generation did not complete", b.js(
             "document.querySelector('.worked-example-choice')"
             ".textContent"))
         self.assertEqual(b.errors, [])
