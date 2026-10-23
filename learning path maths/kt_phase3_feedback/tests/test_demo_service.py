@@ -223,6 +223,37 @@ class DemoServiceTests(unittest.TestCase):
         reloaded = self.service._load_meta(sid)
         self.assertEqual(reloaded["lock_marker"], "save_under_lock")
 
+    def test_save_meta_retries_transient_winerror32_under_lock(self):
+        # A transient sharing violation on the metadata target is
+        # retried inside the helper while the service lock is held; the
+        # marker still persists.
+        created = self.create()
+        sid = created["session_id"]
+        meta = self.service._load_meta(sid)
+        meta["lock_marker"] = "save_under_retry"
+        held = []
+        original = Path.replace
+
+        def spy(path, target):
+            if path.parent == self.service.meta_dir:
+                held.append(self.service.lock._is_owned())
+                if len(held) == 1:
+                    err = PermissionError("sharing violation")
+                    err.winerror = 32
+                    raise err
+            return original(path, target)
+
+        with mock.patch.object(Path, "replace", autospec=True,
+                               side_effect=spy), \
+                mock.patch("session_store.sleep"):
+            self.service._save_meta(meta)
+        self.assertEqual(len(held), 2)
+        self.assertEqual(held, [True, True],
+                         "metadata replace retries ran without the "
+                         "service lock")
+        reloaded = self.service._load_meta(sid)
+        self.assertEqual(reloaded["lock_marker"], "save_under_retry")
+
     def test_meta_save_load_concurrent_threads(self):
         created = self.create()
         sid = created["session_id"]

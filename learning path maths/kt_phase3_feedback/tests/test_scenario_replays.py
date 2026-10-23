@@ -113,6 +113,52 @@ class ScenarioReplayTests(unittest.TestCase):
         self.assertEqual(again["id"], run["id"])
         self.assertEqual(len(self.service.replays.list()["runs"]), 1)
 
+    def test_transient_session_save_conflict_does_not_abort_replay(self):
+        # A single WinError 32 on the session-file replace is retried
+        # inside the store; the replay still records all 40 answers
+        # exactly once and completes normally.
+        real_replace = Path.replace
+        injected = {"count": 0}
+        store_root = self.service.store.root
+
+        def flaky(source, target):
+            if (source.parent == store_root
+                    and source.suffix == ".tmp"):
+                doc = json.loads(source.read_text("utf-8"))
+                if (len(doc.get("responses") or []) == 28
+                        and not injected["count"]):
+                    injected["count"] += 1
+                    err = PermissionError("sharing violation")
+                    err.winerror = 32
+                    raise err
+            return real_replace(source, target)
+
+        with patch.object(Path, "replace", autospec=True,
+                          side_effect=flaky), \
+                patch("session_store.sleep"):
+            run = self.service.replays.start(self.request())
+            finished = self.wait(run["id"])
+        self.assertEqual(injected["count"], 1)
+        self.assertEqual(finished["status"], "complete")
+        case = finished["cases"][0]
+        self.assertEqual(case["status"], "complete")
+        detail = self.service.teacher_session(case["session_id"])
+        expected = self.source["scenarios"][0]["responses"]
+        self.assertEqual(detail["answered_count"], 40)
+        self.assertEqual(len(detail["question_responses"]), 40)
+        self.assertEqual(
+            [r["selected_index"] for r in detail["question_responses"]],
+            [r["selected_index"] for r in expected])
+        by_id = {q["question_id"]: q for q in self.bank["questions"]}
+        self.assertEqual(
+            detail["observed_total"]["correct"],
+            sum(1 for r in expected
+                if r["selected_index"]
+                == by_id[r["question_id"]]["answer_index"]))
+        self.assertIsNone(detail["background_work_cancelled"])
+        stored = self.service.store.load(case["session_id"])
+        self.assertEqual(len(stored["responses"]), 40)
+
     def test_current_code_includes_feedback_modules(self):
         names = set(self.service.replays.current_code())
         self.assertIn("full_feedback.py", names)

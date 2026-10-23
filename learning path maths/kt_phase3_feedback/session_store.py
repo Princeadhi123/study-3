@@ -7,12 +7,30 @@ import hashlib
 import json
 import re
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from time import sleep
 
 from schemas import SESSION_SCHEMA
 
 SESSION_ID_RE = re.compile(r"[a-f0-9]{32}\Z")
+
+
+def replace_session_file(source: Path, target: Path) -> None:
+    """Atomically replace `target` with `source`, retrying briefly on
+    Windows access/sharing/lock conflicts (WinError 5, 32, 33) that can
+    transiently hold the destination open. Unrelated I/O errors are not
+    retried. Only the replacement itself is retried, never the write,
+    and the destination is never truncated or deleted."""
+    for attempt in range(6):
+        try:
+            source.replace(target)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                raise
+            sleep(0.02 * (2 ** attempt))
 
 
 def utc_now() -> str:
@@ -30,6 +48,7 @@ class SessionStore:
 
     def __init__(self, root: Path):
         self.root = Path(root)
+        self._lock = threading.RLock()
 
     def create(self, bank: dict) -> dict:
         questions = bank.get("questions", [])
@@ -50,21 +69,23 @@ class SessionStore:
         return session
 
     def load(self, session_id: str) -> dict:
-        path = self._path(session_id)
-        session = json.loads(path.read_text(encoding="utf-8"))
-        if (session.get("schema") != SESSION_SCHEMA
-                or session.get("session_id") != session_id):
-            raise ValueError("session file is malformed")
-        return session
+        with self._lock:
+            path = self._path(session_id)
+            session = json.loads(path.read_text(encoding="utf-8"))
+            if (session.get("schema") != SESSION_SCHEMA
+                    or session.get("session_id") != session_id):
+                raise ValueError("session file is malformed")
+            return session
 
     def save(self, session: dict) -> None:
-        if session.get("schema") != SESSION_SCHEMA:
-            raise ValueError("session has the wrong schema")
-        path = self._path(session.get("session_id"))
-        tmp = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
-        with tmp.open("w", encoding="utf-8") as stream:
-            json.dump(session, stream, ensure_ascii=False, indent=2)
-        tmp.replace(path)
+        with self._lock:
+            if session.get("schema") != SESSION_SCHEMA:
+                raise ValueError("session has the wrong schema")
+            path = self._path(session.get("session_id"))
+            tmp = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
+            with tmp.open("w", encoding="utf-8") as stream:
+                json.dump(session, stream, ensure_ascii=False, indent=2)
+            replace_session_file(tmp, path)
 
     def _path(self, session_id) -> Path:
         if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):

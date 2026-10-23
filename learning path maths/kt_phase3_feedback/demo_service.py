@@ -71,7 +71,8 @@ from research_runtime import (
 from scenario_replays import DEFAULT_SOURCE, ScenarioReplays
 from scenario_runner import generate_responses
 from schemas import SESSION_SCHEMA
-from session_store import SessionStore, bank_fingerprint, utc_now
+from session_store import (
+    SessionStore, bank_fingerprint, replace_session_file, utc_now)
 from shadow_practice import (
     ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
 from synthetic_feedback import PROMPT_VERSION
@@ -613,7 +614,7 @@ class DemoService:
                 f"{target.name}.{secrets.token_hex(6)}.tmp")
             with tmp.open("w", encoding="utf-8") as stream:
                 json.dump(meta, stream, ensure_ascii=False, indent=2)
-            tmp.replace(target)
+            replace_session_file(tmp, target)
 
     def _load_meta(self, session_id):
         # The lock pairs with _save_meta: readers never open the metadata

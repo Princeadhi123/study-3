@@ -519,9 +519,18 @@ class ResearchBrowserTests(unittest.TestCase):
         stats = b.js(f"[...{ov}.querySelectorAll('.ui-stat')].map(n => n.textContent)")
         self.assertIn(f"Answered{detail['answered_count']}/40", stats)
         self.assertIn(
-            f"Observed total{detail['observed_total']['correct']}"
+            f"Original scenario score{detail['observed_total']['correct']}"
             f" / {detail['observed_total']['out_of']}", stats)
         self.assertTrue(all("null" not in s for s in stats))
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('.partial-replay-score-notice')"))
+        # The sidebar row always describes the retained original.
+        sidebar = ("[...document.querySelectorAll('.scenario-row .meta')]"
+                   ".map(n => n.textContent)")
+        want = (f"Original scenario: {detail['observed_total']['correct']}"
+                f"/{detail['observed_total']['out_of']} correct")
+        self.assertTrue(b.js(
+            f"{sidebar}.some(s => s.includes({json.dumps(want)}))"))
         self.assertTrue(b.js(f"{ov}.textContent.includes('Assessment snapshot')"))
         self.assertTrue(b.js(f"{ov}.textContent.includes('Feedback & diagnostics')"))
         self.assertTrue(b.js(f"{ov}.textContent.includes('Release status')"))
@@ -564,6 +573,19 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertFalse(b.js(
             f"{ov}.textContent.includes('What changed from the retained "
             "original?')"))
+        # The replayed version is a full Replay score (all 40 answers
+        # resubmitted), while the sidebar row still quotes the original.
+        b.wait(f"{ov}.textContent.includes('\"replay\": {{')")
+        replay_stats = b.js(
+            f"[...{ov}.querySelectorAll('.ui-stat')]"
+            ".map(n => n.textContent)")
+        self.assertIn(
+            f"Replay score{detail['observed_total']['correct']} / 40",
+            replay_stats)
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('.partial-replay-score-notice')"))
+        self.assertTrue(b.js(
+            f"{sidebar}.some(s => s.includes({json.dumps(want)}))"))
         self.assertTrue(b.js(f"{ov}.textContent.includes('Session summary')"))
         self.assertTrue(b.js(f"Boolean({provenance})"))
         b.js(f"{provenance}.open = true")
@@ -1544,8 +1566,13 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertIn("Answered27/40", stats)
         total = detail["observed_total"]
         self.assertIn(
-            f"Observed total{total['correct']} / {total['out_of']}",
+            f"Partial replay score{total['correct']} / {total['out_of']}",
             stats)
+        self.assertEqual(
+            b.js(f"{ov}.querySelector('.partial-replay-score-notice')"
+                 ".textContent"),
+            "No final replay score is available because not all 40 "
+            "answers were recorded.")
         text = b.js(f"{ov}.textContent")
         self.assertFalse(b.js(f"{ov}.textContent.includes"
                               "('In progress')"))
@@ -1567,15 +1594,44 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js(f"window.__fxView.update({json.dumps(teacher_view)})")
         self.assertIn("Replay failed after 27 of 40 answers were "
                       "recorded.", b.js(f"{notice}.textContent"))
+        self.assertIn(
+            f"Partial replay score{total['correct']} / {total['out_of']}",
+            b.js(f"[...{ov}.querySelectorAll('.ui-stat')]"
+                 ".map(n => n.textContent)"))
+        self.assertTrue(b.js(
+            f"Boolean({ov}.querySelector("
+            "'.partial-replay-score-notice'))"))
+        # A completed replay shows a full Replay score and no partial
+        # notice — only a synthetic copy is adjusted, the real session
+        # stays at 27 answers.
+        full = copy.deepcopy(detail)
+        full["answered_count"] = 40
+        full["observed_total"] = {
+            "correct": total["correct"], "out_of": 40}
+        b.js(f"window.__fxView.update({json.dumps(full)})")
+        full_stats = b.js(
+            f"[...{ov}.querySelectorAll('.ui-stat')]"
+            ".map(n => n.textContent)")
+        self.assertTrue(any(s.startswith("Replay score")
+                            for s in full_stats))
+        self.assertFalse(any(s.startswith("Partial replay score")
+                             for s in full_stats))
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('.partial-replay-score-notice')"))
         # A healthy in-progress session shows neither notice nor the
-        # failed status label.
+        # failed status label, and keeps the plain observed-total label.
         fresh = self.service.create_session()
         fresh_view = self.service.teacher_session(fresh["session_id"])
         b.js(f"window.__fxView.update({json.dumps(fresh_view)})")
         self.assertIsNone(b.js(notice))
-        self.assertIn("StatusIn progress",
-                      b.js(f"[...{ov}.querySelectorAll('.ui-stat')]"
-                           ".map(n => n.textContent)"))
+        self.assertIsNone(b.js(
+            f"{ov}.querySelector('.partial-replay-score-notice')"))
+        fresh_stats = b.js(
+            f"[...{ov}.querySelectorAll('.ui-stat')]"
+            ".map(n => n.textContent)")
+        self.assertIn("StatusIn progress", fresh_stats)
+        self.assertTrue(any(s.startswith("Observed total")
+                            for s in fresh_stats))
         # A retained original carries no failure warning.
         retained = b.js("fetch('/api/teacher/scenarios/' "
                         f"+ {json.dumps(scenario_id)})"

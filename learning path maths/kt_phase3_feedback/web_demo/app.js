@@ -2396,6 +2396,9 @@ function createDetailView(root, options = {}) {
       "A quick view of recorded answers, feedback release, and diagnostics.",
       {eyebrow: "Session overview"}));
     const failed = replayFailed();
+    const isReplay = Boolean(detail.replay || detail.replay_execution);
+    const partialReplay = isReplay &&
+      Number.isFinite(detail.answered_count) && detail.answered_count < 40;
     const replayNotice = failed
       ? `Replay failed after ${detail.answered_count} of 40 answers were recorded. ` +
         "This replay has stopped. Start a new replay to try again."
@@ -2406,19 +2409,31 @@ function createDetailView(root, options = {}) {
           : "Live synthetic session.";
     card.appendChild(el("p", replayNotice,
       failed ? "boundary-note warn replay-failure-notice" : "boundary-note"));
+    const scoreLabel = isReplay
+      ? (partialReplay ? "Partial replay score" : "Replay score")
+      : detail.source_mode === "retained_original"
+        ? "Original scenario score"
+        : "Observed total";
     const snapshot = DemoUI.section("Assessment snapshot",
-      "Observed outcomes recorded for this session.");
+      partialReplay
+        ? "Only answers recorded by this replay are included, not the original scenario's full result."
+        : "Observed outcomes recorded for this session.");
     const stats = el("div", null, "ui-stats");
     const total = detail.observed_total || {};
     stats.appendChild(DemoUI.stat("Answered",
       Number.isFinite(detail.answered_count)
         ? `${detail.answered_count}/40` : null));
-    stats.appendChild(DemoUI.stat("Observed total",
+    stats.appendChild(DemoUI.stat(scoreLabel,
       Number.isFinite(total.correct) && Number.isFinite(total.out_of)
         ? `${total.correct} / ${total.out_of}` : null));
     stats.appendChild(DemoUI.stat("Status",
       failed ? "Replay failed" : statusLabel(detail.status)));
     snapshot.appendChild(stats);
+    if (partialReplay) {
+      snapshot.appendChild(el("p",
+        "No final replay score is available because not all 40 answers were recorded.",
+        "meta partial-replay-score-notice"));
+    }
     card.appendChild(snapshot);
     const feedback = DemoUI.section("Feedback & diagnostics",
       "Generation and release state for this session.");
