@@ -15,8 +15,8 @@ from demo_service import DemoService
 from live_diagnostics import LiveDiagnostics
 from tests.test_kt_adapter import FakeKT
 from tests.test_assessment_worked_review import (
-    grounded_rows, make_grounded_bank, make_grounded_taxonomy,
-    positions)
+    VALID_SECTIONS, fixture_reviews, grounded_rows,
+    make_grounded_bank, make_grounded_taxonomy, positions)
 from tests.browser_runtime import (
     cleanup_browser_directory, read_devtools_port)
 from tests.test_research_browser import Browser
@@ -188,10 +188,12 @@ class WorkedReviewBrowserTests(unittest.TestCase):
 
     def test_teacher_worked_example_override_rebuilds_draft(self):
         # Two incorrect percentage answers give the chooser a real
-        # alternative; the KT recommendation still leads. A second
+        # alternative; index 8 is also wrong so a checked-solution
+        # candidate besides the selected one exists (the injected
+        # markup in question 0 drops its checked solution). A second
         # session exercises session-switching while the override POST
         # is still in flight.
-        wrong = (positions(self.bank, "pct", 0)[:2]
+        wrong = (positions(self.bank, "pct", 0)[:1] + [8, 12]
                  + [positions(self.bank, "alg", 0)[0]])
         sid, token, cards = self._complete_pending(wrong)
         other_sid, _, _ = self._complete_pending()
@@ -204,8 +206,11 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertEqual(choice["selected_question_id"],
                          choice["recommended_question_id"])
         target = next(
-            c for c in choice["candidates"]
-            if c["question_id"] != choice["selected_question_id"])
+            (c for c in choice["candidates"]
+             if c["question_id"] != choice["selected_question_id"]
+             and c.get("checked_solution_available")),
+            next(c for c in choice["candidates"]
+                 if c["question_id"] != choice["selected_question_id"]))
         b = self.browser
         b.command("Page.navigate", {"url": f"{self.url}/teacher"})
         b.wait("document.readyState === 'complete'")
@@ -268,7 +273,8 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertIn(
             "Experimental KT estimates do not establish which "
             "explanation will improve learning most.", fieldset_text)
-        self.assertIn("rebuilds this draft", fieldset_text)
+        self.assertIn("regenerates only that example's explanation",
+                      fieldset_text)
 
         # Keyboard interaction through real CDP key events on the
         # focused select. Headless Edge does not commit <select>
@@ -303,12 +309,18 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         key((enter_down, enter_up))
         self.assertEqual(b.errors, [])
         new_value = b.js(f"{sel}.value")
-        if new_value == initial_value:
+        checked = {c["question_id"] for c in choice["candidates"]
+                   if c.get("checked_solution_available")}
+        if new_value == initial_value or new_value not in checked:
             # Headless limitation: commit the alternative option
-            # programmatically after the keyboard events.
+            # programmatically after the keyboard events; prefer a
+            # candidate with a checked solution.
             new_value = next(
-                c["question_id"] for c in choice["candidates"]
-                if c["question_id"] != initial_value)
+                (c["question_id"] for c in choice["candidates"]
+                 if c["question_id"] != initial_value
+                 and c.get("checked_solution_available")),
+                next(c["question_id"] for c in choice["candidates"]
+                     if c["question_id"] != initial_value))
             b.js(f"{sel}.value = {json.dumps(new_value)}; "
                  f"{sel}.dispatchEvent(new Event('change'))")
         self.assertNotEqual(new_value, initial_value)
@@ -439,6 +451,501 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertNotIn("Worked review", student_text)
         self.assertFalse(b.js(
             "Boolean(document.querySelector('.review-example'))"))
+        self.assertEqual(b.errors, [])
+
+    def test_hosted_scoped_example_processing_and_fallback(self):
+        # Hosted flow: a blocking scoped adapter holds the card-level
+        # job pending so the waiting UI is observable, then completes
+        # to overlay only the selected example.
+        gate = threading.Event()
+        scoped_calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                scoped_calls.append(card["question_id"])
+                gate.wait(15)
+                return {"question_id": card["question_id"],
+                        "steps": ["Provider rephrased step."],
+                        "reasoning_question": "Provider check?"}
+
+        class Full:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+
+        # Fresh bank: the shared fixture's injected markup drops one
+        # candidate's checked solution; this flow needs two usable
+        # alternatives.
+        bank = make_grounded_bank()
+        taxonomy = make_grounded_taxonomy(bank)
+        service = DemoService(
+            root=Path(self.tmp.name) / "hosted", bank=bank,
+            taxonomy=taxonomy,
+            provider_mode="hosted", generator=Full(),
+            worked_example_generator=Scoped(),
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(bank)))
+        self.addCleanup(service.close, wait=True)
+        pin = f"{secrets.randbelow(1000000):06d}"
+        server = make_server(service, pin)
+        thread = threading.Thread(
+            target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+
+        wrong = (positions(bank, "pct", 0)[:2]
+                 + [positions(bank, "alg", 0)[0]])
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in grounded_rows(bank, wrong):
+            service.submit_response(sid, token, row)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if service._load_meta(sid)["provider_job"]["status"] in (
+                    "ready", "fallback"):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("provider job did not finish")
+        detail = service.teacher_session(sid)
+        delivery = detail["feedback_delivery"]
+        before_sections = [s["text"]
+                           for s in delivery["preview"]["sections"]]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if any(cand["question_id"] != c["selected_question_id"]
+                   and cand.get("checked_solution_available")
+                   for cand in c["candidates"]))
+        target = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != choice["selected_question_id"]
+            and c.get("checked_solution_available"))
+
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("document.querySelector('#pin-input')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelectorAll('.session-row').length >= 1",
+               timeout=30)
+        b.js("document.querySelectorAll('.session-row')[0].click()")
+        b.wait("document.querySelector('#ws-tabs [data-tab=feedback]')",
+               timeout=30)
+        b.js("document.querySelector("
+             "'#ws-tabs [data-tab=feedback]').click()")
+        cid = json.dumps(choice["candidate_id"])
+        sel = ("document.querySelector("
+               f"'.worked-example-select[data-candidate-id={cid}]')")
+        b.wait(sel, timeout=30)
+        preview_text = ("document.querySelector('.feedback-preview')"
+                        " && document.querySelector("
+                        "'.feedback-preview').textContent")
+        self.assertIn(before_sections[0], b.js(preview_text))
+        b.js(f"{sel}.value = {json.dumps(target['question_id'])}; "
+             f"{sel}.dispatchEvent(new Event('change'))")
+        apply_btn = (f"{sel}.closest('fieldset')"
+                     ".querySelector('.worked-example-apply')")
+        self.assertFalse(b.js(f"{apply_btn}.disabled"))
+        b.js(f"{apply_btn}.click()")
+        # Scoped pending: waiting panel replaces preview and
+        # approval, and reports the scoped status row.
+        b.wait("document.querySelector('.end-feedback-waiting')",
+               timeout=30)
+        self.assertEqual(
+            b.js("document.querySelector('.end-feedback-waiting')"
+                 ".getAttribute('role')"), "status")
+        self.assertEqual(
+            b.js("document.querySelector('.end-feedback-waiting')"
+                 ".getAttribute('aria-busy')"), "true")
+        self.assertIn("Aitta is updating the selected worked example",
+                      b.js("document.querySelector("
+                           "'.end-feedback-waiting').textContent"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.feedback-preview'))"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector("
+            "'details[data-disclosure-key=feedback-editing]'))"))
+        self.assertFalse(b.js(
+            "Boolean([...document.querySelectorAll('button.primary')]"
+            ".find(n => n.textContent.startsWith('Approve')))"))
+        self.assertTrue(wait_for(
+            lambda: "Worked example generation" in b.js(
+                "document.querySelector('.release-status')"
+                ".textContent"), timeout=10))
+        b.js("document.querySelector('.end-feedback-waiting')"
+             ".scrollIntoView({block:'center'})")
+        b.screenshot("worked-example-scoped-pending")
+        # The generated wording lands on the selected card only;
+        # narrative and the other example stay unchanged.
+        gate.set()
+        self.assertTrue(wait_for(
+            lambda: "Provider rephrased step." in (
+                b.js(preview_text) or ""), timeout=30))
+        self.assertIn(before_sections[0], b.js(preview_text))
+        after = service.teacher_session(sid)["feedback_delivery"]
+        self.assertEqual(
+            [s["text"] for s in after["preview"]["sections"]],
+            before_sections)
+        meta = service._load_meta(sid)
+        job = meta["checkpoints"]["end"]["worked_example_job"]
+        self.assertEqual(job["status"], "ready")
+        self.assertEqual(scoped_calls, [target["question_id"]])
+        # Busy cleared without a stale awaited hash: the chooser can
+        # be used again, and the pending note was replaced by the
+        # observed outcome.
+        b.wait(f"{sel} && !{sel}.closest('fieldset').disabled",
+               timeout=30)
+        choice_text = b.js(
+            "document.querySelector('.worked-example-choice')"
+            ".textContent")
+        self.assertNotIn("being generated", choice_text)
+        self.assertIn("explanation was regenerated", choice_text)
+
+        # A failing scoped adapter publishes the explicit checked
+        # fallback warning, still without touching the narrative.
+        class Failing:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                raise RuntimeError("provider blew up")
+
+        service.worked_example_generator = Failing()
+        another = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != target["question_id"]
+            and c.get("checked_solution_available"))
+        b.js(f"{sel}.value = {json.dumps(another['question_id'])}; "
+             f"{sel}.dispatchEvent(new Event('change'))")
+        b.wait(f"{apply_btn} && !{apply_btn}.disabled", timeout=15)
+        b.js(f"{apply_btn}.click()")
+        self.assertTrue(wait_for(
+            lambda: "application-checked steps because AI generation "
+                    "did not complete" in b.js(
+                "document.querySelector('.release-status')"
+                ".textContent"), timeout=30))
+        self.assertTrue(b.js(
+            f"Boolean({sel} && "
+            f"{sel}.value === {json.dumps(another['question_id'])})"))
+        card = next(
+            c for c in service._load_meta(sid)["checkpoints"]["end"]
+            ["student_review"]["review_examples"]
+            if c["question_id"] == another["question_id"])
+        self.assertEqual(card["explanation_source"], "application")
+        # The chooser note also reports the checked-steps fallback.
+        self.assertIn("application-checked steps", b.js(
+            "document.querySelector('.worked-example-choice')"
+            ".textContent"))
+        self.assertEqual(b.errors, [])
+
+    def test_scoped_second_pending_ignores_stale_detail(self):
+        # A second accepted pending update must stay busy even when a
+        # stale teacher detail carrying the previous terminal job is
+        # served back; busy clears only on the new job's terminal or a
+        # strictly newer superseding job.
+        gates = [threading.Event(), threading.Event()]
+        scoped_calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                idx = len(scoped_calls)
+                scoped_calls.append(card["question_id"])
+                gates[idx].wait(15)
+                return {"question_id": card["question_id"],
+                        "steps": [f"Scoped step {idx + 1}."],
+                        "reasoning_question": "Scoped check?"}
+
+        class Full:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+
+        bank = make_grounded_bank()
+        service = DemoService(
+            root=Path(self.tmp.name) / "hosted2", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            provider_mode="hosted", generator=Full(),
+            worked_example_generator=Scoped(),
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(bank)))
+        self.addCleanup(service.close, wait=True)
+        pin = f"{secrets.randbelow(1000000):06d}"
+        server = make_server(service, pin)
+        thread = threading.Thread(
+            target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+
+        wrong = (positions(bank, "pct", 0)[:2]
+                 + [positions(bank, "alg", 0)[0]])
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in grounded_rows(bank, wrong):
+            service.submit_response(sid, token, row)
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if service._load_meta(sid)["provider_job"]["status"] in (
+                    "ready", "fallback"):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("provider job did not finish")
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if sum(cand.get("checked_solution_available")
+                   for cand in c["candidates"]) > 1)
+        cands = [c for c in choice["candidates"]
+                 if c.get("checked_solution_available")]
+        first = next(c for c in cands
+                     if c["question_id"]
+                     != choice["selected_question_id"])
+        second = next(c for c in cands
+                      if c["question_id"] != first["question_id"])
+
+        b = self.browser
+        b.command("Page.navigate", {"url": f"{url}/teacher"})
+        b.wait("document.readyState === 'complete'")
+        b.wait("document.querySelector('#pin-input')")
+        b.js(f"document.querySelector('#pin-input').value="
+             f"{json.dumps(pin)}; "
+             "document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelectorAll('.session-row').length >= 1",
+               timeout=30)
+        b.js("document.querySelectorAll('.session-row')[0].click()")
+        b.js("document.querySelector("
+             "'#ws-tabs [data-tab=feedback]').click()")
+        cid = json.dumps(choice["candidate_id"])
+        sel = ("document.querySelector("
+               f"'.worked-example-select[data-candidate-id={cid}]')")
+        b.wait(sel, timeout=30)
+
+        def apply(question_id):
+            b.js(f"{sel}.value = {json.dumps(question_id)}; "
+                 f"{sel}.dispatchEvent(new Event('change'))")
+            apply_btn = (f"{sel}.closest('fieldset')"
+                         ".querySelector('.worked-example-apply')")
+            b.wait(f"{apply_btn} && !{apply_btn}.disabled",
+                   timeout=15)
+            b.js(f"{apply_btn}.click()")
+
+        # First override: pending panel, then completion.
+        apply(first["question_id"])
+        b.wait("document.querySelector('.end-feedback-waiting')",
+               timeout=30)
+        gates[0].set()
+        b.wait("document.querySelector('.feedback-preview')",
+               timeout=30)
+        job1 = (service._load_meta(sid)["checkpoints"]["end"]
+                ["worked_example_job"])
+        self.assertEqual(job1["status"], "ready")
+
+        # A stale detail snapshot carrying job1 terminal is served
+        # once during the second accepted pending update.
+        stale = json.loads(json.dumps(
+            service.teacher_session(sid)))
+        stale["feedback_delivery"]["preview"]["sections"][0][
+            "text"] += " STALE-MARKER"
+        b.js(
+            "window.__stale = " + json.dumps(stale) + ";"
+            "window.__staleServe = false; window.__staleCount = 0;"
+            "const __orig = window.fetch.bind(window);"
+            "window.fetch = (input, init) => {"
+            f"  const u = String(input);"
+            f"  if (window.__staleServe && u.endsWith("
+            f"      '/api/teacher/sessions/{sid}')"
+            "      && (!init || !init.method"
+            "          || init.method === 'GET')) {"
+            "    window.__staleCount += 1;"
+            "    return Promise.resolve(new Response("
+            "      JSON.stringify(window.__stale),"
+            "      {headers: {'Content-Type': 'application/json'}}));"
+            "  }"
+            "  return __orig(input, init);"
+            "};")
+        b.js("window.__staleServe = true")
+        apply(second["question_id"])
+        # The stale detail is served and rendered while job2 is
+        # pending; busy must persist on the local accepted job.
+        self.assertTrue(wait_for(
+            lambda: b.js("window.__staleCount >= 1"), timeout=15))
+        time.sleep(0.5)
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('.end-feedback-waiting'))"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('.feedback-preview'))"))
+        self.assertFalse(b.js(
+            "Boolean([...document.querySelectorAll('button.primary')]"
+            ".find(n => n.textContent.startsWith('Approve')))"))
+        self.assertNotIn("STALE-MARKER", b.js(
+            "document.body.textContent"))
+        # Real pending detail arrives; still busy. Completion clears.
+        b.js("window.__staleServe = false")
+        gates[1].set()
+        self.assertTrue(wait_for(
+            lambda: "Scoped step 2." in (b.js(
+                "document.querySelector('.feedback-preview')"
+                " && document.querySelector('.feedback-preview')"
+                ".textContent") or ""), timeout=30))
+        b.wait(f"{sel} && !{sel}.closest('fieldset').disabled",
+               timeout=30)
+        job2 = (service._load_meta(sid)["checkpoints"]["end"]
+                ["worked_example_job"])
+        self.assertEqual(job2["status"], "ready")
+        self.assertNotEqual(job2["job_id"], job1["job_id"])
+        self.assertEqual(scoped_calls, [first["question_id"],
+                                        second["question_id"]])
+        self.assertEqual(b.errors, [])
+
+    def test_worked_example_chooser_english_display_text(self):
+        # Chooser legend and option prompts render through the same
+        # English display helpers as the feedback cards; candidate
+        # ids, selection flags and the served payload stay raw.
+        sid, token, cards = self._complete_pending()
+        delivery = self.service.teacher_session(sid)[
+            "feedback_delivery"]
+        choices = delivery["worked_example_choices"]
+        self.assertTrue(choices)
+        raw_prompts = {cand["question_id"]: cand["prompt"]
+                       for ch in choices for cand in ch["candidates"]}
+        expected = {ch["candidate_id"]: ch for ch in choices}
+        original = self.service.teacher_session
+        injected = [
+            "100 % luvusta 75",
+            "Sievenn\u00e4 lauseke:\\n\\n5v + 2v",
+            "<img src=x onerror=alert(1)>"]
+
+        def patched(session_id):
+            v = original(session_id)
+            if session_id != sid:
+                return v
+            chs = v["feedback_delivery"].get(
+                "worked_example_choices") or []
+            i = 0
+            for idx, ch in enumerate(chs):
+                ch["subtopic_name"] = (
+                    "Samanmuotoisten termien yhdist\u00e4minen")
+                if idx == 0 and ch["candidates"]:
+                    clone = dict(ch["candidates"][0])
+                    clone["question_id"] = "injected_img_q"
+                    clone["prompt"] = injected[2]
+                    clone["checked_solution_available"] = True
+                    ch["candidates"] = list(ch["candidates"]) + [clone]
+                for cand in ch["candidates"]:
+                    if cand["question_id"] != "injected_img_q":
+                        cand["prompt"] = injected[i % 2]
+                        i += 1
+            return v
+
+        b = self.browser
+        self.service.teacher_session = patched
+        try:
+            b.command("Page.navigate", {"url": f"{self.url}/teacher"})
+            b.wait("document.readyState === 'complete'")
+            b.wait("document.querySelector('#pin-input')")
+            b.js(f"document.querySelector('#pin-input').value="
+                 f"{json.dumps(self.pin)}; "
+                 "document.querySelector('#unlock-form')"
+                 ".requestSubmit()")
+            b.wait("!document.querySelector('#teacher-app').hidden")
+            b.wait("document.querySelector('.session-row')")
+            b.js("document.querySelector('.session-row').click()")
+            b.js("document.querySelector("
+                 "'#ws-tabs [data-tab=feedback]').click()")
+            selects = ("[...document.querySelectorAll("
+                       "'.worked-example-select')]")
+            b.wait(f"{selects}.length === {len(expected)}", timeout=30)
+            for text in json.loads(b.js(
+                    "JSON.stringify([...document.querySelectorAll("
+                    "'.worked-example-choice legend')]"
+                    ".map((n) => n.textContent))")):
+                self.assertEqual(
+                    text,
+                    "Worked example \u2014 Combining like terms")
+            sel_data = json.loads(b.js(
+                f"JSON.stringify({selects}.map((s) => ({{"
+                "cid: s.dataset.candidateId, value: s.value,"
+                " options: [...s.options].map((o) => ({value: o.value,"
+                " text: o.textContent, selected: o.selected}))"
+                " })))"))
+            for sdata in sel_data:
+                ch = expected[sdata["cid"]]
+                self.assertEqual(sdata["value"],
+                                 ch["selected_question_id"])
+                for opt in sdata["options"]:
+                    cand = next(
+                        (c for c in ch["candidates"]
+                         if c["question_id"] == opt["value"]), None)
+                    self.assertTrue(
+                        opt["text"].startswith("Question "))
+                    if cand is None:
+                        continue
+                    if opt["value"] == ch["recommended_question_id"]:
+                        self.assertIn("(recommended)", opt["text"])
+                    if not cand["checked_solution_available"]:
+                        self.assertIn("(no checked solution)",
+                                      opt["text"])
+                    self.assertEqual(
+                        opt["selected"],
+                        opt["value"] == ch["selected_question_id"])
+                    self.assertNotIn("\n", opt["text"])
+                    self.assertNotIn("\\n", opt["text"])
+                    for marker in ("luvusta", "Sievenn"):
+                        self.assertNotIn(marker, opt["text"])
+            all_text = b.js(
+                "[...document.querySelectorAll("
+                "'.worked-example-select option')]"
+                ".map((o) => o.textContent).join('|')")
+            self.assertIn("What is 100% of 75?", all_text)
+            self.assertIn("Simplify: 5v + 2v", all_text)
+            # An unknown string is shown literally, never as HTML.
+            self.assertIn("<img src=x onerror=alert(1)>", all_text)
+            self.assertIsNone(b.js(
+                "document.querySelector('#tab-feedback img')"))
+            b.viewport(390, 844)
+            b.js(f"{selects}[0].scrollIntoView({{block:'center'}})")
+            self.assertFalse(b.js(
+                "document.documentElement.scrollWidth > "
+                "document.documentElement.clientWidth"))
+            b.screenshot("worked-chooser-english-390.png")
+            b.viewport(1440, 1100)
+            b.js(f"{selects}[0].scrollIntoView({{block:'center'}})")
+            b.screenshot("worked-chooser-english-1440.png")
+        finally:
+            self.service.teacher_session = original
+        # Display-only: the served payload still carries raw prompts.
+        fresh = self.service.teacher_session(sid)[
+            "feedback_delivery"]["worked_example_choices"]
+        self.assertEqual(
+            {cand["question_id"]: cand["prompt"]
+             for ch in fresh for cand in ch["candidates"]},
+            raw_prompts)
         self.assertEqual(b.errors, [])
 
     def test_legacy_released_snapshot_key_is_ignored(self):
@@ -823,7 +1330,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertFalse(state["solOpen"])
         self.assertEqual(state["summary"],
                          "Reveal checked worked steps")
-        self.assertEqual(state["correctVisible"], False)
+        self.assertFalse(state["correctVisible"])
         self.assertFalse(state["topCorrect"])
         card_text = b.js(card_sel + ".textContent")
         self.assertIn("Your selected answer:", card_text)
@@ -1005,7 +1512,7 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             "'details.worked-solution'))}; })()")
         self.assertEqual(result["summary0"],
                          "Reveal answer and worked steps")
-        self.assertEqual(result["explVisible"], False)
+        self.assertFalse(result["explVisible"])
         self.assertEqual(result["contrast"],
                          "Consider the variable part.")
         self.assertEqual(result["hints0"], 2)

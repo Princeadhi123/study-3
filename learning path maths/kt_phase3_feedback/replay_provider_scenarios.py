@@ -122,7 +122,8 @@ def generation_request(payload, model):
                                                ("candidate_id", "strategy", "review_status")}}}
 
 
-AUTOMATIC_RETRY_PROVIDERS = frozenset({"aitta_full", "aitta_midpoint"})
+AUTOMATIC_RETRY_PROVIDERS = frozenset(
+    {"aitta_full", "aitta_midpoint", "aitta_worked_example"})
 AUTOMATIC_RETRY_MAX = 3
 _RETRYABLE_STAGES = frozenset({"open_failed", "body_read_failed"})
 _RETRYABLE_KINDS = frozenset({"timeout", "network_error"})

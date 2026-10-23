@@ -15,7 +15,8 @@ from unittest import mock
 import tempfile
 
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
-from demo_service import ConflictError, DemoService
+from demo_service import (CHECKPOINT_LENGTHS, ConflictError, DemoService,
+                          FEEDBACK_BUNDLE_VERSION)
 from live_diagnostics import LiveDiagnostics
 from tests.helpers import make_bank, make_taxonomy, responses
 from tests.test_kt_adapter import FakeKT
@@ -946,6 +947,147 @@ class DemoServiceTests(unittest.TestCase):
         restarted.close()
         gate.set()
         self.service = restarted
+
+    # ---------- interrupted recovery helpers ----------
+
+    def _recover_meta(self, session_id, meta):
+        """Write a session file and run restart recovery with the
+        loader/saver mocked; returns the list of saved metas."""
+        sessions_dir = Path(self.tmp.name) / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        (sessions_dir / f"{session_id}.json").write_text("{}")
+        saved = []
+        with mock.patch.object(
+                self.service, "_try_load_meta",
+                return_value=meta), mock.patch.object(
+                self.service, "_save_meta",
+                side_effect=lambda m: saved.append(m)):
+            self.service._recover_interrupted()
+        return saved
+
+    def test_recover_processes_all_pending_checkpoint_jobs(self):
+        sid = "a" * 32
+        meta = {
+            "session_id": sid,
+            "feedback_bundle_version": FEEDBACK_BUNDLE_VERSION,
+            "checkpoints": {
+                "midpoint": {},
+                "end": {
+                    "diagnostics_job": {"status": "pending"},
+                    "phrasing_job": {"status": "pending"},
+                    "worked_example_job": {"status": "pending"},
+                    "recommendation_job": {"status": "pending"},
+                },
+            },
+        }
+        saved = self._recover_meta(sid, meta)
+        self.assertEqual(saved, [meta])
+        end = meta["checkpoints"]["end"]
+        # Every pending job must be recovered even though an earlier
+        # job already marked the meta changed.
+        self.assertEqual(end["diagnostics_job"]["status"], "unavailable")
+        self.assertEqual(end["diagnostics_job"]["reason"],
+                         "interrupted_by_restart")
+        self.assertEqual(end["diagnostics"]["status"], "unavailable")
+        for key in ("phrasing_job", "worked_example_job"):
+            self.assertEqual(end[key]["status"], "fallback")
+            self.assertEqual(end[key]["reason"],
+                             "interrupted_by_restart")
+            self.assertIn("finished_at", end[key])
+        self.assertEqual(end["recommendation_job"]["status"],
+                         "unavailable")
+        self.assertEqual(end["recommendation"], {
+            "status": "unavailable",
+            "mode": "shadow_only",
+            "reason": "interrupted_by_restart",
+            "used_for_student_advice": False,
+            "used_for_feedback": False})
+        self.assertEqual(end["practice_context"]["status"],
+                         "unavailable")
+
+    def test_recover_leaves_unchanged_meta_unsaved(self):
+        sid = "b" * 32
+        meta = {
+            "session_id": sid,
+            "checkpoints": {
+                "midpoint": {"diagnostics_job": {"status": "ready"}},
+                "end": {"worked_example_job": {"status": "ready"}},
+            },
+            "provider_job": {"status": "ready"},
+        }
+        before = copy.deepcopy(meta)
+        saved = self._recover_meta(sid, meta)
+        self.assertEqual(saved, [])
+        self.assertEqual(meta, before)
+
+    def test_recover_misaligned_diagnostics_preserved_fields(self):
+        sid = "c" * 32
+        meta = {
+            "session_id": sid,
+            "checkpoints": {
+                "midpoint": {},
+                "end": {
+                    "diagnostics": {
+                        "status": "ready",
+                        "checkpoint": "midpoint",
+                        "answer_count":
+                            CHECKPOINT_LENGTHS["midpoint"],
+                    },
+                },
+            },
+        }
+        saved = self._recover_meta(sid, meta)
+        self.assertEqual(saved, [meta])
+        end = meta["checkpoints"]["end"]
+        self.assertEqual(end["diagnostics"], {
+            "status": "unavailable",
+            "reason": "checkpoint_alignment_mismatch",
+            "recorded_checkpoint": "midpoint",
+            "recorded_answer_count": CHECKPOINT_LENGTHS["midpoint"],
+        })
+        self.assertEqual(end["diagnostics_job"]["status"], "unavailable")
+        self.assertEqual(end["diagnostics_job"]["reason"],
+                         "checkpoint_alignment_mismatch")
+        self.assertIn("finished_at", end["diagnostics_job"])
+
+    def test_recover_scoped_worked_job_keeps_narrative(self):
+        sid = "d" * 32
+        review = {"message": "hosted narrative",
+                  "worked_examples": [{"candidate_id": "c1"}]}
+        meta = {
+            "session_id": sid,
+            "checkpoints": {
+                "midpoint": {},
+                "end": {
+                    "worked_example_job": {"status": "pending"},
+                    "student_review": review,
+                },
+            },
+            "provider_job": {"status": "ready"},
+        }
+        sessions_dir = Path(self.tmp.name) / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        (sessions_dir / f"{sid}.json").write_text("{}")
+        saved = []
+        with mock.patch.object(
+                self.service, "_try_load_meta",
+                return_value=meta), mock.patch.object(
+                self.service, "_save_meta",
+                side_effect=lambda m: saved.append(m)
+                ), mock.patch.object(
+                self.service, "_publish_baselines") as publish:
+            self.service._recover_interrupted()
+        # A scoped-only interrupted job must not publish baselines or
+        # wipe the preserved narrative.
+        publish.assert_not_called()
+        self.assertEqual(saved, [meta])
+        job = meta["checkpoints"]["end"]["worked_example_job"]
+        self.assertEqual(job["status"], "fallback")
+        self.assertEqual(job["reason"], "interrupted_by_restart")
+        self.assertIn("finished_at", job)
+        self.assertIs(meta["checkpoints"]["end"]["student_review"],
+                      review)
+        self.assertEqual(meta["provider_job"], {"status": "ready"})
 
     # ---------- reviews ----------
 

@@ -35,10 +35,10 @@ from assessment_worked_review import (
     question_first_preview)
 from active_payload import active_payload
 from evidence_feedback import (
-    MIDPOINT_MESSAGE_VERSION, build_evidence, build_research_evidence,
-    bundle_selection_payload, canonical_digest, compose_midpoint_message,
-    run_feedback, run_multi_feedback, select_review_bundle,
-    validate_evidence)
+    MIDPOINT_MESSAGE_VERSION, _overlay_worked_review, build_evidence,
+    build_research_evidence, bundle_selection_payload, canonical_digest,
+    compose_midpoint_message, run_feedback, run_multi_feedback,
+    select_review_bundle, validate_evidence)
 from evidence_feedback_policy import (
     MULTI_REVIEW_POLICY_VERSION, MULTI_SELECTION_INSTRUCTIONS,
     MULTI_SELECTION_PROMPT_VERSION,
@@ -76,6 +76,10 @@ from shadow_practice import (
     ShadowPracticeRecommender, validate_practice_pool, validate_target_band)
 from synthetic_feedback import PROMPT_VERSION
 import worked_example_selection
+from worked_example_generation import (
+    CachedWorkedExampleGenerator, WorkedExampleAittaGenerator,
+    build_input as build_worked_example_input,
+    validate_reply as validate_worked_example_reply)
 from worked_first_context import (
     CONTEXT_VERSION as WORKED_FIRST_CONTEXT_VERSION,
     PROMPT_VERSION as WORKED_FIRST_GENERATION_PROMPT_VERSION,
@@ -208,7 +212,7 @@ class DemoService:
                  recommender=None, replay_bank_mode="demo",
                  review_mode="aligned_two_topic",
                  provider_workers=8, diagnostics_workers=4,
-                 midpoint_generator=None):
+                 midpoint_generator=None, worked_example_generator=None):
         # Validate opt-in shadow wiring before any directory/pool/provider
         # side effects.
         if (practice_pool is None) != (practice_target_band is None):
@@ -286,6 +290,9 @@ class DemoService:
         self.provider_timeout = provider_timeout
         self.cache = None
         self.midpoint_generator = midpoint_generator
+        # Injected scoped worked-example adapter (tests or pre-wired
+        # hosted providers); it never gains env access implicitly.
+        self.worked_example_generator = worked_example_generator
         if selector is not None or generator is not None:
             # Injected adapters (tests or pre-wired hosted providers);
             # they never gain a hosted midpoint call implicitly.
@@ -429,6 +436,9 @@ class DemoService:
         midpoint_inner = copy.copy(inner)
         midpoint_inner._meta_local = threading.local()
         midpoint_inner._fallback_metadata = dict(inner._fallback_metadata)
+        worked_inner = copy.copy(inner)
+        worked_inner._meta_local = threading.local()
+        worked_inner._fallback_metadata = dict(inner._fallback_metadata)
         native_generator = FullFeedbackAittaGenerator(inner)
         captures = self.root / "provider_captures"
         captures.mkdir(exist_ok=True)
@@ -440,6 +450,10 @@ class DemoService:
         self.midpoint_generator = CachedMidpointGenerator(
             MidpointAittaGenerator(midpoint_inner),
             self.cache, inner._model, endpoint_hash)
+        if self.worked_example_generator is None:
+            self.worked_example_generator = CachedWorkedExampleGenerator(
+                WorkedExampleAittaGenerator(worked_inner),
+                self.cache, inner._model, endpoint_hash)
         return (None, CachedFullFeedbackGenerator(
             native_generator, self.cache, inner._model, endpoint_hash))
 
@@ -455,89 +469,124 @@ class DemoService:
             with self.lock:
                 changed = False
                 for name, checkpoint in meta["checkpoints"].items():
-                    job = checkpoint.get("diagnostics_job")
-                    if job and job["status"] == "pending":
-                        job["status"] = "unavailable"
-                        job["reason"] = "interrupted_by_restart"
-                        checkpoint["diagnostics"] = {
-                            "status": "unavailable",
-                            "reason": "interrupted_by_restart"}
-                        changed = True
-                    pjob = checkpoint.get("phrasing_job")
-                    if pjob and pjob["status"] == "pending":
-                        pjob["status"] = "fallback"
-                        pjob["reason"] = "interrupted_by_restart"
-                        pjob["finished_at"] = utc_now()
-                        changed = True
-                    rjob = checkpoint.get("recommendation_job")
-                    if rjob and rjob["status"] == "pending":
-                        rjob["status"] = "unavailable"
-                        rjob["reason"] = "interrupted_by_restart"
-                        checkpoint["recommendation"] = {
-                            "status": "unavailable",
-                            "mode": "shadow_only",
-                            "reason": "interrupted_by_restart",
-                            "used_for_student_advice": False,
-                            "used_for_feedback": False}
-                        if (name == "end"
-                                and meta.get("feedback_bundle_version")
-                                == FEEDBACK_BUNDLE_VERSION
-                                and checkpoint.get("practice_context")
-                                is None):
-                            checkpoint["practice_context"] = (
-                                empty_context("unavailable"))
-                        changed = True
-                    diag = checkpoint.get("diagnostics")
-                    if (isinstance(diag, dict)
-                            and diag.get("status") == "ready"
-                            and (diag.get("checkpoint") != name
-                                 or diag.get("answer_count")
-                                 != CHECKPOINT_LENGTHS[name])):
-                        # Recorded against the wrong checkpoint; never
-                        # redrive it, just refuse to present it.
-                        checkpoint["diagnostics"] = {
-                            "status": "unavailable",
-                            "reason": "checkpoint_alignment_mismatch",
-                            "recorded_checkpoint": diag.get("checkpoint"),
-                            "recorded_answer_count":
-                                diag.get("answer_count")}
-                        checkpoint["diagnostics_job"] = {
-                            "status": "unavailable",
-                            "reason": "checkpoint_alignment_mismatch",
-                            "finished_at": utc_now()}
-                        changed = True
-                job = meta.get("provider_job")
-                if job and job["status"] == "pending":
-                    job["status"] = "fallback"
-                    job["interrupted"] = True
-                    end_cp = meta["checkpoints"].get("end", {})
-                    if (meta.get("feedback_bundle_version")
-                            == FEEDBACK_BUNDLE_VERSION
-                            and end_cp.get("practice_context") is None):
-                        end_cp["practice_context"] = empty_context(
-                            "unavailable")
-                    self._publish_baselines(meta)
-                    changed = True
-                elif (job and job["status"] in (
-                        "waiting_for_practice", "waiting_for_diagnostics")
-                      and meta.get("feedback_bundle_version")
-                      == FEEDBACK_BUNDLE_VERSION):
-                    job["status"] = "fallback"
-                    job["interrupted"] = True
-                    if not self._is_multi(meta):
-                        try:
-                            evidence = meta["checkpoints"]["end"].get(
-                                "evidence")
-                            if evidence is not None:
-                                self._terminal_practice(meta, evidence)
-                        except Exception:
-                            meta["checkpoints"]["end"][
-                                "practice_context"] = empty_context(
-                                    "unavailable")
-                    self._publish_baselines(meta)
-                    changed = True
+                    changed = (self._recover_checkpoint_jobs(
+                        meta, name, checkpoint) or changed)
+                changed = (self._recover_provider_job(meta)
+                           or changed)
                 if changed:
                     self._save_meta(meta)
+
+    def _recover_checkpoint_jobs(self, meta, name, checkpoint):
+        """Recover every orphaned job inside one checkpoint. Returns
+        whether the checkpoint was modified. Callers hold the lock;
+        every pending job must be processed even when an earlier one
+        already marked the checkpoint changed."""
+        changed = False
+        job = checkpoint.get("diagnostics_job")
+        if job and job["status"] == "pending":
+            job["status"] = "unavailable"
+            job["reason"] = "interrupted_by_restart"
+            checkpoint["diagnostics"] = {
+                "status": "unavailable",
+                "reason": "interrupted_by_restart"}
+            changed = True
+        for key in ("phrasing_job", "worked_example_job"):
+            job = checkpoint.get(key)
+            if job and job["status"] == "pending":
+                job["status"] = "fallback"
+                job["reason"] = "interrupted_by_restart"
+                job["finished_at"] = utc_now()
+                changed = True
+        changed = (self._recover_recommendation(meta, name, checkpoint)
+                   or changed)
+        changed = (self._recover_diagnostics_alignment(name, checkpoint)
+                   or changed)
+        return changed
+
+    def _recover_recommendation(self, meta, name, checkpoint):
+        """Recover an orphaned pending recommendation job. Returns
+        whether anything changed. Callers hold the lock."""
+        job = checkpoint.get("recommendation_job")
+        if not job or job["status"] != "pending":
+            return False
+        job["status"] = "unavailable"
+        job["reason"] = "interrupted_by_restart"
+        checkpoint["recommendation"] = {
+            "status": "unavailable",
+            "mode": "shadow_only",
+            "reason": "interrupted_by_restart",
+            "used_for_student_advice": False,
+            "used_for_feedback": False}
+        if (name == "end"
+                and meta.get("feedback_bundle_version")
+                == FEEDBACK_BUNDLE_VERSION
+                and checkpoint.get("practice_context") is None):
+            checkpoint["practice_context"] = empty_context(
+                "unavailable")
+        return True
+
+    @staticmethod
+    def _recover_diagnostics_alignment(name, checkpoint):
+        """Refuse misaligned recorded diagnostics; never redrive them.
+        Returns whether anything changed."""
+        diag = checkpoint.get("diagnostics")
+        if (not isinstance(diag, dict)
+                or diag.get("status") != "ready"
+                or (diag.get("checkpoint") == name
+                    and diag.get("answer_count")
+                    == CHECKPOINT_LENGTHS[name])):
+            return False
+        # Recorded against the wrong checkpoint; never redrive it,
+        # just refuse to present it.
+        checkpoint["diagnostics"] = {
+            "status": "unavailable",
+            "reason": "checkpoint_alignment_mismatch",
+            "recorded_checkpoint": diag.get("checkpoint"),
+            "recorded_answer_count": diag.get("answer_count")}
+        checkpoint["diagnostics_job"] = {
+            "status": "unavailable",
+            "reason": "checkpoint_alignment_mismatch",
+            "finished_at": utc_now()}
+        return True
+
+    def _recover_waiting_practice(self, meta):
+        """Best-effort terminal practice for a single-mode end job
+        that was waiting when the process died. Callers hold the
+        lock."""
+        try:
+            evidence = meta["checkpoints"]["end"].get("evidence")
+            if evidence is not None:
+                self._terminal_practice(meta, evidence)
+        except Exception:
+            meta["checkpoints"]["end"]["practice_context"] = (
+                empty_context("unavailable"))
+
+    def _recover_provider_job(self, meta):
+        """Recover the aggregate provider job. Returns whether the
+        meta changed. Callers hold the lock."""
+        job = meta.get("provider_job")
+        if job and job["status"] == "pending":
+            job["status"] = "fallback"
+            job["interrupted"] = True
+            end_cp = meta["checkpoints"].get("end", {})
+            if (meta.get("feedback_bundle_version")
+                    == FEEDBACK_BUNDLE_VERSION
+                    and end_cp.get("practice_context") is None):
+                end_cp["practice_context"] = empty_context(
+                    "unavailable")
+            self._publish_baselines(meta)
+            return True
+        if (job and job["status"] in (
+                "waiting_for_practice", "waiting_for_diagnostics")
+                and meta.get("feedback_bundle_version")
+                == FEEDBACK_BUNDLE_VERSION):
+            job["status"] = "fallback"
+            job["interrupted"] = True
+            if not self._is_multi(meta):
+                self._recover_waiting_practice(meta)
+            self._publish_baselines(meta)
+            return True
+        return False
 
     def close(self, wait=False):
         with self.lock:
@@ -1234,6 +1283,11 @@ class DemoService:
                 block["phrasing_job"] = phrasing
                 block["provider_draft"] = None
                 block["provider_draft_version"] = None
+            wjob = meta["checkpoints"]["end"].get("worked_example_job")
+            if wjob and wjob.get("status") == "pending":
+                wjob.update({"status": "cancelled",
+                             "reason": "replay_case_failed",
+                             "finished_at": utc_now()})
             job = meta["provider_job"]
             if job.get("status") in (
                     "pending", "waiting_for_practice",
@@ -1764,6 +1818,9 @@ class DemoService:
             return (meta["provider_job"]["status"] in ("ready", "fallback")
                     and midpoint.get("phrasing_job", {}).get("status")
                     != "pending"
+                    and (meta["checkpoints"]["end"]
+                         .get("worked_example_job") or {})
+                    .get("status") != "pending"
                     and all(c["diagnostics_job"]["status"] != "pending"
                             for c in meta["checkpoints"].values()))
 
@@ -2677,6 +2734,8 @@ class DemoService:
                                 else "legacy_single"),
                 "practice_status": None,
                 "practice_status_message": None,
+                "worked_example_job": copy.deepcopy(
+                    end.get("worked_example_job")),
                 "preview": preview,
                 "preview_sha256": (canonical_digest(preview)
                                    if preview is not None else None),
@@ -2837,6 +2896,12 @@ class DemoService:
                 self.replays.sync_reviews(session_id, meta["reviews"])
             return {"recorded": True, "review": copy.deepcopy(entry)}
 
+    @staticmethod
+    def _worked_example_job_pending(meta):
+        return ((meta["checkpoints"]["end"]
+                 .get("worked_example_job") or {})
+                .get("status") == "pending")
+
     def release_feedback(self, session_id, body):
         if (not isinstance(body, dict)
                 or not set(body) <= {"message_sha256", "reviewer_label"}
@@ -2856,6 +2921,9 @@ class DemoService:
             if session["status"] != "complete":
                 raise ValueError(
                     "release requires a completed session")
+            if self._worked_example_job_pending(meta):
+                raise ConflictError(
+                    "a worked example update is still in progress")
             preview = self._final_preview(meta)
             if preview is None:
                 raise ConflictError("feedback is not ready for release")
@@ -2959,6 +3027,21 @@ class DemoService:
             if (card or {}).get("question_id") == question_id:
                 # Already selected: idempotent, no draft reset.
                 return {"saved": True, "preview_sha256": current}
+            if self._worked_example_job_pending(meta):
+                raise ConflictError(
+                    "a worked example update is still in progress")
+            edit = meta.get("feedback_edit")
+            if (isinstance(edit, dict)
+                    and isinstance(
+                        (edit.get("preview") or {})
+                        .get("document_text"), str)):
+                # A saved free-form document cannot be safely patched
+                # per example; the teacher must remove it or switch to
+                # structured fields first.
+                raise ConflictError(
+                    "a saved teacher-edited document cannot be updated "
+                    "per worked example; save wording as structured "
+                    "fields or discard the document first")
             rows = self._rows(session_id)
             context = self._context_for(meta)
             cloned = copy.deepcopy(snapshot)
@@ -2984,15 +3067,42 @@ class DemoService:
             assessment_ctx[worked_example_selection.CONTEXT_KEY] = cloned
             practice = [copy.deepcopy(c["context"])
                         for c in end.get("practice_contexts") or []]
-            # Deterministic rebuild: provider prose or a saved document
-            # can never reference the replaced question.
+            # The deterministic rebuild only supplies the replacement
+            # card and the updated frozen selection context; the stored
+            # narrative, other example cards and practice are kept.
             rebuilt = run_multi_feedback(
                 evidence, selection=selection,
                 practice_contexts=practice,
                 assessment_context=assessment_ctx)
             now = utc_now()
-            rebuilt["trace"]["phrasing_source"] = "deterministic"
-            rebuilt["trace"]["worked_example_override"] = {
+            target = next(
+                (c for c in rebuilt.get("review_examples") or []
+                 if c.get("candidate_id") == candidate_id), None)
+            if target is None:
+                raise ConflictError(
+                    "rebuilt worked example card unavailable")
+            review = copy.deepcopy(end["student_review"])
+            cards = review.get("review_examples") or []
+            position = next(
+                (i for i, c in enumerate(cards)
+                 if c.get("candidate_id") == candidate_id), None)
+            if position is None:
+                raise ValueError(
+                    "candidate card not found in stored review")
+            new_card = copy.deepcopy(target)
+            new_card["explanation_source"] = "application"
+            cards[position] = new_card
+            sources = dict(
+                review["trace"].get("worked_review_sources") or {})
+            # Drop the replaced question's source entry when no other
+            # current card still uses that question.
+            old_question = (card or {}).get("question_id")
+            remaining = {c.get("question_id") for c in cards}
+            if old_question and old_question not in remaining:
+                sources.pop(old_question, None)
+            sources[question_id] = "application"
+            review["trace"]["worked_review_sources"] = sources
+            review["trace"]["worked_example_override"] = {
                 "candidate_id": candidate_id,
                 "question_id": question_id,
                 "reviewer_label": reviewer,
@@ -3011,17 +3121,250 @@ class DemoService:
             meta.setdefault(
                 "worked_example_selection_history", []).append(audit)
             end[worked_example_selection.CONTEXT_KEY] = cloned
-            end["student_review"] = rebuilt
-            meta["feedback_edit"] = None
-            meta["provider_job"].setdefault(
-                "executions", {}).setdefault(
-                    "student", {})["generator"] = {
-                        "status": "teacher_selected_checked_draft"}
-            end["provider_job"] = copy.deepcopy(meta["provider_job"])
+            end["student_review"] = review
+            # The comparison baseline shows the same replacement card;
+            # its unrelated narrative and cards are preserved.
+            baseline = end.get("baseline_student")
+            if isinstance(baseline, dict):
+                for i, b_card in enumerate(
+                        baseline.get("review_examples") or []):
+                    if b_card.get("candidate_id") == candidate_id:
+                        baseline["review_examples"][i] = copy.deepcopy(
+                            new_card)
+            # The aggregate provider_job keeps its original narrative
+            # provenance untouched; only the scoped worked_example_job
+            # records this replacement's execution.
+            self._refresh_saved_edit_card(
+                meta, session, candidate_id)
+            job = self._admit_worked_example_job(
+                session_id, meta, new_card, candidate_id, question_id,
+                now)
             self._save_meta(meta)
+            if job["status"] == "pending":
+                try:
+                    self.provider_pool.submit(
+                        self._run_worked_example_job,
+                        session_id, job["job_id"])
+                except RuntimeError:
+                    with self.lock:
+                        self._pending_provider = max(
+                            0, self._pending_provider - 1)
+                        meta = self._load_meta(session_id)
+                        current_job = (
+                            meta["checkpoints"]["end"]
+                            .get("worked_example_job") or {})
+                        if current_job.get("job_id") == job["job_id"]:
+                            current_job.update({
+                                "status": "fallback",
+                                "reason": "service_closing",
+                                "finished_at": utc_now()})
+                            meta["checkpoints"]["end"][
+                                "worked_example_job"] = current_job
+                            self._save_meta(meta)
+                            job = current_job
             return {"saved": True,
                     "preview_sha256": canonical_digest(
-                        self._final_preview(meta))}
+                        self._final_preview(meta)),
+                    "worked_example_job": copy.deepcopy(job)}
+
+    def _refresh_saved_edit_card(self, meta, session, candidate_id):
+        """Patch only the replaced worked-example card inside a saved
+        structured edit preview, preserving the teacher's unrelated
+        sections, content and other cards. Callers hold the lock."""
+        edit = meta.get("feedback_edit")
+        if not isinstance(edit, dict):
+            return
+        preview = edit.get("preview")
+        if not isinstance(preview, dict):
+            return
+        fresh = self._multi_preview(meta, session)
+        fresh_card = next(
+            (c for c in fresh.get("review_examples") or []
+             if c.get("candidate_id") == candidate_id), None)
+        if fresh_card is None:
+            return
+        for i, card in enumerate(
+                preview.get("review_examples") or []):
+            if card.get("candidate_id") == candidate_id:
+                preview["review_examples"][i] = copy.deepcopy(
+                    fresh_card)
+        if (preview.get("review_example") or {}).get(
+                "candidate_id") == candidate_id:
+            preview["review_example"] = copy.deepcopy(fresh_card)
+
+    def _admit_worked_example_job(self, session_id, meta, card,
+                                  candidate_id, question_id, now):
+        """Queue the scoped worked-example generation job for one
+        already-saved checked card. Returns the job record; a pending
+        job has reserved a provider pool slot the caller must submit or
+        release. Callers hold the lock."""
+        end = meta["checkpoints"]["end"]
+        job = {"job_id": secrets.token_hex(8), "status": "unavailable",
+               "candidate_id": candidate_id, "question_id": question_id,
+               "queued_at": now, "finished_at": now}
+        hosted = (meta["provider_job"].get("provider_mode") == "hosted")
+        adapter = self.worked_example_generator
+        if card.get("status") != "ready":
+            job["reason"] = "no_checked_solution"
+        elif not hosted:
+            job.update({"status": "ready", "source": "application",
+                        "reason": "rules_mode_application_only"})
+        elif adapter is None:
+            job.update({"status": "fallback",
+                        "reason": "adapter_unavailable"})
+        elif self._provider_session_event(session_id, meta).is_set():
+            job.update({"status": "cancelled",
+                        "reason": "replay_case_failed"})
+        elif self._closing:
+            job.update({"status": "fallback",
+                        "reason": "service_closing"})
+        elif self._pending_provider >= self.max_pending_jobs:
+            job.update({"status": "fallback",
+                        "reason": "demo_provider_queue_capacity"})
+        else:
+            job.update({"status": "pending", "reason": None,
+                        "finished_at": None})
+            self._pending_provider += 1
+        end["worked_example_job"] = job
+        return job
+
+    def _run_worked_example_job(self, session_id, job_id):
+        """Scoped worker: regenerates wording for exactly one selected
+        worked-example card, overlaying only that card on success."""
+        adapter = self.worked_example_generator
+        reply = None
+        execution = None
+        failure = None
+        try:
+            event = self._provider_session_event(session_id)
+            try:
+                if adapter is None:
+                    failure = "adapter_unavailable"
+                elif event.is_set():
+                    return
+                else:
+                    with self._provider_session_scope(session_id):
+                        with self._adapter_scope(adapter):
+                            if event.is_set():
+                                return
+                            if hasattr(adapter, "execution"):
+                                adapter.execution = None
+                            self._reset_rejected_draft(adapter)
+                            with self.lock:
+                                meta = self._load_meta(session_id)
+                                end = meta["checkpoints"]["end"]
+                                job = (end.get("worked_example_job")
+                                       or {})
+                                card = None
+                                if (job.get("job_id") == job_id
+                                        and job.get("status")
+                                        == "pending"):
+                                    card = next(
+                                        (c for c in (
+                                            end["student_review"]
+                                            .get("review_examples")
+                                            or [])
+                                         if c.get("candidate_id")
+                                         == job.get("candidate_id")),
+                                        None)
+                                if (card is None
+                                        or card.get("question_id")
+                                        != job.get("question_id")):
+                                    failure = "worked_card_unavailable"
+                                    card = None
+                                else:
+                                    try:
+                                        card = (
+                                            build_worked_example_input(
+                                                card))
+                                    except ValueError:
+                                        failure = (
+                                            "worked_card_unavailable")
+                                        card = None
+                            if card is not None:
+                                try:
+                                    reply = adapter.generate(card)
+                                finally:
+                                    # Capture the execution record and
+                                    # sanitized last_metadata inside the
+                                    # adapter scope even when generate
+                                    # raised, so retry/failure evidence
+                                    # and rejected drafts are retained.
+                                    execution = copy.deepcopy(
+                                        getattr(adapter, "execution",
+                                                None))
+                                    if execution is None:
+                                        execution = (
+                                            self._midpoint_exec_record(
+                                                adapter))
+            except SystemExit:
+                failure = "demo_call_budget_exhausted"
+            except Exception:
+                failure = "provider_error"
+            if event.is_set():
+                return
+            with self.lock:
+                try:
+                    meta = self._load_meta(session_id)
+                except FileNotFoundError:
+                    return
+                if event.is_set():
+                    return
+                end = meta["checkpoints"]["end"]
+                job = end.get("worked_example_job") or {}
+                if (job.get("job_id") != job_id
+                        or job.get("status") != "pending"):
+                    # A newer override or a cancellation superseded
+                    # this run; its late reply is discarded.
+                    return
+                review = end.get("student_review")
+                card = next(
+                    (c for c in (review or {}).get("review_examples")
+                     or [] if c.get("candidate_id")
+                     == job.get("candidate_id")), None)
+                finished = utc_now()
+                if (meta.get("feedback_release")
+                        or card is None
+                        or card.get("question_id")
+                        != job.get("question_id")):
+                    job.update({"status": "fallback",
+                                "reason": "superseded_draft",
+                                "finished_at": finished})
+                else:
+                    overlay = None
+                    if failure is None and reply is not None:
+                        try:
+                            overlay = validate_worked_example_reply(
+                                reply, card)
+                        except Exception:
+                            overlay = None
+                    if overlay is None:
+                        job.update({
+                            "status": "fallback",
+                            "reason": failure or "invalid_generation",
+                            "finished_at": finished,
+                            "execution": execution})
+                    else:
+                        _overlay_worked_review(card, overlay)
+                        sources = dict(
+                            review["trace"].get(
+                                "worked_review_sources") or {})
+                        sources[job["question_id"]] = "provider"
+                        review["trace"]["worked_review_sources"] = (
+                            sources)
+                        session = self._context_for(meta)[
+                            "mcqs"].private_record(session_id)
+                        self._refresh_saved_edit_card(
+                            meta, session, job["candidate_id"])
+                        job.update({"status": "ready",
+                                    "finished_at": finished,
+                                    "execution": execution})
+                end["worked_example_job"] = job
+                self._save_meta(meta)
+        finally:
+            with self.lock:
+                self._pending_provider = max(
+                    0, self._pending_provider - 1)
 
     def save_feedback_edit(self, session_id, body):
         if (not isinstance(body, dict)
@@ -3088,6 +3431,9 @@ class DemoService:
             if session["status"] != "complete":
                 raise ValueError(
                     "feedback editing requires a completed session")
+            if self._worked_example_job_pending(meta):
+                raise ConflictError(
+                    "a worked example update is still in progress")
             preview = self._final_preview(meta)
             if preview is None:
                 raise ConflictError("feedback is not ready for editing")

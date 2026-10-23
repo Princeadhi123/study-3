@@ -2555,9 +2555,12 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["question_id"], qid8)
         self.assertIsNotNone(history[0]["previous_student_review"])
-        self.assertEqual(
-            meta["provider_job"]["executions"]["student"]
-            ["generator"]["status"], "teacher_selected_checked_draft")
+        # The aggregate provider job keeps its original narrative
+        # provenance; the scoped job alone records the override.
+        self.assertEqual(meta["provider_job"],
+                         before_meta["provider_job"])
+        self.assertEqual(end["provider_job"],
+                         before_end.get("provider_job"))
         self.assertEqual(
             end["student_review"]["trace"]["phrasing_source"],
             "deterministic")
@@ -2595,7 +2598,7 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(len(service._load_meta(sid)
                              ["worked_example_selection_history"]), 1)
 
-    def test_override_resets_saved_edits_and_stale_hashes(self):
+    def test_override_freeform_conflict_and_structured_edit_kept(self):
         service = self._service(diagnostics=self._diagnostics())
         sid, token, _ = self._complete(service, SELECTION_WRONG)
         self._wait(service, sid)
@@ -2614,16 +2617,66 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         pct = next(c for c in delivery["worked_example_choices"]
                    if c["subtopic_name"] == "Percentage of an amount")
         qid8 = self.bank["questions"][8]["question_id"]
-        res = service.select_worked_example(sid, {
+        # A saved free-form document cannot be patched per example;
+        # the override is rejected before any mutation.
+        with self.assertRaises(ConflictError):
+            service.select_worked_example(sid, {
+                "message_sha256": delivery["preview_sha256"],
+                "candidate_id": pct["candidate_id"],
+                "question_id": qid8})
+        meta = service._load_meta(sid)
+        self.assertIsNotNone(meta["feedback_edit"])
+        self.assertFalse(
+            meta.get("worked_example_selection_history"))
+        self.assertIsNone(
+            meta["checkpoints"]["end"].get("worked_example_job"))
+
+        # A saved structured edit survives the override; only the
+        # replaced example card is refreshed inside it.
+        service.save_feedback_edit(sid, {
             "message_sha256": delivery["preview_sha256"],
+            "sections": {"assessment_summary": "Edited summary text.",
+                         "observed_strengths": "Edited strengths.",
+                         "review_focus": "Edited focus.",
+                         "next_steps": "Edited next steps."},
+            "reviewer_label": "editor"})
+        delivery = service.teacher_session(sid)[
+            "feedback_delivery"]
+        edited_hash = delivery["preview_sha256"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": edited_hash,
             "candidate_id": pct["candidate_id"],
             "question_id": qid8})
         meta = service._load_meta(sid)
-        self.assertIsNone(meta["feedback_edit"])
+        edit = meta["feedback_edit"]
+        self.assertIsNotNone(edit)
+        edited_sections = {s["kind"]: s["text"]
+                           for s in edit["preview"]["sections"]}
+        self.assertEqual(edited_sections["assessment_summary"],
+                         "Edited summary text.")
+        edited_card = next(
+            c for c in edit["preview"]["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        self.assertEqual(edited_card["question_id"], qid8)
+        other_cards = [c for c in edit["preview"]["review_examples"]
+                       if c["candidate_id"] != pct["candidate_id"]]
+        stored = service._load_meta(sid)["checkpoints"]["end"][
+            "student_review"]["review_examples"]
+        for card in other_cards:
+            match = next(c for c in stored
+                         if c["candidate_id"] == card["candidate_id"])
+            self.assertEqual(card["question_id"],
+                             match["question_id"])
+        # The scoped job is synchronous application-only in rules
+        # mode: no provider call was made or implied.
+        job = meta["checkpoints"]["end"]["worked_example_job"]
+        self.assertEqual(job["status"], "ready")
+        self.assertEqual(job["source"], "application")
+        self.assertEqual(job["question_id"], qid8)
         self.assertIsNotNone(
             meta["worked_example_selection_history"][0]
             ["previous_feedback_edit"])
-        # Old digest rejected everywhere; new digest works.
+        # Old digests rejected everywhere; new digest works.
         with self.assertRaises(ConflictError):
             service.save_feedback_edit(sid, {
                 "message_sha256": old_hash,
@@ -2786,6 +2839,549 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(card["question_id"], qid8)
         self.assertEqual(card["selection_provenance"]["source"],
                          "teacher_override")
+
+    def _pct_choice(self, service, sid):
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if c["subtopic_name"] == "Percentage of an amount")
+        return choice, delivery
+
+    @staticmethod
+    def _full_generator(calls=None):
+        class FakeGenerator:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                if calls is not None:
+                    calls.append(payload)
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+        return FakeGenerator()
+
+    def _wait_scoped(self, service, sid, statuses, timeout=15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            job = (service._load_meta(sid)["checkpoints"]["end"]
+                   .get("worked_example_job") or {})
+            if job.get("status") in statuses:
+                return job
+            time.sleep(0.05)
+        self.fail("worked_example_job did not finish")
+
+    def test_hosted_scoped_job_updates_only_target_card(self):
+        gate = threading.Event()
+        scoped_calls = []
+        full_calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                scoped_calls.append(copy.deepcopy(card))
+                gate.wait(10)
+                return {"question_id": card["question_id"],
+                        "steps": ["Provider step one.",
+                                  "Provider step two."],
+                        "reasoning_question": "Provider reasoning?"}
+
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(full_calls),
+            worked_example_generator=Scoped(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        self.assertEqual(len(full_calls), 1)
+        pct, delivery = self._pct_choice(service, sid)
+        before = copy.deepcopy(
+            service._load_meta(sid)["checkpoints"]["end"])
+        before_review = before["student_review"]
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        self.assertTrue(res["saved"])
+        self.assertEqual(res["worked_example_job"]["status"],
+                         "pending")
+        self.assertEqual(res["worked_example_job"]["question_id"],
+                         qid8)
+        # The checked replacement card is already stored; only the
+        # scoped provider call is outstanding.
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        for key in review:
+            if key not in ("review_examples", "trace"):
+                self.assertEqual(review[key], before_review[key])
+        for key in review["trace"]:
+            if key not in ("worked_example_override",
+                           "worked_review_sources"):
+                self.assertEqual(review["trace"][key],
+                                 before_review["trace"][key])
+        for i, card in enumerate(review["review_examples"]):
+            other = before_review["review_examples"][i]
+            if card["candidate_id"] == pct["candidate_id"]:
+                self.assertEqual(card["question_id"], qid8)
+                self.assertEqual(card["explanation_source"],
+                                 "application")
+                self.assertNotEqual(card["question_id"],
+                                    other["question_id"])
+            else:
+                self.assertEqual(card, other)
+        self.assertEqual(meta["checkpoints"]["end"]
+                         ["practice_contexts"],
+                         before["practice_contexts"])
+        # While pending, release/edit/re-selection all conflict.
+        pending_hash = res["preview_sha256"]
+        for fn in (
+                lambda: service.release_feedback(sid, {
+                    "message_sha256": pending_hash}),
+                lambda: service.save_feedback_edit(sid, {
+                    "message_sha256": pending_hash,
+                    "sections": {"assessment_summary": "A.",
+                                 "observed_strengths": "B.",
+                                 "review_focus": "C.",
+                                 "next_steps": "D."}}),
+                lambda: service.select_worked_example(sid, {
+                    "message_sha256": pending_hash,
+                    "candidate_id": pct["candidate_id"],
+                    "question_id": self.bank["questions"][0]
+                    ["question_id"]})):
+            with self.assertRaises(ConflictError):
+                fn()
+        gate.set()
+        job = self._wait_scoped(service, sid, {"ready"})
+        self.assertEqual(job["candidate_id"], pct["candidate_id"])
+        self.assertEqual(len(scoped_calls), 1)
+        self.assertEqual(len(full_calls), 1)
+        sent = scoped_calls[0]
+        self.assertEqual(sent["question_id"], qid8)
+        self.assertNotIn("sections", sent)
+        self.assertNotIn("review_examples", sent)
+        review = service._load_meta(sid)["checkpoints"]["end"][
+            "student_review"]
+        card = next(c for c in review["review_examples"]
+                    if c["candidate_id"] == pct["candidate_id"])
+        self.assertEqual(card["steps"], ["Provider step one.",
+                                         "Provider step two."])
+        self.assertEqual(card["explanation_source"], "provider")
+        self.assertEqual(card["checked_steps"] is not None, True)
+        self.assertEqual(review["trace"]["worked_review_sources"]
+                         [qid8], "provider")
+        # After success the unaffected review fields, other cards and
+        # practice remain byte-identical to the pre-override state.
+        for key in review:
+            if key not in ("review_examples", "trace"):
+                self.assertEqual(review[key], before_review[key])
+        for i, other in enumerate(review["review_examples"]):
+            if other["candidate_id"] != pct["candidate_id"]:
+                self.assertEqual(
+                    other,
+                    before_review["review_examples"][i])
+        self.assertEqual(
+            service._load_meta(sid)["checkpoints"]["end"]
+            ["practice_contexts"], before["practice_contexts"])
+        # The replaced question's old source entry is gone once no
+        # current card uses it.
+        current_ids = {c["question_id"]
+                       for c in review["review_examples"]}
+        old_qid = next(
+            c["question_id"] for c in before_review["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        sources = review["trace"]["worked_review_sources"]
+        if old_qid not in current_ids:
+            self.assertNotIn(old_qid, sources)
+        self.assertEqual(set(sources) - current_ids, set())
+        # Terminal state releases normally.
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        released = service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        self.assertTrue(released["released"])
+
+    def test_hosted_scoped_failure_falls_back_preserving_review(self):
+        class Failing:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                raise RuntimeError("provider blew up")
+
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=Failing(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        before = copy.deepcopy(
+            service._load_meta(sid)["checkpoints"]["end"])
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        job = self._wait_scoped(service, sid, {"fallback"})
+        self.assertEqual(job["reason"], "provider_error")
+        meta = service._load_meta(sid)
+        review = meta["checkpoints"]["end"]["student_review"]
+        card = next(c for c in review["review_examples"]
+                    if c["candidate_id"] == pct["candidate_id"])
+        self.assertEqual(card["question_id"], qid8)
+        self.assertEqual(card["explanation_source"], "application")
+        for i, other in enumerate(review["review_examples"]):
+            if other["candidate_id"] != pct["candidate_id"]:
+                self.assertEqual(
+                    other, before["student_review"]
+                    ["review_examples"][i])
+        # Terminal fallback frees release/editing again.
+        released = service.release_feedback(sid, {
+            "message_sha256": res["preview_sha256"]})
+        self.assertTrue(released["released"])
+
+    def test_hosted_without_scoped_adapter_falls_back(self):
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        job = res["worked_example_job"]
+        self.assertEqual(job["status"], "fallback")
+        self.assertEqual(job["reason"], "adapter_unavailable")
+
+    def test_scoped_job_cancelled_blocks_late_overlay(self):
+        gate = threading.Event()
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                gate.wait(10)
+                return {"question_id": card["question_id"],
+                        "steps": ["Late provider step."],
+                        "reasoning_question": "Late?"}
+
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=Scoped(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        service.cancel_replay_session(sid)
+        job = (service._load_meta(sid)["checkpoints"]["end"]
+               ["worked_example_job"])
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["reason"], "replay_case_failed")
+        gate.set()
+        time.sleep(0.3)
+        card = next(
+            c for c in service._load_meta(sid)["checkpoints"]["end"]
+            ["student_review"]["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        self.assertNotEqual(card["steps"], ["Late provider step."])
+        self.assertEqual(card["explanation_source"], "application")
+
+    def test_pending_scoped_job_recovers_as_fallback(self):
+        root = Path(self.tmp.name)
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        meta = service._load_meta(sid)
+        meta["checkpoints"]["end"]["worked_example_job"] = {
+            "job_id": "abc", "status": "pending",
+            "candidate_id": "x", "question_id": "y",
+            "queued_at": "2026-10-23T00:00:00+00:00",
+            "finished_at": None}
+        service._save_meta(meta)
+        service.close(wait=True)
+        service = DemoService(
+            root=root, bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=self._diagnostics())
+        self.addCleanup(service.close, wait=True)
+        job = (service._load_meta(sid)["checkpoints"]["end"]
+               ["worked_example_job"])
+        self.assertEqual(job["status"], "fallback")
+        self.assertEqual(job["reason"], "interrupted_by_restart")
+        # The preserved narrative was not wiped by recovery.
+        self.assertIsNotNone(
+            service._load_meta(sid)["checkpoints"]["end"]
+            ["student_review"].get("review_examples"))
+
+    def test_scoped_queue_capacity_falls_back(self):
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=object(),
+            max_pending_jobs=0,
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        job = res["worked_example_job"]
+        self.assertEqual(job["status"], "fallback")
+        self.assertEqual(job["reason"],
+                         "demo_provider_queue_capacity")
+
+    def test_rules_mode_scoped_job_is_application_only(self):
+        service = self._service(diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        job = res["worked_example_job"]
+        self.assertEqual(job["status"], "ready")
+        self.assertEqual(job["source"], "application")
+        # Selecting the same question again stays idempotent and
+        # queues nothing.
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        again = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        self.assertEqual(again["preview_sha256"],
+                         res["preview_sha256"])
+        meta = service._load_meta(sid)
+        self.assertEqual(
+            meta["checkpoints"]["end"]["worked_example_job"]
+            ["question_id"],
+            self.bank["questions"][8]["question_id"])
+
+    def test_scoped_job_preserves_aggregate_provenance(self):
+        gate = threading.Event()
+        full_execution = {
+            "provider": "aitta_full", "origin": "hosted_replay",
+            "metadata": {"status": "completed",
+                         "model_version": "openai/gpt-oss-120b",
+                         "prompt_version": "aitta_feedback_v9"}}
+
+        class Full:
+            supports_full_feedback = True
+            execution = None
+
+            def generate(self, payload):
+                self.execution = full_execution
+                return {
+                    "candidate_id": payload["selected_candidate"]
+                    ["candidate_id"],
+                    "sections": dict(VALID_SECTIONS),
+                    "worked_reviews": fixture_reviews(payload)}
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                gate.wait(10)
+                return {"question_id": card["question_id"],
+                        "steps": ["Provider step."],
+                        "reasoning_question": "Why?"}
+
+        service = self._service(
+            provider_mode="hosted", generator=Full(),
+            worked_example_generator=Scoped(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        before_job = copy.deepcopy(
+            service._load_meta(sid)["provider_job"])
+        self.assertEqual(
+            before_job["executions"]["student"]["generator"],
+            full_execution)
+        pct, delivery = self._pct_choice(service, sid)
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        self.assertEqual(res["worked_example_job"]["status"],
+                         "pending")
+        self.assertEqual(service._load_meta(sid)["provider_job"],
+                         before_job)
+        gate.set()
+        self._wait_scoped(service, sid, {"ready"})
+        self.assertEqual(service._load_meta(sid)["provider_job"],
+                         before_job)
+
+    def test_hosted_scoped_success_keeps_saved_structured_edit(self):
+        gate = threading.Event()
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                gate.wait(10)
+                return {"question_id": card["question_id"],
+                        "steps": ["Scoped provider step."],
+                        "reasoning_question": "Scoped check?"}
+
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=Scoped(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        service.save_feedback_edit(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "sections": {"assessment_summary": "Saved summary edit.",
+                         "observed_strengths": "Saved strengths edit.",
+                         "review_focus": "Saved focus edit.",
+                         "next_steps": "Saved next steps edit."},
+            "reviewer_label": "editor"})
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        before_edit = copy.deepcopy(
+            service._load_meta(sid)["feedback_edit"])
+        qid8 = self.bank["questions"][8]["question_id"]
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": qid8})
+        self.assertEqual(res["worked_example_job"]["status"],
+                         "pending")
+        gate.set()
+        self._wait_scoped(service, sid, {"ready"})
+        edit = service._load_meta(sid)["feedback_edit"]
+        self.assertIsNotNone(edit)
+        sections = {s["kind"]: s["text"]
+                    for s in edit["preview"]["sections"]}
+        self.assertEqual(sections["assessment_summary"],
+                         "Saved summary edit.")
+        cards = {c["candidate_id"]: c
+                 for c in edit["preview"]["review_examples"]}
+        self.assertEqual(cards[pct["candidate_id"]]["question_id"],
+                         qid8)
+        self.assertEqual(
+            cards[pct["candidate_id"]]["steps"],
+            ["Scoped provider step."])
+        old_cards = {c["candidate_id"]: c
+                     for c in before_edit["preview"]
+                     ["review_examples"]}
+        for cid, card in cards.items():
+            if cid != pct["candidate_id"]:
+                self.assertEqual(card, old_cards[cid])
+
+    def test_scoped_failure_records_retry_execution(self):
+        exhausted = {
+            "provider": "aitta_worked_example",
+            "origin": "hosted_replay",
+            "metadata": {
+                "status": "failed",
+                "role": "selected_worked_example",
+                "transport": {"stage": "open_failed",
+                              "failure_kind": "timeout"}},
+            "automatic_retry": {"attempts": 3, "max_attempts": 3,
+                                "stop_reason": "attempts_exhausted"}}
+
+        class Failing:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                self.execution = exhausted
+                raise RuntimeError(
+                    "raw provider timeout details")
+
+        service = self._service(
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=Failing(),
+            diagnostics=self._diagnostics())
+        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        self._wait(service, sid)
+        pct, delivery = self._pct_choice(service, sid)
+        service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": pct["candidate_id"],
+            "question_id": self.bank["questions"][8]["question_id"]})
+        job = self._wait_scoped(service, sid, {"fallback"})
+        self.assertEqual(job["reason"], "provider_error")
+        self.assertEqual(
+            job["execution"]["automatic_retry"]["stop_reason"],
+            "attempts_exhausted")
+        self.assertEqual(
+            job["execution"]["metadata"]["transport"]["failure_kind"],
+            "timeout")
+        self.assertNotIn("raw provider timeout details",
+                         json.dumps(job))
+
+    def test_scoped_no_checked_solution_never_calls_adapter(self):
+        # Mutating question text makes its local checked solution
+        # unavailable; selecting it must not call the provider.
+        bank = make_grounded_bank()
+        bank["questions"][0]["text"] += (
+            " <img src=x onerror=alert(1)>")
+        bank["questions"][0]["content_text"] = (
+            bank["questions"][0]["text"] + " [OPTIONS] "
+            + " | ".join(bank["questions"][0]["options"]))
+        calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                calls.append(card)
+                raise AssertionError("must not be called")
+
+        service = DemoService(
+            root=Path(self.tmp.name) / "nocheck", bank=bank,
+            taxonomy=make_grounded_taxonomy(bank),
+            provider_mode="hosted",
+            generator=self._full_generator(),
+            worked_example_generator=Scoped(),
+            diagnostics=LiveDiagnostics(
+                model_loader=lambda: FakeKT(bank)))
+        self.addCleanup(service.close, wait=True)
+        created = service.create_session()
+        sid, token = created["session_id"], created["student_token"]
+        for row in grounded_rows(bank, SELECTION_WRONG):
+            service.submit_response(sid, token, row)
+        self._wait(service, sid)
+        delivery = service.teacher_session(sid)["feedback_delivery"]
+        choice = next(
+            c for c in delivery["worked_example_choices"]
+            if any(not cand.get("checked_solution_available")
+                   for cand in c["candidates"]))
+        target = next(
+            c for c in choice["candidates"]
+            if c["question_id"] != choice["selected_question_id"]
+            and not c.get("checked_solution_available"))
+        res = service.select_worked_example(sid, {
+            "message_sha256": delivery["preview_sha256"],
+            "candidate_id": choice["candidate_id"],
+            "question_id": target["question_id"]})
+        job = res["worked_example_job"]
+        self.assertEqual(job["status"], "unavailable")
+        self.assertEqual(job["reason"], "no_checked_solution")
+        self.assertEqual(calls, [])
 
     def test_degraded_record_resolves_recorded_bundle(self):
         service = self._service(diagnostics=self._diagnostics())

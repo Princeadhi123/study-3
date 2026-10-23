@@ -2679,10 +2679,37 @@ class ResearchBrowserTests(unittest.TestCase):
         b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
         release = "document.querySelector('#tab-feedback .release-card')"
         strip = "document.querySelector('#tab-feedback .release-card .release-status')"
+        waiting = ("document.querySelector('#tab-feedback "
+                   ".end-feedback-waiting')")
+        editing = ("document.querySelector('#tab-feedback "
+                   "details[data-disclosure-key=feedback-editing]')")
         b.wait(f"Boolean({strip})")
+        b.wait(f"Boolean({waiting})")
         self.assertTrue(b.js(f"{strip}.textContent.includes('Processing')"))
+        self.assertEqual(b.js(f"{waiting}.getAttribute('role')"),
+                         "status")
+        self.assertEqual(b.js(f"{waiting}.getAttribute('aria-live')"),
+                         "polite")
+        self.assertEqual(b.js(f"{waiting}.getAttribute('aria-busy')"),
+                         "true")
         self.assertTrue(b.js(
-            f"{strip}.textContent.includes('Hosted feedback is still processing')"))
+            f"{waiting}.textContent.includes('preparing the end "
+            "feedback and practice')"))
+        self.assertFalse(b.js(
+            f"{strip}.textContent.includes('Hosted feedback is still "
+            "processing')"))
+        self.assertFalse(b.js(
+            f"{strip}.textContent.includes('Wording source')"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".feedback-preview'))"))
+        self.assertFalse(b.js(f"Boolean({editing})"))
+        self.assertFalse(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".release-card button.primary'))"))
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".end-deterministic-comparison'))"))
         research_dd = ("document.querySelector('#tab-feedback "
                        "details[data-disclosure-key=feedback-research]')")
         self.assertTrue(b.js(f"Boolean({research_dd})"))
@@ -2702,6 +2729,13 @@ class ResearchBrowserTests(unittest.TestCase):
             lambda: self.service._load_meta(sid)["provider_job"]["status"]
             in ("ready", "fallback")))
         b.wait(f"{strip}.textContent.includes('Ready')")
+        b.wait("Boolean(document.querySelector('#tab-feedback "
+               ".feedback-preview'))")
+        b.wait(f"Boolean({editing})")
+        self.assertFalse(b.js(f"Boolean({waiting})"))
+        self.assertTrue(b.js(
+            "Boolean(document.querySelector('#tab-feedback "
+            ".release-card button.primary'))"))
 
         class FailingGenerator:
             execution = None
@@ -2723,9 +2757,7 @@ class ResearchBrowserTests(unittest.TestCase):
             f"{strip}.textContent.includes('Review the current preview before approval')"))
         self.assertFalse(b.js(
             f"{strip}.textContent.includes('draft wording is deterministic')"))
-        edit_dd = ("document.querySelector('#tab-feedback "
-                   "details[data-disclosure-key=feedback-editing]')")
-        b.js(f"{edit_dd}.open = true")
+        b.js(f"{editing}.open = true")
         b.js("const f=document.querySelector('#tab-feedback "
              "textarea.edit-section'); "
              "f.value='Teacher rephrased during fallback.'; "
@@ -2736,6 +2768,148 @@ class ResearchBrowserTests(unittest.TestCase):
              ".click()")
         b.wait(f"{release}.textContent.includes('Edited draft saved')")
         b.wait(f"{strip}.textContent.includes('teacher-edited')")
+        self.assertEqual(b.errors, [])
+
+    def test_end_feedback_waiting_states_hide_current_wording(self):
+        # Each active provider stage shows the same accessible
+        # Processing panel as the midpoint and hides baseline/edited
+        # wording, choices, editor and approval; terminal states
+        # resume the normal rendering.
+        from tests.test_demo_service import FakeGenerator
+        b = self.browser
+        self.service.provider_mode = "hosted"
+        self.service.generator = FakeGenerator()
+        result = self.service.simulate("alternating", 5)
+        sid = result["session_id"]
+        self.assertTrue(wait_for(
+            lambda: self.service._load_meta(sid)["provider_job"]["status"]
+            == "ready"))
+        self.navigate("/teacher")
+        b.wait("document.querySelector('#unlock-panel')")
+        b.js(f"document.querySelector('#pin-input').value={json.dumps(self.pin)}; document.querySelector('#unlock-form').requestSubmit()")
+        b.wait("!document.querySelector('#teacher-app').hidden")
+        b.wait("document.querySelector('#session-list button')")
+        b.js("document.querySelector('#session-list button').click()")
+        b.js("document.querySelector('#ws-tabs [data-tab=feedback]').click()")
+        release = "document.querySelector('#tab-feedback .release-card')"
+        strip = ("document.querySelector('#tab-feedback "
+                 ".release-card .release-status')")
+        waiting = ("document.querySelector('#tab-feedback "
+                   ".end-feedback-waiting')")
+        preview = ("document.querySelector('#tab-feedback "
+                   ".feedback-preview')")
+        editing = ("document.querySelector('#tab-feedback "
+                   "details[data-disclosure-key=feedback-editing]')")
+        approve = ("document.querySelector('#tab-feedback "
+                   ".release-card button.primary')")
+        compare = ("document.querySelector('#tab-feedback "
+                   ".end-deterministic-comparison')")
+        gen_value = (
+            "[...document.querySelectorAll('#tab-feedback "
+            ".release-status .kv')].find((n) => n.querySelector('.k')"
+            " && n.querySelector('.k').textContent === 'Feedback "
+            "generation').querySelector('.v').textContent")
+        b.wait(f"Boolean({release}) && Boolean({preview})")
+        # Ready: normal rendering, no waiting panel.
+        self.assertFalse(b.js(f"Boolean({waiting})"))
+        self.assertTrue(b.js(f"Boolean({editing})"))
+        self.assertTrue(b.js(f"Boolean({approve})"))
+
+        original = self.service.teacher_session
+
+        # A selected practice keeps its real terminal status label.
+        def selected_practice(session_id):
+            v = original(session_id)
+            delivery = v["feedback_delivery"]
+            if (delivery.get("preview") or {}).get("practice") \
+                    is not None:
+                delivery["preview"]["practice"]["status"] = "selected"
+            else:
+                delivery["practice_status"] = "selected"
+            return v
+
+        def held(status):
+            def view(session_id):
+                v = selected_practice(session_id)
+                v["provider_job"]["status"] = status
+                return v
+            return view
+
+        try:
+            self.service.teacher_session = selected_practice
+            b.wait(f"{strip}.textContent.includes('Selected')",
+                   timeout=30)
+            # Count session-detail polls so held states are proved to
+            # survive repeated polling (no transport retry claimed).
+            b.js(
+                "window.__origFetch = window.fetch;"
+                "window.__detailPolls = 0;"
+                "window.fetch = function(url, opts) {"
+                "  if (typeof url === 'string' && url.indexOf("
+                f"      '/api/teacher/sessions/{sid}') === 0)"
+                "    window.__detailPolls++;"
+                "  return window.__origFetch(url, opts);"
+                "};")
+            for status, label in (
+                    ("waiting_for_practice",
+                     "Waiting for practice selection"),
+                    ("waiting_for_diagnostics",
+                     "Waiting for model diagnostics"),
+                    ("pending", "Processing")):
+                b.js("window.__detailPolls = 0")
+                self.service.teacher_session = held(status)
+                b.wait(f"{gen_value} === {json.dumps(label)}",
+                       timeout=30)
+                b.wait(f"Boolean({waiting})")
+                self.assertEqual(
+                    b.js(f"{waiting}.getAttribute('role')"), "status")
+                self.assertEqual(
+                    b.js(f"{waiting}.getAttribute('aria-live')"),
+                    "polite")
+                self.assertEqual(
+                    b.js(f"{waiting}.getAttribute('aria-busy')"),
+                    "true")
+                self.assertTrue(b.js(
+                    f"{waiting}.textContent.includes('Aitta is "
+                    "preparing the end feedback and practice')"))
+                self.assertFalse(b.js(f"Boolean({preview})"))
+                self.assertFalse(b.js(f"Boolean({editing})"))
+                self.assertFalse(b.js(f"Boolean({approve})"))
+                self.assertFalse(b.js(
+                    f"{strip}.textContent.includes('Wording source')"))
+                self.assertFalse(b.js(
+                    f"{strip}.textContent.includes('Current "
+                    "presentation')"))
+                # Practice selection keeps its real terminal label.
+                self.assertTrue(b.js(
+                    f"{strip}.textContent.includes('Selected')"))
+                # The deterministic baseline stays available as an
+                # explicitly labelled reference, never as current.
+                self.assertTrue(b.js(f"Boolean({compare})"))
+                self.assertTrue(b.js(
+                    f"{compare}.textContent.includes('a reference')"))
+                # The stage survives repeated identical polls.
+                b.wait("window.__detailPolls >= 2", timeout=30)
+                self.assertEqual(b.js(gen_value), label)
+                self.assertTrue(b.js(f"Boolean({waiting})"))
+            # Held pending on a narrow viewport: no overflow.
+            b.viewport(390, 844)
+            b.wait(f"Boolean({waiting})", timeout=30)
+            self.assert_no_overflow()
+            b.screenshot("end-feedback-waiting-pending-390.png")
+            b.viewport(1440, 1100)
+            # A terminal state is not held in Processing.
+            self.service.teacher_session = held("unavailable")
+            b.wait(f"{strip}.textContent.includes('Unavailable')",
+                   timeout=30)
+            self.assertFalse(b.js(f"Boolean({waiting})"))
+            self.assertTrue(b.js(f"Boolean({preview})"))
+        finally:
+            self.service.teacher_session = original
+            b.js("if (window.__origFetch) {"
+                 "  window.fetch = window.__origFetch; }")
+        b.wait(f"Boolean({preview}) && Boolean({editing})", timeout=30)
+        self.assertFalse(b.js(f"Boolean({waiting})"))
         self.assertEqual(b.errors, [])
 
     def test_finnish_practice_english_render_edit_poll_and_release(self):

@@ -138,6 +138,20 @@ Key contracts:
   and practice content then appears **in the educator workspace only**;
   the student Assessment keeps showing completion and the observed
   score. Stale-hash edits and releases are rejected with 409.
+- **Scoped worked-example regeneration**: choosing another eligible
+  worked example replaces only that example card. The already
+  generated narrative sections, the other example card, practice
+  picks and the aggregate `provider_job` provenance are preserved;
+  only the card-level `worked_example_job` runs (schema
+  `phase3_selected_worked_example_v1`, prompt
+  `aitta_selected_worked_example_v1`). While the job is pending the
+  draft shows a processing state and edits/releases/another override
+  conflict with 409; on failure the card keeps its
+  application-checked steps with an explicit fallback marker. A
+  saved free-form teacher document cannot be patched per example and
+  blocks the override until structured fields are used; saved
+  structured edits keep unrelated content and refresh only the
+  replaced card.
 - **Version identifiers**: primitives `observed_subtopic_feedback_v3`;
   multi review marker `observed_distinct_skill_review_v1`; selection
   schema/prompt above; aligned KT policy above; preview template

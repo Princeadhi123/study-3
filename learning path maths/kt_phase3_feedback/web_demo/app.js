@@ -235,7 +235,7 @@ const statusLabel = (value) => ({not_requested: "Not started", pending: "Process
   ready: "Ready", fallback: "Baseline fallback", unavailable: "Unavailable",
   waiting_for_practice: "Waiting for practice selection",
   waiting_for_diagnostics: "Waiting for model diagnostics",
-  in_progress: "In progress", complete: "Complete", queued: "Queued", running: "Running",
+  in_progress: "In progress", complete: "Complete", queued: "Queued", running: "Running", selected: "Selected",
   cancelling: "Finishing current case", cancelled: "Stopped", interrupted: "Interrupted",
   failed: "Failed", complete_with_errors: "Finished with errors"}[value] || String(value || "Unknown").replaceAll("_", " "));
 
@@ -3558,15 +3558,49 @@ function createDetailView(root, options = {}) {
 
   function workedSelectFor(sid) {
     if (!workedSelects.has(sid)) {
-      workedSelects.set(sid, {sending: false, awaitingHash: null,
-                              note: null});
+      workedSelects.set(sid, {sending: false, awaitingJobId: null,
+                              awaitingJobQueuedAt: null, note: null});
     }
     return workedSelects.get(sid);
   }
 
   function workedSelectionBusy(sid) {
     const state = workedSelectFor(sid);
-    return state.sending || Boolean(state.awaitingHash);
+    return state.sending || Boolean(state.awaitingJobId);
+  }
+
+  function workedJobNote(job) {
+    if (!job) {
+      return "Worked example updated; only the selected example's " +
+        "explanation was regenerated. Review it again before " +
+        "approval.";
+    }
+    if (job.status === "pending") {
+      return "Selection saved; the updated worked example is being " +
+        "generated. The rest of the feedback and practice is " +
+        "unchanged.";
+    }
+    if (job.status === "fallback") {
+      return "Selection saved; the selected example keeps its " +
+        "application-checked steps because AI generation did not " +
+        "complete.";
+    }
+    if (job.status === "unavailable") {
+      return "Selection saved; the selected example has no checked " +
+        "solution, so no new explanation was generated.";
+    }
+    if (job.status === "cancelled") {
+      return "Selection saved; the scoped generation was cancelled " +
+        "before it could update the card.";
+    }
+    if (job.source === "application") {
+      return "Worked example updated; the application-checked " +
+        "explanation is shown. The rest of the feedback is " +
+        "unchanged.";
+    }
+    return "Worked example updated; only the selected example's " +
+      "explanation was regenerated. Review it again before " +
+      "approval.";
   }
 
   function editDraftFor(sid, delivery) {
@@ -3620,8 +3654,32 @@ function createDetailView(root, options = {}) {
     const endState = endFeedbackUiState(delivery);
     const currentReleased = endState.currentReleased;
     const workedState = workedSelectFor(selected);
-    if (workedState.awaitingHash === delivery.preview_sha256) {
-      workedState.awaitingHash = null;
+    const exampleJob = ((detail.checkpoints.end || {})
+                        .worked_example_job) || {};
+    if (workedState.awaitingJobId && exampleJob.job_id) {
+      // Clear only when the observed record is the same job reaching a
+      // terminal state, or a strictly newer queued job superseded it;
+      // an absent or older record is a stale detail and keeps busy.
+      const sameJob = exampleJob.job_id === workedState.awaitingJobId;
+      const superseded = !sameJob
+        && workedState.awaitingJobQueuedAt
+        && exampleJob.queued_at > workedState.awaitingJobQueuedAt;
+      if (sameJob && exampleJob.status !== "pending") {
+        // Reflect the observed terminal outcome of the accepted job
+        // so the chooser note cannot claim generation is still
+        // running next to a Ready/fallback status row.
+        workedState.note = workedJobNote(exampleJob);
+      }
+      if ((sameJob && exampleJob.status !== "pending") || superseded) {
+        workedState.awaitingJobId = null;
+        workedState.awaitingJobQueuedAt = null;
+        // A saved edit awaiting the server's preview resyncs to the
+        // job's terminal draft instead of reporting a foreign edit.
+        const draft = editDrafts.get(selected);
+        if (draft && draft.awaitingPreview && delivery.preview_sha256) {
+          draft.hash = delivery.preview_sha256;
+        }
+      }
     }
     // The backend forbids all worked-example overrides once any
     // release exists, even after edits change the preview hash.
@@ -3666,57 +3724,89 @@ function createDetailView(root, options = {}) {
     const preview = delivery.preview;
     const end = detail.checkpoints.end || {};
     const job = detail.provider_job;
+    const exampleBusy = exampleJob.status === "pending"
+      || Boolean(workedState.awaitingJobId);
+    const endBusy = exampleBusy
+      || ["pending", "waiting_for_practice",
+          "waiting_for_diagnostics"].includes((job || {}).status);
+    const appendEndComparison = () => {
+      const compare = el("details", null,
+        "raw end-deterministic-comparison");
+      compare.dataset.disclosureKey = "end-deterministic-comparison";
+      compare.appendChild(el("summary",
+        "Deterministic end feedback - comparison"));
+      const inner = el("div");
+      inner.appendChild(el("p",
+        "Deterministic feedback is a reference, not a hallucination " +
+        "detector. Compare claims against the recorded evidence. " +
+        "This comparison is not the preview being approved.", "meta"));
+      if (delivery.deterministic_preview.template_version) {
+        inner.appendChild(kv("Deterministic template version",
+          delivery.deterministic_preview.template_version));
+      }
+      renderStructuredFeedback(inner, delivery.deterministic_preview);
+      compare.appendChild(inner);
+      card.appendChild(compare);
+    };
     const selReview = end.student_review || end.baseline_student;
     const strip = el("div", null, "release-status");
     const genExec = (((job || {}).executions || {}).student || {})
       .generator || {};
     const wording = endFeedbackSource(selReview, delivery, genExec);
-    const srcRow = kv("Wording source", wording.label);
-    srcRow.classList.add("end-wording-source");
-    strip.appendChild(srcRow);
-    if (wording.partial) {
-      strip.appendChild(el("p",
-        "AI authored selected wording; remaining text is " +
-        "application-owned.", "meta"));
-    }
-    if ((delivery.wording_warnings || [])
-        .includes("internal_process_language")) {
-      strip.appendChild(el("p",
-        "Wording review: this draft contains internal application " +
-        "terminology. Check and edit it before approval. This is a " +
-        "review warning, not a validation failure.",
-        "warn feedback-wording-warning"));
+    if (!endBusy) {
+      const srcRow = kv("Wording source", wording.label);
+      srcRow.classList.add("end-wording-source");
+      strip.appendChild(srcRow);
+      if (wording.partial) {
+        strip.appendChild(el("p",
+          "AI authored selected wording; remaining text is " +
+          "application-owned.", "meta"));
+      }
+      if ((delivery.wording_warnings || [])
+          .includes("internal_process_language")) {
+        strip.appendChild(el("p",
+          "Wording review: this draft contains internal application " +
+          "terminology. Check and edit it before approval. This is a " +
+          "review warning, not a validation failure.",
+          "warn feedback-wording-warning"));
+      }
     }
     strip.appendChild(kv("Feedback generation", statusLabel(job.status)));
-    const templateRow = kv("Base feedback template",
-      feedbackTemplateLabel(preview, detail.feedback_variant));
-    templateRow.classList.add("end-feedback-template");
-    strip.appendChild(templateRow);
-    strip.appendChild(kv("Current presentation",
-      preview && preview.document_blocks
-        ? "Teacher-edited formatted document"
-        : preview && typeof preview.document_text === "string"
-          ? "Teacher-edited document"
-          : "Structured feedback cards"));
-    const workedExamples = (preview && preview.review_examples) || [];
-    if (preview && typeof preview.document_text === "string") {
-      strip.appendChild(kv("Worked explanations",
-        "Included in teacher-edited document"));
-    } else if (workedExamples.length) {
-      const providerCount = workedExamples.filter(
-        (e) => e.explanation_source === "provider").length;
-      const anyEdited = workedExamples.some((e) => e.teacher_edited);
-      let expl;
-      if (providerCount === workedExamples.length) {
-        expl = hostedConfirmed(genExec, "aitta_")
-          ? "Aitta-generated" : "AI-generated";
-      } else if (providerCount) {
-        expl = "Mixed AI and application explanations";
-      } else {
-        expl = "Application-owned";
+    if (exampleJob.status) {
+      strip.appendChild(kv("Worked example generation",
+        statusLabel(exampleJob.status)));
+    }
+    if (!endBusy) {
+      const templateRow = kv("Base feedback template",
+        feedbackTemplateLabel(preview, detail.feedback_variant));
+      templateRow.classList.add("end-feedback-template");
+      strip.appendChild(templateRow);
+      strip.appendChild(kv("Current presentation",
+        preview && preview.document_blocks
+          ? "Teacher-edited formatted document"
+          : preview && typeof preview.document_text === "string"
+            ? "Teacher-edited document"
+            : "Structured feedback cards"));
+      const workedExamples = (preview && preview.review_examples) || [];
+      if (preview && typeof preview.document_text === "string") {
+        strip.appendChild(kv("Worked explanations",
+          "Included in teacher-edited document"));
+      } else if (workedExamples.length) {
+        const providerCount = workedExamples.filter(
+          (e) => e.explanation_source === "provider").length;
+        const anyEdited = workedExamples.some((e) => e.teacher_edited);
+        let expl;
+        if (providerCount === workedExamples.length) {
+          expl = hostedConfirmed(genExec, "aitta_")
+            ? "Aitta-generated" : "AI-generated";
+        } else if (providerCount) {
+          expl = "Mixed AI and application explanations";
+        } else {
+          expl = "Application-owned";
+        }
+        if (anyEdited) expl += " with teacher edits";
+        strip.appendChild(kv("Worked explanations", expl));
       }
-      if (anyEdited) expl += " with teacher edits";
-      strip.appendChild(kv("Worked explanations", expl));
     }
     const activities = preview && preview.practice_activities;
     if (activities && activities.length) {
@@ -3735,7 +3825,7 @@ function createDetailView(root, options = {}) {
               ? statusLabel(end.recommendation_job.status) : "—"));
       strip.appendChild(kv("Practice selection", practiceStatus));
     }
-    if (selReview) {
+    if (!endBusy && selReview) {
       const selectedOriginals = selReview.selected_candidates || [];
       if (selectedOriginals.length) {
         selectedOriginals.forEach((original, i) => {
@@ -3771,7 +3861,7 @@ function createDetailView(root, options = {}) {
                 : "")));
       }
     }
-    if (detail.feedback_variant === "worked_first" && preview
+    if (!endBusy && detail.feedback_variant === "worked_first" && preview
         && String((selReview && (selReview.trace || {})
                   .guardrails_version) || "")
            .startsWith("provider_full_narrative_shape_checked_")) {
@@ -3782,18 +3872,17 @@ function createDetailView(root, options = {}) {
     }
     const fallback = (selReview && (selReview.trace || {})
                       .fallback_reason) || null;
-    if (fallback) {
+    if (!endBusy && fallback) {
       strip.appendChild(el("p",
         `A provider fallback was recorded ` +
         `(${String(fallback).replaceAll("_", " ")}). ` +
         "Review the current preview before approval.", "warn"));
     }
-    if (!end.student_review && job.status === "pending"
-        && job.provider_mode === "hosted") {
+    if (!endBusy && exampleJob.status === "fallback") {
       strip.appendChild(el("p",
-        "Hosted feedback is still processing. The current preview " +
-        "uses the deterministic baseline unless you have saved " +
-        "teacher edits.", "warn"));
+        "The selected worked example uses application-checked steps " +
+        "because AI generation did not complete. The rest of the " +
+        "feedback is unchanged.", "warn"));
     }
     const diagnosticsPending = Object.values(detail.checkpoints || {})
       .some((checkpoint) =>
@@ -3807,6 +3896,28 @@ function createDetailView(root, options = {}) {
         "running.", "boundary-note"));
     }
     card.appendChild(strip);
+    if (endBusy) {
+      // No baseline, edited, or release wording is shown as current
+      // while generation is queued, in flight, or between automatic
+      // retries; same contract as the midpoint check-in.
+      const waiting = el("div", null, "end-feedback-waiting");
+      waiting.setAttribute("role", "status");
+      waiting.setAttribute("aria-live", "polite");
+      waiting.setAttribute("aria-busy", "true");
+      waiting.appendChild(el("p",
+        exampleBusy
+          ? "Aitta is updating the selected worked example. Please " +
+            "wait while generation and any automatic retries finish."
+          : "Aitta is preparing the end feedback and practice. " +
+            "Please wait while generation and any automatic retries " +
+            "finish."));
+      card.appendChild(waiting);
+      if (delivery.deterministic_preview) {
+        appendEndComparison();
+      }
+      pane.appendChild(card);
+      return;
+    }
     if (!preview) {
       const waiting = ["not_requested", "pending",
                        "waiting_for_practice",
@@ -3828,10 +3939,16 @@ function createDetailView(root, options = {}) {
       choices.forEach((choice, choiceIndex) => {
         const fieldset = el("fieldset", null,
           "worked-example-choice");
+        // A saved free-form document cannot be patched per example;
+        // only structured edits can coexist with a new selection.
+        const freeformDoc = delivery.preview_source === "teacher_edited"
+          && preview && typeof preview.document_text === "string";
         fieldset.disabled = selectionLocked || Boolean(detail.read_only)
-          || workedSelectionBusy(selected);
+          || workedSelectionBusy(selected) || freeformDoc;
         fieldset.appendChild(el("legend",
-          `Worked example — ${choice.subtopic_name || "review focus"}`));
+          `Worked example — ${choice.subtopic_name
+            ? englishSkillName(normalizeDisplayText(choice.subtopic_name))
+            : "review focus"}`));
         const recommended = (choice.candidates || []).find(
           (cand) => cand.question_id === choice.recommended_question_id);
         if (choice.source === "teacher_override") {
@@ -3854,7 +3971,8 @@ function createDetailView(root, options = {}) {
         (choice.candidates || []).forEach((cand) => {
           const option = document.createElement("option");
           option.value = cand.question_id;
-          let text = `Question ${cand.position}: ${cand.prompt}`;
+          let text = `Question ${cand.position}: ` +
+            englishQuestionText({text: cand.prompt});
           if (cand.question_id === choice.recommended_question_id) {
             text += " (recommended)";
           }
@@ -3878,11 +3996,18 @@ function createDetailView(root, options = {}) {
                 cand.p_correct_before_answer)));
         });
         fieldset.appendChild(estimates);
+        if (freeformDoc) {
+          fieldset.appendChild(el("p",
+            "This draft is a saved teacher-edited document; a new " +
+            "example selection cannot update it. Save wording as " +
+            "structured fields or discard the document first.",
+            "warn"));
+        }
         fieldset.appendChild(el("p",
-          "Choosing another example rebuilds this draft using " +
-          "available checked solutions and flags questions without " +
-          "one. It resets saved wording edits. Review it again " +
-          "before approval.", "warn"));
+          "Choosing another example regenerates only that example's " +
+          "explanation; the rest of the feedback and practice stay " +
+          "unchanged. Saved edits inside the selected example are " +
+          "replaced. Review it again before approval.", "warn"));
         const apply = el("button", "Choose example and rebuild draft",
           "worked-example-apply");
         apply.type = "button";
@@ -3926,17 +4051,18 @@ function createDetailView(root, options = {}) {
                        candidate_id: choice.candidate_id,
                        question_id: chosenId,
                        reviewer_label: release.label || "anonymous"}});
-            state.note = "Worked example updated; the draft was " +
-              "rebuilt using available checked solutions. Review it again " +
-              "before approval.";
-            state.awaitingHash = res.preview_sha256;
-            // The server cleared the stored edit; keep the editor in
-            // the standard await-preview flow so it resyncs to the
-            // rebuilt revision instead of holding stale wording.
-            localEdit.dirty = false;
-            localEdit.stale = false;
-            localEdit.hash = res.preview_sha256;
-            localEdit.awaitingPreview = true;
+            const scoped = res.worked_example_job || null;
+            state.awaitingJobId = (scoped && scoped.status === "pending")
+              ? scoped.job_id : null;
+            state.awaitingJobQueuedAt = state.awaitingJobId
+              ? scoped.queued_at : null;
+            state.note = workedJobNote(scoped);
+            // The server preserved unrelated saved edits; drop the
+            // local draft copy only when it holds no unsaved wording
+            // so the editor resyncs to the returned preview.
+            if (!localEdit.dirty) {
+              editDrafts.delete(sid);
+            }
           } catch (err) {
             if (err.status === 409) {
               state.note = "The draft changed before the new " +
@@ -3986,26 +4112,8 @@ function createDetailView(root, options = {}) {
     card.appendChild(shown);
     if (delivery.deterministic_preview
         && (wording.providerAuthored
-            || delivery.preview_source === "teacher_edited"
-            || (job.status === "pending"
-                && job.provider_mode === "hosted"))) {
-      const compare = el("details", null,
-        "raw end-deterministic-comparison");
-      compare.dataset.disclosureKey = "end-deterministic-comparison";
-      compare.appendChild(el("summary",
-        "Deterministic end feedback - comparison"));
-      const inner = el("div");
-      inner.appendChild(el("p",
-        "Deterministic feedback is a reference, not a hallucination " +
-        "detector. Compare claims against the recorded evidence. " +
-        "This comparison is not the preview being approved.", "meta"));
-      if (delivery.deterministic_preview.template_version) {
-        inner.appendChild(kv("Deterministic template version",
-          delivery.deterministic_preview.template_version));
-      }
-      renderStructuredFeedback(inner, delivery.deterministic_preview);
-      compare.appendChild(inner);
-      card.appendChild(compare);
+            || delivery.preview_source === "teacher_edited")) {
+      appendEndComparison();
     }
     if (preview.practice && preview.practice.status === "disabled"
         && delivery.practice_hint) {
