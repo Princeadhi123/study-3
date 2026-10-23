@@ -34,6 +34,7 @@ from full_feedback import (
     build_multi_full_input, multi_baseline_sections,
     validate_full_input)
 from replay_provider_scenarios import CaptureCache
+from research_content_descriptions import MATHEMATICAL_TASKS
 from research_runtime import load_research_bank
 from session_store import bank_fingerprint
 from tests.test_kt_adapter import FakeKT
@@ -2962,6 +2963,12 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(len(full_calls), 1)
         sent = scoped_calls[0]
         self.assertEqual(sent["question_id"], qid8)
+        self.assertEqual(sent["subtopic_id"], "percentage_amount")
+        self.assertEqual(sent["mathematical_task"],
+                         MATHEMATICAL_TASKS["percentage_amount"])
+        for field in ("checked_steps", "checked_reasoning_question",
+                      "steps", "explanation", "reasoning_question"):
+            self.assertNotIn(field, sent)
         self.assertNotIn("sections", sent)
         self.assertNotIn("review_examples", sent)
         review = service._load_meta(sid)["checkpoints"]["end"][
@@ -3362,31 +3369,23 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertNotIn("raw provider timeout details",
                          json.dumps(job))
 
-    def test_scoped_no_checked_solution_never_calls_adapter(self):
+    def _unchecked_scoped_service(self, scoped, subdir,
+                                  provider_mode="hosted"):
         # Mutating question text makes its local checked solution
-        # unavailable; selecting it must not call the provider.
+        # unavailable, so the scoped job must generate from the
+        # question and task records alone.
         bank = make_grounded_bank()
         bank["questions"][0]["text"] += (
             " <img src=x onerror=alert(1)>")
         bank["questions"][0]["content_text"] = (
             bank["questions"][0]["text"] + " [OPTIONS] "
             + " | ".join(bank["questions"][0]["options"]))
-        calls = []
-
-        class Scoped:
-            execution = None
-            last_rejected_draft = None
-
-            def generate(self, card):
-                calls.append(card)
-                raise AssertionError("must not be called")
-
         service = DemoService(
-            root=Path(self.tmp.name) / "nocheck", bank=bank,
+            root=Path(self.tmp.name) / subdir, bank=bank,
             taxonomy=make_grounded_taxonomy(bank),
-            provider_mode="hosted",
+            provider_mode=provider_mode,
             generator=self._full_generator(),
-            worked_example_generator=Scoped(),
+            worked_example_generator=scoped,
             diagnostics=LiveDiagnostics(
                 model_loader=lambda: FakeKT(bank)))
         self.addCleanup(service.close, wait=True)
@@ -3408,10 +3407,83 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
             "message_sha256": delivery["preview_sha256"],
             "candidate_id": choice["candidate_id"],
             "question_id": target["question_id"]})
+        return service, sid, choice, target, res
+
+    def test_scoped_no_checked_solution_generates_from_question_and_task(
+            self):
+        calls = []
+
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                calls.append(copy.deepcopy(card))
+                return {"question_id": card["question_id"],
+                        "steps": ["Teacher checking is needed for this "
+                                  "recorded answer."],
+                        "reasoning_question":
+                            "What should the teacher verify here?"}
+
+        service, sid, choice, target, res = (
+            self._unchecked_scoped_service(Scoped(), "nocheck"))
+        job = self._wait_scoped(service, sid, {"ready"})
+        self.assertEqual(job["candidate_id"], choice["candidate_id"])
+        self.assertEqual(len(calls), 1)
+        sent = calls[0]
+        self.assertEqual(sent["question_id"], target["question_id"])
+        self.assertEqual(sent["subtopic_id"], "percentage_amount")
+        self.assertEqual(sent["mathematical_task"],
+                         MATHEMATICAL_TASKS["percentage_amount"])
+        for field in ("checked_steps", "checked_reasoning_question",
+                      "steps", "explanation", "reasoning_question"):
+            self.assertNotIn(field, sent)
+        meta = service._load_meta(sid)
+        card = next(
+            c for c in meta["checkpoints"]["end"]["student_review"]
+            ["review_examples"]
+            if c["candidate_id"] == choice["candidate_id"])
+        self.assertEqual(card["status"], "ready")
+        self.assertEqual(card["explanation_source"], "provider")
+        self.assertIsNone(card["solution_version"])
+        self.assertEqual(card["explanation_validation"],
+                         "shape_only_requires_educator_review")
+
+    def test_scoped_no_checked_solution_failure_keeps_unavailable(self):
+        class Failing:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                raise RuntimeError("provider blew up")
+
+        service, sid, choice, target, res = (
+            self._unchecked_scoped_service(Failing(), "nocheck_fail"))
+        job = self._wait_scoped(service, sid, {"fallback"})
+        self.assertEqual(job["reason"], "provider_error")
+        meta = service._load_meta(sid)
+        card = next(
+            c for c in meta["checkpoints"]["end"]["student_review"]
+            ["review_examples"]
+            if c["candidate_id"] == choice["candidate_id"])
+        self.assertEqual(card["status"], "unavailable")
+        self.assertIsNone(card["solution_version"])
+        self.assertNotIn("Teacher checking", json.dumps(card))
+
+    def test_rules_mode_no_checked_solution_stays_unavailable(self):
+        class Scoped:
+            execution = None
+            last_rejected_draft = None
+
+            def generate(self, card):
+                raise AssertionError("must not be called")
+
+        service, sid, choice, target, res = (
+            self._unchecked_scoped_service(
+                Scoped(), "nocheck_rules", provider_mode="rules"))
         job = res["worked_example_job"]
         self.assertEqual(job["status"], "unavailable")
         self.assertEqual(job["reason"], "no_checked_solution")
-        self.assertEqual(calls, [])
 
     def test_degraded_record_resolves_recorded_bundle(self):
         service = self._service(diagnostics=self._diagnostics())

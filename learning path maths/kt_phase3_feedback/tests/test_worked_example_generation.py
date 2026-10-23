@@ -10,6 +10,7 @@ import worked_example_generation
 from aitta_generator import (
     AittaGenerationError, AittaGenerator, DEFAULT_MODEL)
 from replay_provider_scenarios import CaptureCache
+from research_content_descriptions import MATHEMATICAL_TASKS
 from tests.test_jev_selector import FakeOpener, FakeResponse
 from worked_example_generation import (
     CachedWorkedExampleGenerator, WorkedExampleAittaGenerator,
@@ -66,24 +67,46 @@ class BuildInputTests(unittest.TestCase):
         self.assertEqual(set(built), {
             "schema", "prompt_version", "question_id", "prompt",
             "options", "selected_answer", "correct_answer",
-            "checked_steps", "checked_reasoning_question"})
+            "subtopic_id", "mathematical_task"})
         self.assertEqual(built["schema"],
                          worked_example_generation.SCHEMA)
         self.assertEqual(built["prompt_version"],
                          worked_example_generation.PROMPT_VERSION)
         self.assertEqual(built["question_id"], "q-pct-8")
-        self.assertEqual(built["checked_steps"],
-                         ["Compute 100% of 75.", "The answer is 75."])
+        self.assertEqual(built["subtopic_id"], "percentage_amount")
+        self.assertEqual(built["mathematical_task"],
+                         MATHEMATICAL_TASKS["percentage_amount"])
         # No narrative sections or other cards leak into the input.
         self.assertNotIn("sections", built)
         self.assertNotIn("review_examples", built)
 
-    def test_plain_steps_fallback_to_checked(self):
-        card = make_card()
-        del card["checked_steps"], card["checked_reasoning_question"]
-        built = build_input(dict(card, steps=["A.", "B."],
-                                 reasoning_question="Why?"))
-        self.assertEqual(built["checked_steps"], ["A.", "B."])
+    def test_no_solution_fields_reach_request(self):
+        card = make_card(checked_steps=["DISTINCT CHECKED STEP"],
+                         checked_reasoning_question="DISTINCT CHECKED WHY",
+                         steps=["DISTINCT APP STEP"],
+                         explanation="DISTINCT APP EXPLANATION",
+                         reasoning_question="DISTINCT APP WHY")
+        for field in ("checked_steps", "checked_reasoning_question",
+                      "steps", "explanation", "reasoning_question"):
+            self.assertIn(field, card)
+        built = build_input(card)
+        wire = json.dumps(built)
+        for field in ("checked_steps", "checked_reasoning_question",
+                      "steps", "explanation", "reasoning_question"):
+            self.assertNotIn(field, built)
+        self.assertNotIn("DISTINCT", wire)
+
+    def test_mathematical_task_mapping(self):
+        self.assertEqual(
+            build_input(make_card())["mathematical_task"],
+            MATHEMATICAL_TASKS["percentage_amount"])
+        self.assertEqual(
+            build_input(make_card(subtopic_id="combine_like_terms"))
+            ["mathematical_task"],
+            MATHEMATICAL_TASKS["combine_like_terms"])
+        self.assertIsNone(
+            build_input(make_card(subtopic_id="unmapped_subtopic"))
+            ["mathematical_task"])
 
     def test_normalized_input_requires_exact_keyset(self):
         built = build_input(make_card())
@@ -91,16 +114,32 @@ class BuildInputTests(unittest.TestCase):
             worked_example_generation._normalized_input(built), built)
         for bad in (dict(built, sections={}),
                     dict(built, review_examples=[]),
+                    dict(built, checked_steps=["x"]),
                     {k: v for k, v in built.items()
-                     if k != "checked_steps"},
-                    dict(built, checked_steps=[]),
+                     if k != "mathematical_task"},
+                    dict(built, mathematical_task="tampered task"),
+                    dict(built, subtopic_id="  "),
                     dict(built, prompt="  ")):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                worked_example_generation._normalized_input(bad)
+        # None task roundtrips for unmapped subtopics.
+        unmapped = build_input(make_card(subtopic_id="unmapped_subtopic"))
+        self.assertIsNone(unmapped["mathematical_task"])
+        self.assertEqual(
+            worked_example_generation._normalized_input(unmapped),
+            unmapped)
+
+    def test_stale_schema_or_prompt_version_rejected(self):
+        built = build_input(make_card())
+        for bad in (dict(built, schema="phase3_selected_worked_example_v1"),
+                    dict(built,
+                         prompt_version="aitta_selected_worked_example_v1")):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 worked_example_generation._normalized_input(bad)
 
     def test_unsupported_card_rejected_without_call(self):
-        for card in (None, {}, make_card(status="unavailable"),
-                     make_card(checked_steps=[], steps=[]),
+        for card in (None, {}, make_card(status="pending"),
+                     make_card(subtopic_id=""), make_card(subtopic_id=None),
                      make_card(prompt=""), make_card(options=[])):
             with self.assertRaises(ValueError, msg=repr(card)):
                 build_input(card)
@@ -122,9 +161,27 @@ class RequestAndReplyTests(unittest.TestCase):
             worked_example_generation.INSTRUCTIONS)
         context = json.loads(body["messages"][1]["content"])
         self.assertEqual(context["question_id"], "q-pct-8")
-        self.assertEqual(context["checked_steps"],
-                         card["checked_steps"])
+        self.assertEqual(context["subtopic_id"], "percentage_amount")
+        self.assertEqual(context["mathematical_task"],
+                         MATHEMATICAL_TASKS["percentage_amount"])
+        for field in ("checked_steps", "checked_reasoning_question",
+                      "steps", "explanation", "reasoning_question"):
+            self.assertNotIn(field, context)
         self.assertEqual(opener.timeouts[0], 12.5)
+
+    def test_ready_card_without_solution_generates(self):
+        card = make_card()
+        for field in ("checked_steps", "checked_reasoning_question"):
+            del card[field]
+        result = native().generate(card)
+        self.assertEqual(result["question_id"], "q-pct-8")
+
+    def test_unavailable_card_generates(self):
+        card = make_card(status="unavailable", steps=[],
+                         explanation="",
+                         reasoning_question="", solution_version=None)
+        result = native().generate(card)
+        self.assertEqual(result["question_id"], "q-pct-8")
 
     def test_reply_only_carries_card_overlay(self):
         overlay = native().generate(make_card())
@@ -267,6 +324,18 @@ class CachedGeneratorTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(len(opener.requests), 1)
             self.assertTrue(generator.execution["reused"])
+
+    def test_changed_task_context_bypasses_capture(self):
+        card = make_card()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CaptureCache(Path(tmp), 4)
+            opener = FakeOpener(ok_body(card))
+            generator = self._generator(cache, opener)
+            with cache.session_scope("s" * 32):
+                generator.generate(card)
+                generator.generate(
+                    make_card(subtopic_id="combine_like_terms"))
+            self.assertEqual(len(opener.requests), 2)
 
 
 if __name__ == "__main__":

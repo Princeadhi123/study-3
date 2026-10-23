@@ -143,11 +143,21 @@ Key contracts:
   generated narrative sections, the other example card, practice
   picks and the aggregate `provider_job` provenance are preserved;
   only the card-level `worked_example_job` runs (schema
-  `phase3_selected_worked_example_v1`, prompt
-  `aitta_selected_worked_example_v1`). While the job is pending the
+  `phase3_selected_worked_example_v2`, prompt
+  `aitta_selected_worked_example_v2`). The scoped request carries the
+  question, its options, the recorded selected and correct answers,
+  the card's `subtopic_id` and the shared `mathematical_task`
+  description from the same `MATHEMATICAL_TASKS` mapping the
+  worked-first flow uses (`None` for an unmapped subtopic) — never
+  the application's checked steps, explanation or reasoning question.
+  The provider authors the solution steps itself, matching the
+  initial worked-first generation, so hosted regeneration also works
+  when the local solver is unavailable. While the job is pending the
   draft shows a processing state and edits/releases/another override
   conflict with 409; on failure the card keeps its
-  application-checked steps with an explicit fallback marker. A
+  application-checked steps if it has them — otherwise it stays
+  unavailable — with an explicit fallback marker. The checked
+  solution remains an internal fallback/audit record only. A
   saved free-form teacher document cannot be patched per example and
   blocks the override until structured fields are used; saved
   structured edits keep unrelated content and refresh only the

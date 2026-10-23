@@ -3197,7 +3197,7 @@ class DemoService:
     def _admit_worked_example_job(self, session_id, meta, card,
                                   candidate_id, question_id, now):
         """Queue the scoped worked-example generation job for one
-        already-saved checked card. Returns the job record; a pending
+        already-saved assessment card. Returns the job record; a pending
         job has reserved a provider pool slot the caller must submit or
         release. Callers hold the lock."""
         end = meta["checkpoints"]["end"]
@@ -3206,11 +3206,12 @@ class DemoService:
                "queued_at": now, "finished_at": now}
         hosted = (meta["provider_job"].get("provider_mode") == "hosted")
         adapter = self.worked_example_generator
-        if card.get("status") != "ready":
-            job["reason"] = "no_checked_solution"
-        elif not hosted:
-            job.update({"status": "ready", "source": "application",
-                        "reason": "rules_mode_application_only"})
+        if not hosted:
+            if card.get("status") != "ready":
+                job["reason"] = "no_checked_solution"
+            else:
+                job.update({"status": "ready", "source": "application",
+                            "reason": "rules_mode_application_only"})
         elif adapter is None:
             job.update({"status": "fallback",
                         "reason": "adapter_unavailable"})
@@ -3231,8 +3232,9 @@ class DemoService:
         return job
 
     def _run_worked_example_job(self, session_id, job_id):
-        """Scoped worker: regenerates wording for exactly one selected
-        worked-example card, overlaying only that card on success."""
+        """Scoped worker: regenerates solution steps and reasoning for
+        exactly one selected worked-example card, overlaying only that
+        card on success."""
         adapter = self.worked_example_generator
         reply = None
         execution = None

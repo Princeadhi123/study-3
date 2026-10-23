@@ -3624,9 +3624,8 @@ function createDetailView(root, options = {}) {
         "unchanged.";
     }
     if (job.status === "fallback") {
-      return "Selection saved; the selected example keeps its " +
-        "application-checked steps because AI generation did not " +
-        "complete.";
+      return "Selection saved; AI generation did not complete. " +
+        "Review the selected example's available content before approval.";
     }
     if (job.status === "unavailable") {
       return "Selection saved; the selected example has no checked " +
@@ -3915,9 +3914,9 @@ function createDetailView(root, options = {}) {
     }
     if (!endBusy && exampleJob.status === "fallback") {
       strip.appendChild(el("p",
-        "The selected worked example uses application-checked steps " +
-        "because AI generation did not complete. The rest of the " +
-        "feedback is unchanged.", "warn"));
+        "AI generation for the selected worked example did not " +
+        "complete. Review its available content before approval. " +
+        "The rest of the feedback is unchanged.", "warn"));
     }
     const diagnosticsPending = Object.values(detail.checkpoints || {})
       .some((checkpoint) =>
