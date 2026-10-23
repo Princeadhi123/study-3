@@ -1,7 +1,8 @@
-from feedback_language import PLAIN_LANGUAGE_INSTRUCTIONS
+from feedback_language import (
+    PLAIN_LANGUAGE_INSTRUCTIONS, PRACTICE_STATUS_INSTRUCTIONS)
 
 FULL_FEEDBACK_SCHEMA = "phase3_full_feedback_generation_v2"
-FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v6"
+FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v7"
 FULL_FEEDBACK_MAX_TOKENS = 3072
 FULL_FEEDBACK_SECTION_MAX_CHARS = 2000
 FULL_FEEDBACK_SECTION_KEYS = (
@@ -87,11 +88,12 @@ FULL_FEEDBACK_INSTRUCTIONS = (
     "learning gains, decline, or an optimal learning path. This is a draft; "
     "never claim educator approval, release, or proven educational benefit."
     + PLAIN_LANGUAGE_INSTRUCTIONS
+    + PRACTICE_STATUS_INSTRUCTIONS
 )
 
 
 MULTI_FULL_FEEDBACK_SCHEMA = "phase3_multi_topic_feedback_generation_v2"
-MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v10"
+MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v11"
 MULTI_FEEDBACK_GUARDRAILS_VERSION = "application_owned_multi_feedback_v1"
 PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION = (
     "provider_full_narrative_shape_checked_v2")
@@ -202,6 +204,7 @@ MULTI_FULL_FEEDBACK_INSTRUCTIONS = (
     "evidence and cards. The completion wording is retained only after "
     "validation. Do not include the application-owned scope notice."
     + PLAIN_LANGUAGE_INSTRUCTIONS
+    + PRACTICE_STATUS_INSTRUCTIONS
 )
 GROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "\nWorked-review output contract: return exactly three top-level fields: "
@@ -220,7 +223,12 @@ GROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "question inviting the student to explain this method. These are "
     "student-facing teaching explanations, not a private reasoning trace. "
     "The generated wording is a draft requiring educator review; do not "
-    "claim it is mathematically verified, approved, or released."
+    "claim it is mathematically verified, approved, or released. "
+    "Before returning, ensure sections is an object with the four named "
+    "string fields, never a list. Count the steps in each entry: merge "
+    "related explanation and checking sentences to stay within six steps "
+    "instead of adding a seventh confirmation step. Include every supplied "
+    "question_id exactly once and no other question_id."
 )
 UNGROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "\nWorked-review output contract: no assessment-grounded worked reviews "

@@ -284,7 +284,7 @@ recorded at creation and never reinterpreted afterwards:
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v8`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v9`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the selected review questions (recorded prompt, options,
@@ -336,8 +336,8 @@ recorded at creation and never reinterpreted afterwards:
   midpoint and end feedback; there is no phrase-based wording warning.
   Structural and security checks remain hard rejections. Wording is not
   fact-verified, and prompt instructions do not guarantee that internal
-  terminology never appears. Prompt versions (single-topic v6,
-  two-topic v10, midpoint v4, worked-first v8, selected worked-example v3)
+  terminology never appears. Prompt versions (single-topic v7,
+  two-topic v11, midpoint v5, worked-first v9, selected worked-example v4)
   distinguish new requests from prior captures. Existing captures remain
   unchanged; a fresh hosted call happens only when the user explicitly
   starts one.
@@ -347,6 +347,14 @@ recorded at creation and never reinterpreted afterwards:
   fractions and arithmetic operators to readable text. Unsupported notation
   stays visible, and text is never interpreted as HTML. Stored question and
   answer records, saved drafts, and editable source text are preserved.
+
+  Audit-driven prompt guidance also requires exact topic/subtopic count
+  reconciliation, literal fraction operands, truthful practice availability,
+  correct content-relationship wording, and final JSON/step-count checks.
+  These remain prompt instructions, not mathematical verification. Aitta
+  still authors the narrative and worked explanations; this change does not
+  replace them with deterministic feedback. Saved generations remain
+  unchanged, and fresh hosted results require an explicit new generation.
 
   Midpoint has a hosted Aitta rewording path: after answer 20 a hosted
   session queues one midpoint generation job — up to three provider
@@ -571,7 +579,7 @@ Checkpoint behavior:
 - provider and diagnostics work is queued only at responses 20 and 40;
 - midpoint student feedback is deterministic and neutral; a hosted
   midpoint phrasing job may additionally produce a teacher-only Aitta
-  comparison draft (`aitta_midpoint_check_in_v1`) from first-20
+  comparison draft (`aitta_midpoint_check_in_v5`) from first-20
   broad-topic aggregates only — never shown to the student and never
   released automatically;
 - under `aligned_two_topic`, the end preview is not published until bundle
@@ -645,7 +653,7 @@ Aitta (current `aligned_two_topic` mode):
   deterministic steps, explanations, reasoning questions, or the
   baseline sections), and safe per-topic practice status/task
   descriptions (prompt
-  `aitta_assessment_grounded_two_topic_feedback_v10`) — **no** raw bank or
+  `aitta_assessment_grounded_two_topic_feedback_v11`) — **no** raw bank or
   responses, answer indices, practice answer keys, raw practice
   question/options, or KT probabilities;
 - does not score or select questions or topics; it authors worked-review

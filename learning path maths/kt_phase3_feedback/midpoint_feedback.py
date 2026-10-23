@@ -18,7 +18,7 @@ from full_feedback import (
     validate_full_reply)
 
 SCHEMA = "phase3_midpoint_feedback_generation_v1"
-PROMPT_VERSION = "aitta_midpoint_check_in_v4"
+PROMPT_VERSION = "aitta_midpoint_check_in_v5"
 MESSAGE_VERSION = "phase3_student_midpoint_llm_v1"
 CANDIDATE_ID = "midpoint_check_in"
 MIDPOINT_MAX_TOKENS = 1536
@@ -34,8 +34,9 @@ INSTRUCTIONS = (
     "questions. Do not infer later answers, future questions, student "
     "reasoning, or missing evidence.\n"
     "Return exactly one JSON object with candidate_id equal to "
-    "midpoint_check_in and sections containing exactly four nonempty "
-    "plain-text strings: assessment_summary, observed_strengths, "
+    "midpoint_check_in and sections as a JSON object, never an array, "
+    "with exactly four nonempty plain-text string fields: "
+    "assessment_summary, observed_strengths, "
     "review_focus, next_steps. Each section must contain one or two short "
     "sentences and at most 2000 characters. No extra fields, Markdown, "
     "HTML, citations, reasoning trace, provider names, internal selection "
@@ -75,7 +76,18 @@ INSTRUCTIONS = (
     "approval. Keep wording respectful and concise; do not address the "
     "teacher or describe this as a draft for educator comparison. "
     "Neither similarity to nor difference from the deterministic "
-    "check-in establishes factual correctness."
+    "check-in establishes factual correctness. "
+    "Do not assert that results are tied merely because two nonmaximum "
+    "error counts are equal. For any statement about the most incorrect "
+    "answers, compare incorrect counts across all supplied broad topics. "
+    "For example, counts [5, 3, 4, 3] have a unique maximum of 5, not "
+    "a tie. This is an error-count comparison, not a judgement of ability "
+    "or a reason to prescribe review during the assessment. Prefer simply "
+    "describing where errors occurred rather than ranking topics. "
+    "Before returning, verify the four named section keys are fields of "
+    "one object, not four entries of an array. Recheck that encouragement, "
+    "strengths and focus all refer only to the same first-twenty evidence; "
+    "next_steps must only encourage continuing, with an optional break."
     + PLAIN_LANGUAGE_INSTRUCTIONS
 )
 

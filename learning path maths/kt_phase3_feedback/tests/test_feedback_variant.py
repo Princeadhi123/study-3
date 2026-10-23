@@ -440,7 +440,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v8")
+            "aitta_worked_first_evidence_author_v9")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")
@@ -534,9 +534,9 @@ class ReplayVariantTests(unittest.TestCase):
             review_mode="legacy_single")
         self.addCleanup(legacy.close, wait=True)
         legacy.research.library()
+        worked_first_request = self.request(feedback_variant="worked_first")
         with self.assertRaises(ValueError):
-            legacy.replays.start(self.request(
-                feedback_variant="worked_first"))
+            legacy.replays.start(worked_first_request)
 
     def test_both_variants_saved_independently(self):
         before = (self.report_path.read_bytes(),

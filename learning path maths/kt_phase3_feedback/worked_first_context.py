@@ -2,12 +2,13 @@
 import copy
 import math
 
-from feedback_language import PLAIN_LANGUAGE_INSTRUCTIONS
+from feedback_language import (
+    PLAIN_LANGUAGE_INSTRUCTIONS, PRACTICE_STATUS_INSTRUCTIONS)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
 CONTEXT_VERSION = "worked_first_assessment_research_context_v2"
 SCHEMA = "phase3_worked_first_feedback_generation_v1"
-PROMPT_VERSION = "aitta_worked_first_evidence_author_v8"
+PROMPT_VERSION = "aitta_worked_first_evidence_author_v9"
 WF_MAX_TOKENS = 4096
 KT_BOUNDARY = (
     "Experimental pre-answer predictions, not post-assessment mastery, "
@@ -46,7 +47,8 @@ INSTRUCTIONS = (
     "learning, improvement, or decline.\n"
     "Return exactly a JSON object with three fields: candidate_id copied "
     "from selected_candidate.candidate_id, sections, and worked_reviews. "
-    "sections contains exactly four nonempty plain-text strings: "
+    "sections is a JSON object, never an array, with exactly four "
+    "nonempty plain-text string fields: "
     "assessment_summary, observed_strengths, review_focus, next_steps. "
     "Each section string is at most 2000 characters. worked_reviews is a "
     "list with exactly one entry for each supplied review_example; "
@@ -121,8 +123,14 @@ INSTRUCTIONS = (
     "comparison and fallback. Your accepted narrative is not required to "
     "match that template. Neither a match nor a difference establishes "
     "factual correctness. Ground every student-facing claim in the supplied "
-    "evidence and leave unsupported interpretations unstated."
+    "evidence and leave unsupported interpretations unstated. "
+    "Before returning, check the JSON shape: sections must remain an "
+    "object with the four named string fields; worked_reviews must cover "
+    "each supplied question_id exactly once. Count each entry's steps "
+    "and merge related explanation and checking sentences to stay within "
+    "six steps instead of adding a seventh confirmation step."
     + PLAIN_LANGUAGE_INSTRUCTIONS
+    + PRACTICE_STATUS_INSTRUCTIONS
 )
 
 

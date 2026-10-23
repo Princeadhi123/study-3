@@ -61,7 +61,7 @@ class WorkedFirstContextTests(unittest.TestCase):
 
     def test_prompt_version_and_instruction_contract(self):
         self.assertEqual(PROMPT_VERSION,
-                         "aitta_worked_first_evidence_author_v8")
+                         "aitta_worked_first_evidence_author_v9")
         self.assertEqual(CONTEXT_VERSION,
                          "worked_first_assessment_research_context_v2")
         for needle in (
@@ -325,12 +325,12 @@ class WorkedFirstContextTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_worked_first_context(
                 tampered, self.evidence, self.assessment_context)
+        correct_rows = responses(self.bank, correct=True)
+        mismatched_context = _context_for(
+            self.bank, self.taxonomy, correct_rows)
         with self.assertRaises(ValueError):
             build_worked_first_context(
-                self.evidence,
-                _context_for(self.bank, self.taxonomy,
-                             responses(self.bank, correct=True)),
-                self.blocks)
+                self.evidence, mismatched_context, self.blocks)
 
     def test_invalid_model_projection_rejected(self):
         base = build_worked_first_context(

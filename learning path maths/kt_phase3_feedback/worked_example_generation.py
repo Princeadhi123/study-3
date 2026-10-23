@@ -10,7 +10,7 @@ from full_feedback import (
     validate_worked_reviews)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
-PROMPT_VERSION = "aitta_selected_worked_example_v3"
+PROMPT_VERSION = "aitta_selected_worked_example_v4"
 MAX_TOKENS = 1800
 INSTRUCTIONS = (
     "Write an English teaching explanation for exactly one synthetic "
@@ -43,7 +43,11 @@ INSTRUCTIONS = (
     "nonempty English plain-text strings, each at most 1000 characters. "
     "reasoning_question must be one nonempty English plain-text string of "
     "at most 600 characters asking the student to explain the mathematics "
-    "in this question. Do not include markup or extra keys."
+    "in this question. Do not include markup or extra keys. "
+    "Before returning, count the steps and merge related explanation "
+    "and checking sentences to stay within six steps instead of adding "
+    "a seventh confirmation step. Return exactly one explanation for "
+    "the supplied question_id; do not add a worked_reviews wrapper."
     + MATH_NOTATION_INSTRUCTIONS
 )
 
