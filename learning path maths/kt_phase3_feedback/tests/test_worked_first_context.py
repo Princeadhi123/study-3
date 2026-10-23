@@ -61,7 +61,7 @@ class WorkedFirstContextTests(unittest.TestCase):
 
     def test_prompt_version_and_instruction_contract(self):
         self.assertEqual(PROMPT_VERSION,
-                         "aitta_worked_first_evidence_author_v9")
+                         "aitta_worked_first_evidence_author_v10")
         self.assertEqual(CONTEXT_VERSION,
                          "worked_first_assessment_research_context_v2")
         for needle in (

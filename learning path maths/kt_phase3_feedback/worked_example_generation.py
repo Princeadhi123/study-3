@@ -4,13 +4,13 @@ import json
 import threading
 
 from aitta_generator import AittaGenerationError
-from feedback_language import MATH_NOTATION_INSTRUCTIONS
+from feedback_language import MATH_NOTATION_INSTRUCTIONS, provider_math_context
 from full_feedback import (
     FullFeedbackAittaGenerator, provider_review_examples,
     validate_worked_reviews)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
-PROMPT_VERSION = "aitta_selected_worked_example_v4"
+PROMPT_VERSION = "aitta_selected_worked_example_v5"
 MAX_TOKENS = 1800
 INSTRUCTIONS = (
     "Write an English teaching explanation for exactly one synthetic "
@@ -167,7 +167,7 @@ class WorkedExampleAittaGenerator(FullFeedbackAittaGenerator):
                 "messages": [
                     {"role": "system", "content": INSTRUCTIONS},
                     {"role": "user",
-                     "content": json.dumps(normalized)}],
+                     "content": json.dumps(provider_math_context(normalized))}],
                 "max_tokens": MAX_TOKENS,
                 "reasoning_effort": REASONING_EFFORT,
                 "response_format": dict(RESPONSE_FORMAT)}

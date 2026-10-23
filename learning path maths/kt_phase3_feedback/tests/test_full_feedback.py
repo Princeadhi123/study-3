@@ -26,7 +26,8 @@ from full_feedback import (
     build_full_input, build_multi_full_input,
     full_message_sections,
     full_reply_rejection_code, FULL_FEEDBACK_REJECTION_CODES,
-    guarded_multi_message, validate_full_input, validate_full_reply)
+    guarded_multi_message, structured_sections,
+    validate_full_input, validate_full_reply)
 from replay_provider_scenarios import CaptureCache
 import feedback_practice
 from tests.helpers import make_bank, make_taxonomy, responses
@@ -293,14 +294,15 @@ class FullFeedbackTests(unittest.TestCase):
             self.assertEqual(
                 reply["sections"]["next_steps"], accepted)
 
-    def test_prompt_version_v7_request_and_isolation(self):
+    def test_prompt_version_v8_request_and_isolation(self):
         self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION,
-                         "aitta_feedback_with_practice_v7")
+                         "aitta_feedback_with_practice_v8")
         for stale in ("aitta_feedback_with_practice_v2",
                       "aitta_feedback_with_practice_v3",
                       "aitta_feedback_with_practice_v4",
                       "aitta_feedback_with_practice_v5",
-                      "aitta_feedback_with_practice_v6"):
+                      "aitta_feedback_with_practice_v6",
+                      "aitta_feedback_with_practice_v7"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1005,6 +1007,13 @@ class MultiFullFeedbackTests(unittest.TestCase):
         normalized = validate_full_input(copy.deepcopy(self.full_input))
         self.assertEqual(normalized, self.full_input)
 
+    def test_rebuilt_validation_preserves_first_error(self):
+        payload = copy.deepcopy(self.full_input)
+        payload["feedback_plans"] = []
+        payload["baseline_sections"] = []
+        with self.assertRaisesRegex(ValueError, "^feedback_plans must match the selected bundle$"):
+            validate_full_input(payload)
+
     def test_validate_multi_rejects_tampered_fields(self):
         for mutate in (
                 lambda p: p["feedback_plans"].pop(),
@@ -1040,10 +1049,10 @@ class MultiFullFeedbackTests(unittest.TestCase):
                           '"responses"', "item_id", "sha256"):
             self.assertNotIn(forbidden, raw)
 
-    def test_v11_prompt_wording_contract(self):
+    def test_v12_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v11")
+            "aitta_assessment_grounded_two_topic_feedback_v12")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1074,7 +1083,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v11")
+            "aitta_assessment_grounded_two_topic_feedback_v12")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
@@ -1085,7 +1094,8 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 "aitta_assessment_grounded_two_topic_feedback_v7",
                 "aitta_assessment_grounded_two_topic_feedback_v8",
                 "aitta_assessment_grounded_two_topic_feedback_v9",
-                "aitta_assessment_grounded_two_topic_feedback_v10"):
+                "aitta_assessment_grounded_two_topic_feedback_v10",
+                "aitta_assessment_grounded_two_topic_feedback_v11"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1801,6 +1811,42 @@ class WorkedFirstWireTests(unittest.TestCase):
         self.assertNotEqual(
             v5_body["messages"][0]["content"],
             wf_body["messages"][0]["content"])
+
+
+class StructuredSectionsRefactorTests(unittest.TestCase):
+    def test_canonical_sections_keep_their_existing_text(self):
+        sections = [{"kind": kind, "title": title, "text": kind}
+                    for kind, title in zip(FULL_FEEDBACK_SECTION_KEYS,
+                                           FULL_FEEDBACK_SECTION_TITLES)]
+        review = {"message": {"sections": sections},
+                  "feedback_plan": {"action": "Do not replace canonical text."}}
+        result = structured_sections(review)
+        self.assertEqual(result, sections)
+        self.assertIsNot(result, sections)
+
+    def test_existing_next_action_takes_precedence_over_fallback(self):
+        review = {"message": {"sections": [{"kind": "next_action", "text": "Existing."}]},
+                  "feedback_plan": {"action": "Fallback."}}
+        self.assertEqual(structured_sections(review)[-1]["text"], "Existing.")
+
+    def test_plan_action_precedes_selected_candidate(self):
+        review = {"feedback_plan": {"action": "Plan action."},
+                  "selected_candidate_id": "selected",
+                  "candidates": [{"candidate_id": "selected", "action": "Candidate action."}]}
+        self.assertEqual(structured_sections(review)[-1]["text"], "Plan action.")
+
+    def test_candidate_fallback_stops_at_first_matching_candidate(self):
+        for action in ("Selected action.", None):
+            with self.subTest(action=action):
+                review = {
+                    "selected_candidate_id": "selected",
+                    "candidates": [{"candidate_id": "other", "action": "Ignore."},
+                                   {"candidate_id": "selected", "action": action},
+                                   {"candidate_id": "selected", "action": "Do not use."}]}
+                self.assertEqual(structured_sections(review)[-1]["text"], action or "")
+
+    def test_missing_action_leaves_next_steps_empty(self):
+        self.assertEqual(structured_sections({})[-1]["text"], "")
 
 
 if __name__ == "__main__":

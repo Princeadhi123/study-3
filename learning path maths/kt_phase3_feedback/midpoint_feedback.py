@@ -13,12 +13,13 @@ import threading
 from aitta_generator import (
     AittaGenerationError, REASONING_EFFORT, RESPONSE_FORMAT)
 from evidence_feedback import compose_midpoint_message, validate_evidence
+from feedback_language import MIDPOINT_REPORTING_INSTRUCTIONS
 from full_feedback import (
     PLAIN_LANGUAGE_INSTRUCTIONS, FullFeedbackAittaGenerator,
     validate_full_reply)
 
 SCHEMA = "phase3_midpoint_feedback_generation_v1"
-PROMPT_VERSION = "aitta_midpoint_check_in_v5"
+PROMPT_VERSION = "aitta_midpoint_check_in_v6"
 MESSAGE_VERSION = "phase3_student_midpoint_llm_v1"
 CANDIDATE_ID = "midpoint_check_in"
 MIDPOINT_MAX_TOKENS = 1536
@@ -89,6 +90,7 @@ INSTRUCTIONS = (
     "strengths and focus all refer only to the same first-twenty evidence; "
     "next_steps must only encourage continuing, with an optional break."
     + PLAIN_LANGUAGE_INSTRUCTIONS
+    + MIDPOINT_REPORTING_INSTRUCTIONS
 )
 
 _INPUT_KEYS = {"schema", "prompt_version", "checkpoint", "evidence"}

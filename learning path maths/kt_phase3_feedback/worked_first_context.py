@@ -3,12 +3,13 @@ import copy
 import math
 
 from feedback_language import (
+    END_REPORTING_INSTRUCTIONS, MATH_NOTATION_INSTRUCTIONS,
     PLAIN_LANGUAGE_INSTRUCTIONS, PRACTICE_STATUS_INSTRUCTIONS)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
 CONTEXT_VERSION = "worked_first_assessment_research_context_v2"
 SCHEMA = "phase3_worked_first_feedback_generation_v1"
-PROMPT_VERSION = "aitta_worked_first_evidence_author_v9"
+PROMPT_VERSION = "aitta_worked_first_evidence_author_v10"
 WF_MAX_TOKENS = 4096
 KT_BOUNDARY = (
     "Experimental pre-answer predictions, not post-assessment mastery, "
@@ -131,6 +132,8 @@ INSTRUCTIONS = (
     "six steps instead of adding a seventh confirmation step."
     + PLAIN_LANGUAGE_INSTRUCTIONS
     + PRACTICE_STATUS_INSTRUCTIONS
+    + MATH_NOTATION_INSTRUCTIONS
+    + END_REPORTING_INSTRUCTIONS
 )
 
 

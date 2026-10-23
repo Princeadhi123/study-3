@@ -236,6 +236,23 @@ class ScenarioReplayTests(unittest.TestCase):
             with self.assertRaises(ResearchConflict):
                 self.service.replays.start(body)
 
+    def test_shared_and_scoped_prompt_files_are_fingerprinted(self):
+        before = self.service.replays.current_code()
+        original_read = Path.read_bytes
+        for name in ("feedback_language.py", "worked_example_generation.py"):
+            with self.subTest(name=name):
+                self.assertIn(name, before)
+                target = Path(__file__).resolve().parents[1] / name
+
+                def changed_read(path):
+                    raw = original_read(path)
+                    return raw + b"\n" if path == target else raw
+
+                with patch.object(Path, "read_bytes", changed_read):
+                    after = self.service.replays.current_code()
+                    self.assertNotEqual(before[name], after[name])
+                    self.assertTrue(self.service.replays.list()["restart_required"])
+
     def test_cancel_stops_admitting_more_cases_and_busy_start_is_rejected(self):
         import threading
         entered, release = threading.Event(), threading.Event()

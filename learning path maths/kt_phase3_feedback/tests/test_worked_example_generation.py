@@ -89,9 +89,9 @@ class BuildInputTests(unittest.TestCase):
         for instructions in (FULL_FEEDBACK_INSTRUCTIONS,
                              MULTI_FULL_FEEDBACK_INSTRUCTIONS,
                              WF_INSTRUCTIONS,
-                             MIDPOINT_INSTRUCTIONS,
                              worked_example_generation.INSTRUCTIONS):
             self.assertIn(MATH_NOTATION_INSTRUCTIONS, instructions)
+        self.assertNotIn(MATH_NOTATION_INSTRUCTIONS, MIDPOINT_INSTRUCTIONS)
 
     def test_fraction_records_not_mutated(self):
         card = make_card(prompt="3⁄6 · 10⁄1",
@@ -103,6 +103,24 @@ class BuildInputTests(unittest.TestCase):
         self.assertEqual(built["options"], ["30⁄6", "6⁄24"])
         self.assertEqual(built["selected_answer"], "6⁄24")
         self.assertEqual(built["correct_answer"], "30⁄6")
+
+    def test_request_normalizes_fraction_notation_only_on_the_wire(self):
+        card = make_card(subtopic_id="fraction_product",
+                         prompt="3\u20446 * 10\u20441",
+                         options=["30\u20446", "6\u204424"],
+                         selected_answer="6\u204424",
+                         correct_answer="30\u20446")
+        before = copy.deepcopy(card)
+        normalized = build_input(card)
+        body = native().request(card)
+        wire = json.loads(body["messages"][1]["content"])
+        self.assertEqual(wire["prompt"], "3/6 * 10/1")
+        self.assertEqual(wire["options"], ["30/6", "6/24"])
+        self.assertEqual(wire["selected_answer"], "6/24")
+        self.assertEqual(wire["correct_answer"], "30/6")
+        self.assertEqual(wire["question_id"], card["question_id"])
+        self.assertEqual(card, before)
+        self.assertEqual(build_input(card), normalized)
 
     def test_no_solution_fields_reach_request(self):
         card = make_card(checked_steps=["DISTINCT CHECKED STEP"],
@@ -157,7 +175,9 @@ class BuildInputTests(unittest.TestCase):
         built = build_input(make_card())
         for bad in (dict(built, schema="phase3_selected_worked_example_v1"),
                     dict(built,
-                         prompt_version="aitta_selected_worked_example_v1")):
+                         prompt_version="aitta_selected_worked_example_v1"),
+                    dict(built,
+                         prompt_version="aitta_selected_worked_example_v4")):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 worked_example_generation._normalized_input(bad)
 

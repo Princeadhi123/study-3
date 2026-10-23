@@ -1,8 +1,10 @@
 from feedback_language import (
-    PLAIN_LANGUAGE_INSTRUCTIONS, PRACTICE_STATUS_INSTRUCTIONS)
+    END_REPORTING_INSTRUCTIONS, MATH_NOTATION_INSTRUCTIONS,
+    PLAIN_LANGUAGE_INSTRUCTIONS, PRACTICE_STATUS_INSTRUCTIONS,
+    provider_math_context)
 
 FULL_FEEDBACK_SCHEMA = "phase3_full_feedback_generation_v2"
-FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v7"
+FULL_FEEDBACK_PROMPT_VERSION = "aitta_feedback_with_practice_v8"
 FULL_FEEDBACK_MAX_TOKENS = 3072
 FULL_FEEDBACK_SECTION_MAX_CHARS = 2000
 FULL_FEEDBACK_SECTION_KEYS = (
@@ -89,11 +91,13 @@ FULL_FEEDBACK_INSTRUCTIONS = (
     "never claim educator approval, release, or proven educational benefit."
     + PLAIN_LANGUAGE_INSTRUCTIONS
     + PRACTICE_STATUS_INSTRUCTIONS
+    + MATH_NOTATION_INSTRUCTIONS
+    + END_REPORTING_INSTRUCTIONS
 )
 
 
 MULTI_FULL_FEEDBACK_SCHEMA = "phase3_multi_topic_feedback_generation_v2"
-MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v11"
+MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v12"
 MULTI_FEEDBACK_GUARDRAILS_VERSION = "application_owned_multi_feedback_v1"
 PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION = (
     "provider_full_narrative_shape_checked_v2")
@@ -205,6 +209,8 @@ MULTI_FULL_FEEDBACK_INSTRUCTIONS = (
     "validation. Do not include the application-owned scope notice."
     + PLAIN_LANGUAGE_INSTRUCTIONS
     + PRACTICE_STATUS_INSTRUCTIONS
+    + MATH_NOTATION_INSTRUCTIONS
+    + END_REPORTING_INSTRUCTIONS
 )
 GROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "\nWorked-review output contract: return exactly three top-level fields: "
@@ -272,6 +278,17 @@ _FULL_SECTION_TITLES = dict(zip(FULL_FEEDBACK_SECTION_KEYS,
 _MARKUP = re.compile(r"<[^>]+>")
 
 
+def _review_action(review):
+    action = (review.get("feedback_plan") or {}).get("action")
+    if action:
+        return action
+    selected_id = review.get("selected_candidate_id")
+    for candidate in review.get("candidates") or []:
+        if candidate.get("candidate_id") == selected_id:
+            return candidate.get("action")
+    return None
+
+
 def structured_sections(review):
     message = review.get("message") or {}
     raw = message.get("sections") or [{"kind": "completion",
@@ -292,13 +309,7 @@ def structured_sections(review):
         if text:
             grouped[group].append(text)
     if not grouped["next_steps"]:
-        action = (review.get("feedback_plan") or {}).get("action")
-        if not action:
-            selected_id = review.get("selected_candidate_id")
-            for cand in review.get("candidates") or []:
-                if cand.get("candidate_id") == selected_id:
-                    action = cand.get("action")
-                    break
+        action = _review_action(review)
         if action:
             grouped["next_steps"].append(action)
     return [{"kind": k, "title": t, "text": "\n\n".join(grouped[k])}
@@ -658,6 +669,12 @@ def _validate_multi_full_input(payload):
         payload.get("assessment_context"),
         worked_first_context=(payload.get("worked_first_context")
                               if worked_first else None))
+    _validate_rebuilt_multi_input(payload, normalized)
+    return normalized
+
+
+def _validate_rebuilt_multi_input(payload, normalized):
+    """Check rebuilt fields in order, preserving the first validation error."""
     if (normalized["schema"] != payload["schema"]
             or normalized["prompt_version"]
             != payload["prompt_version"]):
@@ -684,7 +701,6 @@ def _validate_multi_full_input(payload):
             != normalized.get("worked_first_context")):
         raise ValueError(
             "worked_first_context must match the rebuilt projection")
-    return normalized
 
 
 _PROVIDER_EXAMPLE_KEYS = ("question_id", "prompt", "options",
@@ -896,6 +912,20 @@ FULL_FEEDBACK_REJECTION_CODES = frozenset({
      for key in FULL_FEEDBACK_SECTION_KEYS})
 
 
+def _section_rejection_reason(text):
+    if not isinstance(text, str):
+        return "invalid_section_type"
+    if not text.strip():
+        return "empty_section"
+    if len(text) > FULL_FEEDBACK_SECTION_MAX_CHARS:
+        return "section_too_long"
+    if any(ord(c) < 0x20 and c not in "\n\t" for c in text):
+        return "control_character"
+    if _MARKUP.search(text):
+        return "markup"
+    return None
+
+
 def full_reply_rejection_code(reply, selected_id, review_examples=None):
     expected = {"candidate_id", "sections"}
     if review_examples is not None:
@@ -910,18 +940,7 @@ def full_reply_rejection_code(reply, selected_id, review_examples=None):
     normalized = {}
     for key in FULL_FEEDBACK_SECTION_KEYS:
         text = _without_scope(sections[key]) if isinstance(sections[key], str) else sections[key]
-        if not isinstance(text, str):
-            reason = "invalid_section_type"
-        elif not text.strip():
-            reason = "empty_section"
-        elif len(text) > FULL_FEEDBACK_SECTION_MAX_CHARS:
-            reason = "section_too_long"
-        elif any(ord(c) < 0x20 and c not in "\n\t" for c in text):
-            reason = "control_character"
-        elif _MARKUP.search(text):
-            reason = "markup"
-        else:
-            reason = None
+        reason = _section_rejection_reason(text)
         if reason is not None:
             return f"{reason}_in_{key}"
         normalized[key] = text
@@ -1098,7 +1117,8 @@ class FullFeedbackAittaGenerator:
                     "messages": [
                         {"role": "system",
                          "content": instructions},
-                        {"role": "user", "content": json.dumps(context)}],
+                        {"role": "user", "content": json.dumps(
+                            provider_math_context(context))}],
                     "max_tokens": (WF_MAX_TOKENS if worked_first
                                    else FULL_FEEDBACK_MAX_TOKENS),
                     "reasoning_effort": REASONING_EFFORT,
@@ -1121,7 +1141,8 @@ class FullFeedbackAittaGenerator:
                 "messages": [
                     {"role": "system",
                      "content": FULL_FEEDBACK_INSTRUCTIONS},
-                    {"role": "user", "content": json.dumps(context)}],
+                    {"role": "user", "content": json.dumps(
+                        provider_math_context(context))}],
                 "max_tokens": FULL_FEEDBACK_MAX_TOKENS,
                 "reasoning_effort": REASONING_EFFORT,
                 "response_format": dict(RESPONSE_FORMAT)}

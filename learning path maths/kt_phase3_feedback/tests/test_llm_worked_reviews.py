@@ -261,6 +261,48 @@ class WorkedReviewWireTests(unittest.TestCase):
                                opener=opener)
         return FullFeedbackAittaGenerator(inner)
 
+    def test_fraction_records_normalized_only_in_both_provider_requests(self):
+        bank = make_grounded_bank()
+        for question in bank["questions"]:
+            question["text"] = question["text"].replace("/", "\u2044")
+            question["options"] = [o.replace("/", "\u2044") for o in question["options"]]
+            question["content_text"] = question["content_text"].replace("/", "\u2044")
+        taxonomy = make_grounded_taxonomy(bank)
+        rows = grounded_rows(bank, {positions(bank, "pct", 0)[0],
+                                    positions(bank, "fri", 0)[0]})
+        evidence = build_evidence(bank, taxonomy, rows)
+        assessment = {"bank": bank, "taxonomy": taxonomy, "responses": rows}
+        bundle = build_review_bundles(evidence)[0]
+        contexts = [feedback_practice.empty_context("abstained")
+                    for c in bundle["review_candidates"] if c["focus"]]
+        for worked_first in (False, True):
+            with self.subTest(worked_first=worked_first):
+                wf = build_worked_first_context(evidence, assessment) if worked_first else None
+                payload = build_multi_full_input(
+                    evidence, "student", bundle, contexts,
+                    assessment_context=assessment, worked_first_context=wf)
+                before = copy.deepcopy(payload)
+                request = self._generator(WorkedReviewOpener()).request(payload)
+                wire = json.loads(request["messages"][1]["content"])
+                example = next(e for e in wire["review_examples"]
+                               if e["subtopic_id"] == "fraction_product")
+                original = next(e for e in payload["review_examples"]
+                                if e["question_id"] == example["question_id"])
+                self.assertIn("\u2044", original["prompt"])
+                for key in ("prompt", "selected_answer", "correct_answer"):
+                    self.assertEqual(example[key], original[key].replace("\u2044", "/"))
+                self.assertEqual(example["options"], [o.replace("\u2044", "/")
+                                                     for o in original["options"]])
+                if worked_first:
+                    position = next(i for i, q in enumerate(bank["questions"], 1)
+                                    if q["question_id"] == example["question_id"])
+                    record = next(r for r in wire["worked_first_context"]["assessment_records"]
+                                  if r["position"] == position)
+                    self.assertNotIn("\u2044", json.dumps(record, ensure_ascii=False))
+                    self.assertEqual(record["question"], example["prompt"])
+                    self.assertEqual(record["correct_answer"], example["correct_answer"])
+                self.assertEqual(payload, before)
+
     def test_native_generate_sections_and_worked_reviews(self):
         opener = WorkedReviewOpener()
         generator = self._generator(opener)
@@ -281,7 +323,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v9")
+                         "aitta_worked_first_evidence_author_v10")
         # The wire context carries one shared task description per
         # graph leaf; the 40 records still join only by ids.
         wf = context["worked_first_context"]
@@ -856,7 +898,7 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
         self.assertEqual(context["prompt_version"],
                          MULTI_FULL_FEEDBACK_PROMPT_VERSION)
-        self.assertTrue(context["prompt_version"].endswith("_v11"))
+        self.assertTrue(context["prompt_version"].endswith("_v12"))
         self.assertNotIn("assessment_context", context)
         self.assertNotIn("worked_first_context", context)
         instructions = body["messages"][0]["content"]

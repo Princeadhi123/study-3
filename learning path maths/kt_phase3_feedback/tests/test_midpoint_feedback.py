@@ -95,10 +95,11 @@ class MidpointInputTests(unittest.TestCase):
         self.assertEqual(self.input["checkpoint"], "midpoint")
         self.assertEqual(self.input["evidence"]["total"]["out_of"], 20)
 
-    def test_prompt_version_v5_rejects_previous_requests(self):
-        self.assertEqual(PROMPT_VERSION, "aitta_midpoint_check_in_v5")
+    def test_prompt_version_v6_rejects_previous_requests(self):
+        self.assertEqual(PROMPT_VERSION, "aitta_midpoint_check_in_v6")
         for stale in ("aitta_midpoint_check_in_v3",
-                      "aitta_midpoint_check_in_v4"):
+                      "aitta_midpoint_check_in_v4",
+                      "aitta_midpoint_check_in_v5"):
             with self.subTest(stale=stale):
                 opener = RecordingOpener(
                     wire_reply(candidate_id=CANDIDATE_ID,
