@@ -277,8 +277,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
         item.dataset.caseId = row.id;
         item.title = row.description;
         item.append(el("span", row.display_name, "label"),
-          el("span", `Original scenario: ${row.total.correct}/${row.total.out_of} correct · ${row.group_label}`, "meta small"),
-          el("span", row.selection_differences ? `${row.selection_differences} end selection(s) differ` : "End selections match baseline", "case-tag"));
+          el("span", `Original scenario: ${row.total.correct}/${row.total.out_of} correct · ${row.group_label}`, "meta small"));
         list.append(item);
       });
       list.scrollTop = scrollTop;
