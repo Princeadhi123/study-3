@@ -3622,6 +3622,38 @@ function createDetailView(root, options = {}) {
       || Boolean(state.awaitingPreviewHash);
   }
 
+  function pendingWorkedChoices(sid, choices) {
+    return choices.flatMap((choice) => {
+      const questionId = workedChoiceFor(sid, choice.candidate_id).questionId;
+      return questionId && questionId !== choice.selected_question_id
+        && (choice.candidates || []).some((c) => c.question_id === questionId)
+        ? [{candidateId: choice.candidate_id, questionId}] : [];
+    });
+  }
+
+  async function waitForWorkedExample(sid, accepted) {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+      const view = await api(`/api/teacher/sessions/${sid}`);
+      const job = ((view.checkpoints.end || {}).worked_example_job) || {};
+      if (job.job_id === accepted.job_id && job.status !== "pending") {
+        if (job.status === "cancelled") {
+          const err = new Error("Worked example update was cancelled");
+          err.status = 409;
+          throw err;
+        }
+        return {job, delivery: view.feedback_delivery};
+      }
+      if (job.job_id !== accepted.job_id && job.queued_at > accepted.queued_at) {
+        const err = new Error("Worked example update was superseded");
+        err.status = 409;
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    throw new Error("Timed out waiting for worked example update");
+  }
+
   function workedJobNote(job) {
     if (!job) {
       return "Worked example updated; only the selected example's " +
@@ -3986,6 +4018,7 @@ function createDetailView(root, options = {}) {
     const choices = delivery.worked_example_choices || [];
     if (choices.length) {
       const editState = editDraftFor(selected, delivery);
+      const applyUpdates = [];
       choices.forEach((choice, choiceIndex) => {
         const fieldset = el("fieldset", null,
           "worked-example-choice");
@@ -4063,17 +4096,19 @@ function createDetailView(root, options = {}) {
             "warn"));
         }
         fieldset.appendChild(el("p",
-          "Choosing another example regenerates only that example's " +
-          "explanation; the rest of the feedback and practice stay " +
-          "unchanged. Saved edits inside the selected example are " +
-          "replaced. Review it again before approval.", "warn"));
-        const apply = el("button", "Choose example and rebuild draft",
+          "Either button applies all changed question selections to " +
+          "the feedback. Only those examples' explanations are " +
+          "regenerated. Saved edits inside those examples are " +
+          "replaced. Review the updated feedback before approval.",
+          "warn"));
+        const apply = el("button",
+          "Apply selected examples and rebuild draft",
           "worked-example-apply");
         apply.type = "button";
         const applyStatus = el("p", choiceState.note || null, "meta");
         const updateApply = () => {
           apply.disabled =
-            select.value === choice.selected_question_id
+            !pendingWorkedChoices(selected, choices).length
             || workedSelectionBusy(selected) || selectionLocked
             || Boolean(detail.read_only)
             || editState.dirty || editState.saving
@@ -4086,60 +4121,88 @@ function createDetailView(root, options = {}) {
               ? null : select.value;
           choiceState.note = null;
           applyStatus.textContent = "";
-          updateApply();
+          applyUpdates.forEach((update) => update());
         });
         apply.addEventListener("click", async () => {
           const sid = selected;
-          const chosenId = select.value;
-          const revision = delivery.preview_sha256;
+          const pending = pendingWorkedChoices(sid, choices);
+          let revision = delivery.preview_sha256;
           const state = workedSelectFor(sid);
           const localEdit = editDraftFor(sid, delivery);
           const release = releaseDraftFor(sid);
-          if (chosenId === choice.selected_question_id
-              || workedSelectionBusy(sid) || selectionLocked
-              || detail.read_only || localEdit.dirty
+          if (!pending.length || workedSelectionBusy(sid)
+              || selectionLocked || detail.read_only || localEdit.dirty
               || localEdit.saving || localEdit.awaitingPreview
               || release.sending) {
             return;
           }
           state.sending = true;
-          state.activeCandidateId = choice.candidate_id;
-          choiceState.note = "Rebuilding the draft…";
-          // Re-render now so apply/save/approval/editor controls all
-          // reflect the busy state before the request leaves.
-          if (selected === sid) {
-            renderPane("feedback", renderFeedbackContent);
+          let activeIndex = 0;
+          for (const item of pending) {
+            workedChoiceFor(sid, item.candidateId).note =
+              "Waiting to update this example.";
           }
           try {
-            const res = await api(
-              `/api/teacher/sessions/${sid}` +
-              "/worked-example-selection", {
-                body: {message_sha256: revision,
-                       candidate_id: choice.candidate_id,
-                       question_id: chosenId,
-                       reviewer_label: release.label || "anonymous"}});
-            const scoped = res.worked_example_job || null;
-            state.awaitingJobId = (scoped && scoped.status === "pending")
-              ? scoped.job_id : null;
-            state.awaitingJobQueuedAt = state.awaitingJobId
-              ? scoped.queued_at : null;
-            state.awaitingPreviewHash = state.awaitingJobId
-              ? null : res.preview_sha256 || null;
-            choiceState.note = workedJobNote(scoped);
-            // The server preserved unrelated saved edits; drop the
-            // local draft copy only when it holds no unsaved wording
-            // so the editor resyncs to the returned preview.
-            if (!localEdit.dirty) {
-              editDrafts.delete(sid);
+            for (let i = 0; i < pending.length; i += 1) {
+              activeIndex = i;
+              const item = pending[i];
+              const itemState = workedChoiceFor(sid, item.candidateId);
+              state.activeCandidateId = item.candidateId;
+              itemState.note = "Rebuilding the draft…";
+              // Re-render so apply/save/approval/editor controls all
+              // reflect the busy state before the request leaves.
+              if (selected === sid) {
+                renderPane("feedback", renderFeedbackContent);
+              }
+              const res = await api(
+                `/api/teacher/sessions/${sid}` +
+                "/worked-example-selection", {
+                  body: {message_sha256: revision,
+                         candidate_id: item.candidateId,
+                         question_id: item.questionId,
+                         reviewer_label: release.label || "anonymous"}});
+              const scoped = res.worked_example_job || null;
+              state.awaitingJobId = (scoped && scoped.status === "pending")
+                ? scoped.job_id : null;
+              state.awaitingJobQueuedAt = state.awaitingJobId
+                ? scoped.queued_at : null;
+              state.awaitingPreviewHash = state.awaitingJobId
+                ? null : res.preview_sha256 || null;
+              itemState.note = workedJobNote(scoped);
+              // The server preserved unrelated saved edits; drop the
+              // local draft copy only when it holds no unsaved wording
+              // so the editor resyncs to the returned preview.
+              if (!localEdit.dirty) {
+                editDrafts.delete(sid);
+              }
+              revision = res.preview_sha256;
+              // Await intermediate hosted jobs before issuing the next
+              // request with the final hash.
+              if (state.awaitingJobId && i + 1 < pending.length) {
+                if (selected === sid) {
+                  renderPane("feedback", renderFeedbackContent);
+                }
+                const result = await waitForWorkedExample(sid, scoped);
+                revision = result.delivery.preview_sha256;
+                itemState.note = workedJobNote(result.job);
+                state.awaitingJobId = null;
+                state.awaitingJobQueuedAt = null;
+                state.awaitingPreviewHash = revision;
+              }
             }
           } catch (err) {
-            if (err.status === 409) {
-              choiceState.note = "The draft changed before the new " +
-                "example was applied. Re-read the updated preview, " +
-                "then choose again.";
-            } else {
-              choiceState.note =
-                "The new worked example was not accepted.";
+            const active = workedChoiceFor(
+              sid, pending[activeIndex].candidateId);
+            active.note = err.status === 409
+              ? "The draft changed before all selections were " +
+                "applied. Review the updated preview, then apply the " +
+                "remaining selections again."
+              : "Not all selected examples were updated. Review the " +
+                "preview and retry the remaining selections.";
+            for (const item of pending.slice(activeIndex + 1)) {
+              workedChoiceFor(sid, item.candidateId).note =
+                "This selection has not been applied. Apply the " +
+                "remaining selections again.";
             }
           } finally {
             state.sending = false;
@@ -4149,6 +4212,7 @@ function createDetailView(root, options = {}) {
             }
           }
         });
+        applyUpdates.push(updateApply);
         updateApply();
         fieldset.appendChild(apply);
         fieldset.appendChild(applyStatus);
