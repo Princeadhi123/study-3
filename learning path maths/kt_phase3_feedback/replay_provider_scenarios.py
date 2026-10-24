@@ -133,16 +133,19 @@ AUTOMATIC_RETRY_PROVIDERS = frozenset(
     {"aitta_full", "aitta_midpoint", "aitta_worked_example"})
 AUTOMATIC_RETRY_MAX = 3
 _RETRYABLE_STAGES = frozenset({"open_failed", "body_read_failed"})
-_RETRYABLE_KINDS = frozenset({"timeout", "network_error"})
+_RETRYABLE_KINDS = frozenset({"timeout", "network_error", "transport_error"})
 _RETRYABLE_HTTP = frozenset({429} | set(range(500, 600)))
 _RETRY_AFTER_LIMIT_SECONDS = 60.0
 
 
 def _automatic_retryable(execution):
-    """Transient transport failure kinds only; never contract,
-    credential, TLS, or content rejections."""
-    transport = ((execution.get("metadata") or {})
-                 .get("transport") or {})
+    """Transient transport failures plus provider contract/content
+    rejections (the next stochastic sample may validate); never
+    credential or TLS failures."""
+    metadata = execution.get("metadata") or {}
+    if metadata.get("failure_stage") == "response_contract_or_full_feedback_validation":
+        return True
+    transport = metadata.get("transport") or {}
     if transport.get("stage") not in _RETRYABLE_STAGES:
         return False
     kind = transport.get("failure_kind")

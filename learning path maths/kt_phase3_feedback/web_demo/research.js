@@ -211,9 +211,7 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const replayToolbar = el("div", null, "replay-toolbar");
     const replayAll = button(`Replay all ${library.scenarios.length} scenarios`, () => confirmReplay(library.scenarios.map((row) => row.id)), "primary");
     replayAll.id = "replay-all";
-    const replayFiltered = button("Replay filtered scenarios", () => confirmReplay(filteredIds));
-    replayFiltered.id = "replay-filtered";
-    replayToolbar.append(replayAll, replayFiltered, el("span", "Same answers · current scoring, feedback & model inference · no retraining", "meta small"));
+    replayToolbar.append(replayAll, el("span", "Same answers · current scoring, feedback & model inference · no retraining", "meta small"));
     const history = el("div"); history.id = "replay-history";
     const replayTools = DemoUI.section("Replay tools",
       "Replay the same recorded answers through the current pipeline — browsing never starts a run.");
@@ -226,8 +224,11 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     const group = select([["", "All patterns"], ...groups.map((g) => [g, library.scenarios.find((row) => row.group === g).group_label])]);
     const difference = select([["", "All selections"], ["different", "At least one differs"], ["same", "Both match baseline"]]);
     const order = select([["name", "Name A–Z"], ["low", "Observed score: low first"], ["high", "Observed score: high first"]]);
+    const replayFiltered = button("", () => confirmReplay(filteredIds));
+    replayFiltered.id = "replay-filtered";
     controls.append(field("Find a case", search), field("Scenario group", group),
-      field("Selection comparison", difference), field("Sort by", order));
+      field("Selection comparison", difference), field("Sort by", order),
+      field("Matching cases", replayFiltered));
     const layout = el("div", null, "library-layout");
     const side = el("div", null, "scenario-browser");
     const count = el("p", null, "meta small"); count.setAttribute("role", "status");
@@ -266,6 +267,8 @@ function initResearchWorkspace({mountDetail, getConfig}) {
       rows.sort((a, b) => order.value === "name" ? a.display_name.localeCompare(b.display_name) :
         (order.value === "low" ? 1 : -1) * (a.total.correct - b.total.correct) || a.name.localeCompare(b.name));
       filteredIds = rows.map((row) => row.id);
+      replayFiltered.textContent = `Replay ${rows.length} matching scenario` +
+        (rows.length === 1 ? "" : "s");
       replayFiltered.disabled = !rows.length;
       count.textContent = `${rows.length} of ${library.scenarios.length} scenarios`;
       const scrollTop = list.scrollTop;
