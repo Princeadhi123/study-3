@@ -100,3 +100,7 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Phase 3 recovery: local-only config and one-time recovery script (data stays in gitignored artifacts/)
+learning path maths/kt_phase3_feedback/.devin/
+learning path maths/kt_phase3_feedback/recover_phase3_artifacts.py

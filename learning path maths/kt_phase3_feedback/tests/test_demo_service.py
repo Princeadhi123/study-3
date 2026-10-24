@@ -2525,8 +2525,9 @@ class MultiModeTests(unittest.TestCase):
                 for c in contexts))
         delivery = self._delivery(service, sid)
         preview = delivery["preview"]
-        self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v9")
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(
@@ -2562,6 +2563,11 @@ class MultiModeTests(unittest.TestCase):
         sid, token = self._complete(
             service, self._rows_wrong(("sA", "sB", "sC")))
         self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        meta["review_presentation_version"] = (
+            "question_first_worked_review_v1")
+        meta.pop("feedback_context_version", None)
+        service._save_meta(meta)
         review = self._end(service, sid)["student_review"]
         raw_texts = {s["kind"]: s["text"]
                      for s in review["message"]["sections"]}
@@ -2627,6 +2633,21 @@ class MultiModeTests(unittest.TestCase):
         sid, token = self._complete(
             service, self._rows_wrong(("sA", "sB", "sC")))
         self._wait_done(service, sid)
+        from evidence_feedback import run_multi_feedback
+        meta = service._load_meta(sid)
+        end = meta["checkpoints"]["end"]
+        end["student_review"] = run_multi_feedback(
+            end["evidence"],
+            selection={"bundle": end["multi_selection"]["bundle"],
+                       "trace": end["multi_selection"]["trace"]},
+            generator=generator,
+            practice_contexts=[c["context"]
+                               for c in end["practice_contexts"]],
+            assessment_context=service._assessment_context(meta))
+        meta["review_presentation_version"] = (
+            "question_first_worked_review_v1")
+        meta.pop("feedback_context_version", None)
+        service._save_meta(meta)
         review = self._end(service, sid)["student_review"]
         self.assertEqual(
             review["trace"]["section_sources"],
@@ -2812,12 +2833,13 @@ class MultiModeTests(unittest.TestCase):
         self._wait_done(service, sid)
         meta = service._load_meta(sid)
         self.assertEqual(meta["review_presentation_version"],
-                         "question_first_worked_review_v1")
+                         "question_first_full_feedback_v2")
         preview = self._delivery(service, sid)["preview"]
-        self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v9")
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         self.assertEqual(preview["review_presentation_version"],
-                         "question_first_worked_review_v1")
+                         "question_first_full_feedback_v2")
         cards = preview["review_examples"]
         self.assertTrue(cards)
         for card in cards:
@@ -2841,6 +2863,7 @@ class MultiModeTests(unittest.TestCase):
         self._wait_done(service, sid)
         meta = service._load_meta(sid)
         meta.pop("review_presentation_version")
+        meta.pop("feedback_context_version", None)
         service._save_meta(meta)
         preview = self._delivery(service, sid)["preview"]
         self.assertEqual(preview["template_version"],
@@ -3131,6 +3154,11 @@ class MultiModeTests(unittest.TestCase):
         sid, _ = self._complete(
             service, self._rows_wrong(("sA", "sB", "sC")))
         self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        meta["review_presentation_version"] = (
+            "question_first_worked_review_v1")
+        meta.pop("feedback_context_version", None)
+        service._save_meta(meta)
         self.assertEqual(
             recommender.subtopic_calls,
             [{"sA": "sub_sA", "sB": "sub_sB"}])
@@ -3504,7 +3532,8 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
     """Hosted provider calls wait for terminal diagnostics so the
     authored context carries real or explicitly unavailable projections
     and the worked-example selection snapshot freezes on final values;
-    question-first waits too but never sends the diagnostics context."""
+    question-first v2 shares the same wait and sends the same
+    context."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -3640,15 +3669,17 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
             wf["model_context"]["checkpoints"]["end"],
             {"status": "unavailable"})
 
-    def test_question_first_waits_but_never_sends_context(self):
-        from full_feedback import MULTI_FULL_FEEDBACK_PROMPT_VERSION
+    def test_question_first_waits_and_sends_context(self):
+        from worked_first_context import (
+            CONTEXT_VERSION, PROMPT_VERSION)
         gate = threading.Event()
         generator = RecordingFullGenerator()
         service = self._service(Path(self.tmp.name), gate, generator)
         sid = self._complete(service, "question_first")
-        # New-policy sessions wait for terminal diagnostics to freeze
-        # the worked-example selection snapshot, but question-first
-        # still never sends the diagnostics context to the provider.
+        # Question-first v2 sessions use the same full pipeline as
+        # worked-first: they wait for terminal diagnostics to freeze
+        # the worked-example selection snapshot and send the authored
+        # context to the provider.
         self.assertTrue(wait_for(
             lambda: self._provider_status(service, sid)
             == "waiting_for_diagnostics"))
@@ -3658,16 +3689,20 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
             lambda: self._provider_status(service, sid)
             in ("ready", "fallback")))
         self.assertEqual(generator.calls, 1)
-        self.assertNotIn("worked_first_context",
-                         generator.payloads[0])
+        self.assertEqual(
+            generator.payloads[0]["worked_first_context"]["version"],
+            CONTEXT_VERSION)
         meta = service._load_meta(sid)
-        self.assertNotIn("feedback_context_version", meta)
+        self.assertEqual(meta["feedback_context_version"],
+                         CONTEXT_VERSION)
         self.assertEqual(
             meta["provider_job"]["prompt_versions"]["generation"],
-            MULTI_FULL_FEEDBACK_PROMPT_VERSION)
+            PROMPT_VERSION)
         review = meta["checkpoints"]["end"]["student_review"]
-        self.assertNotIn("generation_context_version", review["trace"])
-        self.assertNotIn("provider_context", review)
+        self.assertEqual(review["trace"]["generation_context_version"],
+                         CONTEXT_VERSION)
+        self.assertEqual(review["provider_context"]["version"],
+                         CONTEXT_VERSION)
         # The provider now outlasts the diagnostics job, so terminal
         # provider status implies the whole session is settled.
         self.assertTrue(wait_for(lambda: service._jobs_complete(sid)))

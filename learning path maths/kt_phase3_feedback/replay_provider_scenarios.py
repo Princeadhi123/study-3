@@ -39,8 +39,15 @@ def digest(value):
         value, sort_keys=True, ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
+def _longpath(path):
+    p = os.path.abspath(os.fspath(path))
+    if os.name == "nt" and not p.startswith("\\\\?\\"):
+        return "\\\\?\\" + p
+    return p
+
+
 def write_new(path, value):
-    with path.open("x", encoding="utf-8") as stream:
+    with open(_longpath(path), "x", encoding="utf-8") as stream:
         json.dump(value, stream, indent=2, ensure_ascii=True)
 
 
@@ -277,11 +284,13 @@ class CaptureCache:
         for suffix, candidate in self._attempts(base):
             if suffix > number:
                 latest, number = candidate, suffix
-        if latest.exists() and not latest.is_file():
+        if os.path.exists(_longpath(latest)) and not os.path.isfile(
+                _longpath(latest)):
             raise ValueError("capture path is not a file")
-        if not latest.is_file():
+        if not os.path.isfile(_longpath(latest)):
             return latest, None, number
-        record = json.loads(latest.read_text(encoding="utf-8"))
+        with open(_longpath(latest), encoding="utf-8") as stream:
+            record = json.load(stream)
         if record["provider"] != provider or record["request"] != request:
             raise ValueError("cache request does not match its capture")
         return latest, record, number

@@ -66,8 +66,9 @@ from midpoint_feedback import (
 from replay_provider_scenarios import CaptureCache
 from research_workspace import DEFAULT_REPORT, ResearchWorkspace, case_display
 from research_runtime import (
-    BANK_LABELS, load_research_bank, require_augmented_embeddings,
-    teacher_content_context, validate_current_practice_pool)
+    BANK_LABELS, artifact_recovery_provenance, load_research_bank,
+    require_augmented_embeddings, teacher_content_context,
+    validate_current_practice_pool)
 from scenario_replays import DEFAULT_SOURCE, ScenarioReplays
 from scenario_runner import generate_responses
 from schemas import SESSION_SCHEMA
@@ -102,6 +103,9 @@ FEEDBACK_VARIANTS = ("question_first", "worked_first")
 WORKED_FIRST_VERSION = "worked_first_full_feedback_v1"
 WORKED_FIRST_TEMPLATE_VERSION = (
     "phase3_student_feedback_worked_first_full_v1")
+QUESTION_FIRST_FULL_VERSION = "question_first_full_feedback_v2"
+QUESTION_FIRST_FULL_TEMPLATE_VERSION = (
+    "phase3_student_feedback_question_first_full_v2")
 
 EDIT_CONTENT_KEYS = {"section_titles", "skill_labels",
                      "review_examples", "practice_activities",
@@ -381,6 +385,12 @@ class DemoService:
     def _is_grounded(meta):
         return (meta.get("worked_review_version")
                 == ASSESSMENT_WORKED_REVIEW_VERSION)
+
+    @staticmethod
+    def _uses_full_feedback_pipeline(meta):
+        return (meta.get("feedback_variant") == "worked_first"
+                or meta.get("review_presentation_version")
+                == QUESTION_FIRST_FULL_VERSION)
 
     @staticmethod
     def _grounded_unavailable(review):
@@ -718,10 +728,9 @@ class DemoService:
             meta["review_presentation_version"] = (
                 WORKED_FIRST_VERSION
                 if feedback_variant == "worked_first"
-                else QUESTION_FIRST_VERSION)
-            if feedback_variant == "worked_first":
-                meta["feedback_context_version"] = (
-                    WORKED_FIRST_CONTEXT_VERSION)
+                else QUESTION_FIRST_FULL_VERSION)
+            meta["feedback_context_version"] = (
+                WORKED_FIRST_CONTEXT_VERSION)
         return meta
 
     def create_session(self, label=None, simulated=None, replay=None, provider_mode=None,
@@ -989,6 +998,16 @@ class DemoService:
                 preview["review_presentation_version"] = (
                     WORKED_FIRST_VERSION)
                 preview["feedback_variant"] = "worked_first"
+                return preview
+            if (meta.get("review_presentation_version")
+                    == QUESTION_FIRST_FULL_VERSION):
+                preview["feedback_variant"] = "question_first"
+                preview = question_first_preview(
+                    preview, preserve_narrative=True)
+                preview["template_version"] = (
+                    QUESTION_FIRST_FULL_TEMPLATE_VERSION)
+                preview["review_presentation_version"] = (
+                    QUESTION_FIRST_FULL_VERSION)
                 return preview
             if "feedback_variant" in meta:
                 preview["feedback_variant"] = meta["feedback_variant"]
@@ -2271,7 +2290,7 @@ class DemoService:
                 except Exception:
                     assessment_ctx = None
                 worked_first_context = None
-                if (meta.get("feedback_variant") == "worked_first"
+                if (self._uses_full_feedback_pipeline(meta)
                         and mode == "hosted"
                         and getattr(self.generator,
                                     "supports_full_feedback", False)
@@ -2306,7 +2325,7 @@ class DemoService:
                         self.generator.execution = None
                     self._reset_rejected_draft(self.generator)
                     full_narrative = (
-                        meta.get("feedback_variant") == "worked_first")
+                        self._uses_full_feedback_pipeline(meta))
                     try:
                         if self._is_grounded(meta) and assessment_ctx is None:
                             review = self._grounded_unavailable(
@@ -2550,6 +2569,7 @@ class DemoService:
                             "used": self.cache.new_calls
                             if self.cache is not None else 0},
             "provider_timeout_seconds": self.provider_timeout,
+            "artifact_recovery": artifact_recovery_provenance(),
             "diagnostics": self.diagnostics.state,
             "replay_bank_mode": self.replay_bank_mode,
             "replay_bank_label": BANK_LABELS[self.replay_bank_mode],

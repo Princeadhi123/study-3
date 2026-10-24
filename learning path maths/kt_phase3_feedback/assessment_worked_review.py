@@ -275,6 +275,8 @@ QUESTION_FIRST_VERSION = "question_first_worked_review_v1"
 QUESTION_FIRST_TEMPLATE_VERSION = "phase3_student_feedback_template_v9"
 QUESTION_FIRST_READY_NOTICE = (
     "Explain your approach first. Use a hint if needed, then reveal the checked worked steps.")
+QUESTION_FIRST_PROVIDER_NOTICE = (
+    "Explain your approach first. Use a hint if needed, then reveal the AI-drafted worked explanation.")
 QUESTION_FIRST_NEXT_STEPS = (
     "Think through the review questions below and explain your approach. "
     "Use the hints if needed, then reveal the checked worked steps to compare your reasoning.")
@@ -298,10 +300,11 @@ OPTION_CONTRASTS = {
 }
 
 
-def question_first_preview(preview):
+def question_first_preview(preview, preserve_narrative=False):
     result = copy.deepcopy(preview)
-    result["template_version"] = QUESTION_FIRST_TEMPLATE_VERSION
-    result["review_presentation_version"] = QUESTION_FIRST_VERSION
+    if not preserve_narrative:
+        result["template_version"] = QUESTION_FIRST_TEMPLATE_VERSION
+        result["review_presentation_version"] = QUESTION_FIRST_VERSION
     examples = result.get("review_examples") or []
     for card in examples:
         if card.get("source") != "incorrect_assessment_response":
@@ -321,23 +324,28 @@ def question_first_preview(preview):
             card["option_contrast"] = match["text"]
             card["option_contrast_source"] = "application_authored_exact_option_observation_v1"
         if ready and card.get("notice") in (READY_NOTICE, CONCISE_READY_NOTICE):
-            card["notice"] = QUESTION_FIRST_READY_NOTICE
-    if examples and any(c.get("status") == "ready" for c in examples):
-        next_steps = next((s for s in result.get("sections", []) if s.get("kind") == "next_steps"), None)
-        if next_steps is not None:
-            text = QUESTION_FIRST_NEXT_STEPS
-            if any(c.get("explanation_source") == "provider"
-                   for c in examples):
-                text = text.replace("the checked worked steps",
-                                    "the worked explanations")
-            if any(c.get("status") == "unavailable" for c in examples):
-                text += " For any question without a checked worked solution, ask your teacher for help."
-            practices = result.get("practice_activities") or ([result["practice"]] if result.get("practice") else [])
-            chosen = [p for p in practices if p.get("status") == "selected" and p.get("question")]
-            if len(chosen) == 1:
-                text += " Then try the practice activity below."
-            elif len(chosen) > 1:
-                text += " Then try the practice activities below."
-            next_steps["text"] = text
-    result["text"] = "\n\n".join(s.get("text", "") for s in result.get("sections", []) if s.get("text"))
+            if (preserve_narrative
+                    and card.get("explanation_source") == "provider"):
+                card["notice"] = QUESTION_FIRST_PROVIDER_NOTICE
+            else:
+                card["notice"] = QUESTION_FIRST_READY_NOTICE
+    if not preserve_narrative:
+        if examples and any(c.get("status") == "ready" for c in examples):
+            next_steps = next((s for s in result.get("sections", []) if s.get("kind") == "next_steps"), None)
+            if next_steps is not None:
+                text = QUESTION_FIRST_NEXT_STEPS
+                if any(c.get("explanation_source") == "provider"
+                       for c in examples):
+                    text = text.replace("the checked worked steps",
+                                        "the worked explanations")
+                if any(c.get("status") == "unavailable" for c in examples):
+                    text += " For any question without a checked worked solution, ask your teacher for help."
+                practices = result.get("practice_activities") or ([result["practice"]] if result.get("practice") else [])
+                chosen = [p for p in practices if p.get("status") == "selected" and p.get("question")]
+                if len(chosen) == 1:
+                    text += " Then try the practice activity below."
+                elif len(chosen) > 1:
+                    text += " Then try the practice activities below."
+                next_steps["text"] = text
+        result["text"] = "\n\n".join(s.get("text", "") for s in result.get("sections", []) if s.get("text"))
     return result

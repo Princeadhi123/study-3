@@ -30,6 +30,11 @@ BANK_LABELS = {
 AUGMENTED_EMBEDDINGS = (
     phase3_paths.PHASE2_ARTIFACTS /
     "text_embeddings_v2_synthetic_practice_20261007.npz")
+RECOVERY_PROVENANCE = None
+
+
+def artifact_recovery_provenance():
+    return copy.deepcopy(RECOVERY_PROVENANCE)
 
 
 @lru_cache(maxsize=1)
@@ -152,7 +157,7 @@ def validate_research_taxonomy(bank, taxonomy):
 def load_research_bank(mode):
     bank = copy.deepcopy(_bound_bank(mode))
     taxonomy = research_taxonomy(bank)
-    return bank, taxonomy, {
+    provenance = {
         "bank_mode": mode, "bank_identity": f"{mode}_bank",
         "bank_label": BANK_LABELS[mode],
         "session_mode": "synthetic_research",
@@ -168,6 +173,9 @@ def load_research_bank(mode):
                           else "frozen_learned_item_vocabulary"),
         "educator_approved": False,
     }
+    if RECOVERY_PROVENANCE is not None:
+        provenance["artifact_recovery"] = copy.deepcopy(RECOVERY_PROVENANCE)
+    return bank, taxonomy, provenance
 
 
 def load_current_practice_pool():

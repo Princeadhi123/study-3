@@ -361,7 +361,7 @@ function captureProvenanceKind(execution, failed = false) {
 
 function feedbackVariantLabel(variant) {
   if (variant === "question_first") {
-    return "Question-first / current version";
+    return "Question-first";
   }
   if (variant === "worked_first") {
     return "Worked-first / full Aitta narrative";
@@ -371,7 +371,10 @@ function feedbackVariantLabel(variant) {
 
 const TEMPLATE_VERSION_LABELS = {
   "phase3_student_feedback_worked_first_full_v1": "Worked-first",
-  "phase3_student_feedback_template_v9": "Question-first",
+  "phase3_student_feedback_question_first_full_v2":
+    "Question-first (full narrative + hints)",
+  "phase3_student_feedback_template_v9":
+    "Question-first (legacy summary)",
   "phase3_student_feedback_template_v8": "Assessment review (concise)",
   "phase3_student_feedback_template_v7": "Assessment worked review",
   "phase3_student_feedback_template_v5": "Two-topic feedback",
@@ -1992,6 +1995,7 @@ function teacherPage() {
   const detailTemplate = $("#ws-detail").cloneNode(true);
   const liveView = createDetailView($("#ws-detail"), {
     refresh: pollOnce, onShow: () => { $("#ws-empty").hidden = true; },
+    getConfig: () => config,
     studentLink: (sid) => simLinks.get(sid)});
 
   function mountDetail(container, options) {
@@ -2230,6 +2234,11 @@ function createDetailView(root, options = {}) {
   const $ = (selector) => root.querySelector(selector.replace(/#([\w-]+)/g, (_, id) => `#${prefix}${id}`));
   const TABS = ["overview", "evidence", "graph", "research", "feedback"];
   let detail = null, selected = null, tab = "overview", researchCp = "end";
+  const retainedBaseline = (d) => {
+    const cfg = options.getConfig && options.getConfig();
+    return Boolean(cfg && cfg.artifact_recovery && d
+      && d.read_only && d.source_mode === "retained_original");
+  };
   const releaseDrafts = new Map();
   // selected session -> worked-example selection POST state; kept
   // across polls so a rebuild submission is never duplicated.
@@ -2429,7 +2438,9 @@ function createDetailView(root, options = {}) {
       ? `Replay failed after ${detail.answered_count} of 40 answers were recorded. ` +
         "This replay has stopped. Start a new replay to try again."
       : detail.read_only
-        ? detail.read_only_reason || "Retained original results — no computation was run when opening this case."
+        ? detail.read_only_reason || (retainedBaseline(detail)
+            ? "Reconstructed offline baseline — no computation was run when opening this case."
+            : "Retained original results — no computation was run when opening this case.")
         : detail.replay
           ? "Replay session — answers are resubmitted through the running pipeline."
           : "Live synthetic session.";
@@ -2438,7 +2449,8 @@ function createDetailView(root, options = {}) {
     const scoreLabel = isReplay
       ? (partialReplay ? "Partial replay score" : "Replay score")
       : detail.source_mode === "retained_original"
-        ? "Original scenario score"
+        ? (retainedBaseline(detail)
+          ? "Reconstructed baseline score" : "Original scenario score")
         : "Observed total";
     const snapshot = DemoUI.section("Assessment snapshot",
       partialReplay
@@ -2900,17 +2912,23 @@ function createDetailView(root, options = {}) {
       "for each selected focus.", "meta"));
     const variant = detail.feedback_variant
       || ((detail.feedback_delivery || {}).feedback_variant);
-    if (variant === "worked_first") {
+    const deliveryPreview = (detail.feedback_delivery || {}).preview;
+    const fullPipeline = variant === "worked_first"
+      || (deliveryPreview && deliveryPreview.review_presentation_version
+          === "question_first_full_feedback_v2");
+    if (fullPipeline) {
       use.appendChild(el("p",
-        "This session is configured for the worked-first flow: when a " +
-        "hosted full-generation run succeeds, its request includes all " +
-        "recorded questions, options, selected and correct answers and " +
-        "this descriptive topic/subtopic graph. A configured variant " +
-        "does not prove that call ran — check the wording source on " +
-        "the Feedback tab.", "meta"));
+        `This session is configured for the ` +
+        `${variant === "worked_first" ? "worked-first" : "question-first"} ` +
+        "full-narrative flow: when a hosted full-generation run " +
+        "succeeds, its request includes all recorded questions, " +
+        "options, selected and correct answers and this descriptive " +
+        "topic/subtopic graph. A configured variant does not prove " +
+        "that call ran — check the wording source on the Feedback " +
+        "tab.", "meta"));
       use.appendChild(el("p",
         "Task descriptions are shared once per subtopic in the " +
-        "worked-first request and linked to assessment records by " +
+        "generation request and linked to assessment records by " +
         "topic/subtopic IDs. They describe the question, not student " +
         "understanding or causes of errors.", "meta"));
     } else {
@@ -2935,8 +2953,11 @@ function createDetailView(root, options = {}) {
     }
     if (detail.read_only) {
       use.appendChild(el("p",
-        "Retained original — recorded evidence shown as saved; nothing " +
-        "is recomputed.", "meta"));
+        (retainedBaseline(detail)
+          ? "Reconstructed offline baseline — recorded evidence shown "
+            + "as saved; nothing is recomputed."
+          : "Retained original — recorded evidence shown as saved; "
+            + "nothing is recomputed."), "meta"));
     }
     intro.appendChild(use);
     pane.appendChild(intro);
@@ -3970,7 +3991,7 @@ function createDetailView(root, options = {}) {
                 : "")));
       }
     }
-    if (!endBusy && detail.feedback_variant === "worked_first" && preview
+    if (!endBusy && preview
         && String((selReview && (selReview.trace || {})
                   .guardrails_version) || "")
            .startsWith("provider_full_narrative_shape_checked_")) {
@@ -5156,8 +5177,10 @@ function createDetailView(root, options = {}) {
       if (savedReview && savedReview.message) {
         const saved = el("div", null,
           "card-inner ui-section saved-end-feedback");
-        saved.appendChild(el("p", "Retained feedback · read-only",
-          "eyebrow"));
+        saved.appendChild(el("p",
+          retainedBaseline(detail)
+            ? "Reconstructed offline baseline · read-only"
+            : "Retained feedback · read-only", "eyebrow"));
         saved.appendChild(el("h4", "Saved end feedback",
           "fb-preview-heading"));
         saved.appendChild(kv("Base feedback template",

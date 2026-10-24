@@ -551,6 +551,7 @@ def main(argv=None):
                         default="demo")
     parser.add_argument("--replay-report", type=Path, default=None)
     parser.add_argument("--replay-source", type=Path, default=None)
+    parser.add_argument("--recovery-config", type=Path, default=None)
     parser.add_argument("--shadow-practice-pool", type=Path)
     parser.add_argument("--shadow-target-band", type=float, nargs=2,
                         metavar=("LOW", "HIGH"))
@@ -558,6 +559,16 @@ def main(argv=None):
                         choices=("aligned_two_topic", "legacy_single"),
                         default="aligned_two_topic")
     args = parser.parse_args(argv)
+    if args.recovery_config is not None:
+        from recovery_runtime import activate_recovery
+        if args.replay_bank_mode != "warm":
+            parser.error("--recovery-config requires --replay-bank-mode warm")
+        recovered = activate_recovery(args.recovery_config)
+        args.replay_report = args.replay_report or recovered["replay_report"]
+        args.replay_source = args.replay_source or recovered["replay_source"]
+        if args.root == DEFAULT_ROOT:
+            args.root = recovered["runtime_root"]
+        print(recovered["provenance"]["notice"], flush=True)
     if args.replay_bank_mode == "warm":
         args.replay_report = args.replay_report or (
             Path(__file__).parent / "artifacts" / "warm_scenarios_v1" / "report.json")

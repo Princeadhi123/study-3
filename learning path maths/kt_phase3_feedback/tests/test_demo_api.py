@@ -1109,8 +1109,9 @@ class MultiModeAPITests(ApiClientMixin, unittest.TestCase):
         delivery = view["feedback_delivery"]
         self.assertEqual(delivery["review_mode"], "aligned_two_topic")
         preview = delivery["preview"]
-        self.assertEqual(preview["template_version"],
-                         "phase3_student_feedback_template_v9")
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         activities = preview["practice_activities"]
         self.assertEqual(len(activities), 2)
         self.assertEqual(

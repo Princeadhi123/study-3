@@ -779,18 +779,6 @@ class WorkedReviewWireTests(unittest.TestCase):
                         candidate=by_cand.get(slot.get("candidate_id")),
                         aligned=True)["card"]
                     for slot in end.get("practice_contexts") or []]
-                if variant == "question_first":
-                    # The concise student preview rewrites practice
-                    # notices/relationships; mirror that transform so
-                    # the comparison checks wording source, not the
-                    # established concise copy.
-                    from assessment_worked_review import (
-                        concise_student_preview)
-                    expected_cards = concise_student_preview(
-                        {"practice_activities": expected_cards,
-                         "sections": [], "review_examples": []},
-                        review.get("selected_candidates"))[
-                            "practice_activities"]
                 self.assertEqual(
                     preview.get("practice_activities") or [],
                     expected_cards)
@@ -891,19 +879,20 @@ class WorkedReviewWireTests(unittest.TestCase):
         self.assertEqual(len(opener.calls), 1)
         body = opener.calls[0]["body"]
         context = json.loads(body["messages"][1]["content"])
-        # The grounded multi request keeps the multi schema/current
-        # version; the raw 40-record assessment context stays
-        # worked-first-only and is never placed on the question-first
-        # wire.
-        self.assertEqual(context["schema"], MULTI_FULL_FEEDBACK_SCHEMA)
-        self.assertEqual(context["prompt_version"],
-                         MULTI_FULL_FEEDBACK_PROMPT_VERSION)
-        self.assertTrue(context["prompt_version"].endswith("_v12"))
-        self.assertNotIn("assessment_context", context)
-        self.assertNotIn("worked_first_context", context)
+        # Question-first v2 uses the same wire contract as
+        # worked-first: the worked-first schema/prompt and the full
+        # authored assessment context are placed on the wire.
+        self.assertEqual(context["schema"], WF_SCHEMA)
+        self.assertEqual(context["prompt_version"], WF_PROMPT)
+        self.assertEqual(
+            context["worked_first_context"]["version"],
+            "worked_first_assessment_research_context_v2")
+        self.assertEqual(
+            len(context["worked_first_context"]["assessment_records"]),
+            40)
         instructions = body["messages"][0]["content"]
         self.assertIn("worked_reviews", instructions)
-        self.assertIn("Return an empty list", instructions)
+        self.assertIn("empty list", instructions)
         self.assertNotIn("MUST NOT return worked_reviews", instructions)
         meta = service._load_meta(sid)
         review = meta["checkpoints"]["end"]["student_review"]
@@ -927,13 +916,13 @@ class WorkedReviewWireTests(unittest.TestCase):
             self.assertEqual(card["reasoning_question"], reasoning)
             self.assertEqual(card["explanation_source"], "provider")
             self.assertEqual(card["checked_steps"], det[qid]["steps"])
-        # Sections stay application-owned shape: question-first is not
-        # a provider full narrative.
+        # Sections now come from the provider full narrative, same as
+        # worked-first; worked_review_sources still records the
+        # per-card wording source.
         self.assertEqual(
             review["trace"]["validation"],
-            "application_owned_facts_and_actions_provider_summary_"
-            "and_worked_reviews_shape_checked_requires_educator_"
-            "review")
+            "provider_full_narrative_shape_checks_only_requires_"
+            "educator_review")
         # The deterministic comparison retains the template cards.
         delivery = service.teacher_session(sid)["feedback_delivery"]
         det_preview = delivery["deterministic_preview"]

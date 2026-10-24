@@ -250,7 +250,8 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     caseNotice.setAttribute("role", "status");
     viewHost = el("div");
     detail.append(versionBar, caseNotice, viewHost);
-    scenarioView = mountDetail(viewHost, {refresh: () => loadCase(chosen)});
+    scenarioView = mountDetail(viewHost, {refresh: () => loadCase(chosen),
+      getConfig});
     side.append(count, list); layout.append(side, detail);
     const browse = DemoUI.section("Browse scenarios",
       "Inspect a retained original or a replay result. Scenario evidence stays read-only.");

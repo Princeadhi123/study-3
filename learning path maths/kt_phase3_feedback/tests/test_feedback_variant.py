@@ -223,23 +223,37 @@ class FeedbackVariantTests(unittest.TestCase):
         self.assertEqual(
             snap["feedback"]["end"]["sections"], preview["sections"])
 
-        # Same answers through question-first keep the summary-only shape.
         qgen = FullStubGenerator()
         qservice = self._service(root=Path(self.tmp.name) / "qf",
                                  provider_mode="hosted",
                                  generator=qgen)
-        qsid, _ = self._complete(qservice)
+        qsid, qtoken = self._complete(qservice)
+        self.assertEqual(qgen.calls, 1)
+        qpayload = qgen.payloads[0]
+        self.assertEqual(qpayload["schema"],
+                         "phase3_worked_first_feedback_generation_v1")
+        self.assertEqual(qpayload["prompt_version"],
+                         "aitta_worked_first_evidence_author_v10")
+        self.assertEqual(qpayload,
+                         generator.payloads[0])
         qmeta = qservice._load_meta(qsid)
         self.assertEqual(qmeta["feedback_variant"], "question_first")
+        self.assertEqual(qmeta["review_presentation_version"],
+                         "question_first_full_feedback_v2")
+        self.assertEqual(
+            qmeta["feedback_context_version"],
+            "worked_first_assessment_research_context_v2")
         qreview = qmeta["checkpoints"]["end"]["student_review"]
         self.assertEqual(qreview["trace"]["guardrails_version"],
-                         "application_owned_multi_feedback_v1")
+                         FULL_NARRATIVE_GUARDRAILS)
+        self.assertEqual(qreview["trace"]["validation"],
+                         review["trace"]["validation"])
+        self.assertEqual(qreview["message"], review["message"])
         self.assertEqual(
-            qreview["message"]["section_sources"],
-            {"assessment_summary": "provider",
-             "observed_strengths": "application",
-             "review_focus": "application",
-             "next_steps": "application"})
+            qreview["trace"]["generation_context_version"],
+            "worked_first_assessment_research_context_v2")
+        self.assertEqual(qreview["provider_context"],
+                         review["provider_context"])
         self.assertEqual(
             qreview["selected_candidate_id"],
             review["selected_candidate_id"])
@@ -248,10 +262,38 @@ class FeedbackVariantTests(unittest.TestCase):
             review["sanitized_evidence"]["total"])
         qdetail = qservice.teacher_session(qsid)
         qpreview = qdetail["feedback_delivery"]["preview"]
-        self.assertEqual(qpreview["template_version"],
-                         "phase3_student_feedback_template_v9")
+        self.assertEqual(
+            qpreview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         self.assertEqual(qpreview["review_presentation_version"],
-                         "question_first_worked_review_v1")
+                         "question_first_full_feedback_v2")
+        self.assertEqual(qpreview["feedback_variant"], "question_first")
+        self.assertEqual(qpreview["sections"], preview["sections"])
+        self.assertEqual(qpreview.get("practice_activities"),
+                         preview.get("practice_activities"))
+        self.assertEqual(qpreview.get("practice"),
+                         preview.get("practice"))
+        self.assertEqual(len(qpreview["review_examples"]),
+                         len(preview["review_examples"]))
+        for qcard, wcard in zip(qpreview["review_examples"],
+                                preview["review_examples"]):
+            self.assertEqual(qcard["presentation_version"],
+                             "question_first_worked_review_v1")
+            self.assertEqual(qcard["scaffold_source"],
+                             "application_authored_method_prompt_v1")
+            self.assertTrue(qcard["socratic_prompt"])
+            self.assertIn("progressive_hints", qcard)
+            for key in ("question_id", "prompt", "options",
+                        "selected_answer", "correct_answer", "steps",
+                        "reasoning_question", "status"):
+                self.assertEqual(qcard[key], wcard[key])
+        released = qservice.release_feedback(
+            qsid, {"message_sha256":
+                   qdetail["feedback_delivery"]["preview_sha256"]})
+        self.assertTrue(released["released"])
+        qsnap = qservice.snapshot(qsid, qtoken)
+        self.assertEqual(qsnap["feedback"]["end"]["sections"],
+                         qpreview["sections"])
 
     def test_worked_first_invalid_reply_falls_back(self):
         raw = "<script>alert(1)</script>"
@@ -275,6 +317,62 @@ class FeedbackVariantTests(unittest.TestCase):
             for source in review["message"]["section_sources"].values()))
         self.assertNotIn(raw, json.dumps(review["message"]))
 
+    def test_question_first_invalid_reply_falls_back(self):
+        raw = "<script>alert(1)</script>"
+        generator = FullStubGenerator(
+            sections={"assessment_summary": raw,
+                      "observed_strengths": "ok",
+                      "review_focus": "ok",
+                      "next_steps": "ok"})
+        service = self._service(provider_mode="hosted",
+                                generator=generator)
+        sid, _ = self._complete(service)
+        self.assertEqual(generator.calls, 1)
+        self.assertIn("worked_first_context", generator.payloads[0])
+        meta = service._load_meta(sid)
+        self.assertEqual(meta["review_presentation_version"],
+                         "question_first_full_feedback_v2")
+        review = meta["checkpoints"]["end"]["student_review"]
+        self.assertEqual(review["trace"]["fallback_reason"],
+                         "invalid_generation")
+        self.assertEqual(review["trace"]["guardrails_version"],
+                         "application_owned_multi_feedback_v1")
+        self.assertTrue(all(
+            source == "application"
+            for source in review["message"]["section_sources"].values()))
+        self.assertNotIn(raw, json.dumps(review["message"]))
+        preview = service.teacher_session(
+            sid)["feedback_delivery"]["preview"]
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
+        self.assertEqual(preview["review_presentation_version"],
+                         "question_first_full_feedback_v2")
+
+    def test_historical_question_first_keeps_legacy_preview(self):
+        # Same answers through question-first keep the summary-only shape.
+        service = self._service(provider_mode="hosted",
+                                generator=FullStubGenerator())
+        sid, _ = self._complete(service)
+        meta = service._load_meta(sid)
+        meta["review_presentation_version"] = (
+            "question_first_worked_review_v1")
+        meta.pop("feedback_context_version", None)
+        service._save_meta(meta)
+        preview = service.teacher_session(
+            sid)["feedback_delivery"]["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v9")
+        self.assertEqual(preview["review_presentation_version"],
+                         "question_first_worked_review_v1")
+        self.assertEqual(
+            [s["title"] for s in preview["sections"]],
+            ["Assessment complete", "What went well",
+             "Answers to review", "What to do next"])
+        for card in preview["review_examples"]:
+            self.assertEqual(card["presentation_version"],
+                             "question_first_worked_review_v1")
+
     def test_config_execution_label_tracks_selector(self):
         service = self._service()
         self.assertEqual(
@@ -297,6 +395,9 @@ class FeedbackVariantTests(unittest.TestCase):
         # recorded injected-selector selection.
         meta = service._load_meta(sid)
         del meta["feedback_variant"]
+        meta["review_presentation_version"] = (
+            "question_first_worked_review_v1")
+        meta.pop("feedback_context_version", None)
         meta["checkpoints"]["end"]["student_review"]["trace"][
             "selection_source"] = "injected_selector"
         service._save_meta(meta)
@@ -346,15 +447,65 @@ class FeedbackVariantTests(unittest.TestCase):
             self.assertTrue(
                 all(c["status"] == "ready" for c in cards))
             self.assertTrue(all(c["steps"] for c in cards))
+            self.assertEqual(generator.calls, 1)
             review = detail["checkpoints"]["end"]["student_review"]
             results[variant] = {
                 "cards": cards, "preview": preview, "review": review,
+                "payload": generator.payloads[0],
+                "meta": service._load_meta(sid),
+                "det_preview": detail["feedback_delivery"]
+                ["deterministic_preview"],
                 "evidence_total": review["sanitized_evidence"]["total"],
                 "selected": review["selected_candidate_ids"]}
         self.assertEqual(results["worked_first"]["evidence_total"],
                          results["question_first"]["evidence_total"])
         self.assertEqual(results["worked_first"]["selected"],
                          results["question_first"]["selected"])
+        self.assertEqual(results["worked_first"]["payload"],
+                         results["question_first"]["payload"])
+        self.assertEqual(
+            results["worked_first"]["payload"]["worked_first_context"]
+            ["version"], "worked_first_assessment_research_context_v2")
+        self.assertEqual(
+            results["question_first"]["meta"]
+            ["review_presentation_version"],
+            "question_first_full_feedback_v2")
+        q_sections = {s["kind"]: s["text"] for s in
+                      results["question_first"]["preview"]["sections"]}
+        w_sections = {s["kind"]: s["text"] for s in
+                      results["worked_first"]["preview"]["sections"]}
+        self.assertEqual(q_sections, w_sections)
+        self.assertEqual(
+            {s["kind"]: s["text"] for s in
+             results["question_first"]["det_preview"]["sections"]},
+            {s["kind"]: s["text"] for s in
+             results["worked_first"]["det_preview"]["sections"]})
+        self.assertEqual(
+            results["question_first"]["preview"]["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
+        self.assertEqual(
+            results["question_first"]["preview"]
+            ["review_presentation_version"],
+            "question_first_full_feedback_v2")
+        for card in results["question_first"]["cards"]:
+            self.assertEqual(card["presentation_version"],
+                             "question_first_worked_review_v1")
+            self.assertTrue(card["socratic_prompt"])
+            if card.get("explanation_source") == "provider":
+                self.assertEqual(
+                    card["notice"],
+                    "Explain your approach first. Use a hint if "
+                    "needed, then reveal the AI-drafted worked "
+                    "explanation.")
+                self.assertEqual(
+                    card["explanation_validation"],
+                    "shape_only_requires_educator_review")
+                self.assertIn("checked_steps", card)
+            else:
+                self.assertEqual(
+                    card["notice"],
+                    "Explain your approach first. Use a hint if "
+                    "needed, then reveal the checked worked steps.")
         self.assertEqual(
             [c["steps"] for c in results["worked_first"]["cards"]],
             [c["steps"] for c in results["question_first"]["cards"]])
@@ -362,8 +513,6 @@ class FeedbackVariantTests(unittest.TestCase):
             [c["correct_answer"] for c in results["worked_first"]["cards"]],
             [c["correct_answer"] for c in
              results["question_first"]["cards"]])
-        w_sections = {s["kind"]: s["text"] for s in
-                      results["worked_first"]["preview"]["sections"]}
         for kind, text in WORKED_SECTIONS.items():
             if kind == "review_focus":
                 self.assertTrue(w_sections[kind].startswith(text))
@@ -404,6 +553,27 @@ class FeedbackVariantTests(unittest.TestCase):
                 self.assertTrue(texts[kind].startswith(text))
             else:
                 self.assertEqual(texts[kind], text)
+
+        qsid, _ = self._complete(service)
+        request = urllib.request.Request(
+            f"{url}/api/teacher/sessions/{qsid}/export",
+            headers={"Cookie": cookie})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            qpayload = json.loads(response.read())
+        self.assertEqual(qpayload["feedback_variant"], "question_first")
+        qpreview = qpayload["feedback_delivery"]["preview"]
+        self.assertEqual(
+            qpreview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
+        self.assertEqual(qpreview["review_presentation_version"],
+                         "question_first_full_feedback_v2")
+        self.assertEqual(
+            {s["kind"]: s["text"] for s in qpreview["sections"]},
+            texts)
+        for card in qpreview["review_examples"]:
+            self.assertEqual(card["presentation_version"],
+                             "question_first_worked_review_v1")
+            self.assertTrue(card["socratic_prompt"])
 
     def test_worked_first_context_authoring_and_teacher_only_scope(self):
         # The supplied narrative is intentionally a qualitative claim the

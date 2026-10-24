@@ -950,8 +950,9 @@ class GroundedServiceTests(unittest.TestCase):
         self.assertTrue(review["review_examples"])
         detail = service.teacher_session(sid)
         preview = detail["feedback_delivery"]["preview"]
-        self.assertEqual(preview["template_version"],
-                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         self.assertIn("review_examples", preview)
         cards = preview["review_examples"]
         self.assertTrue(all(c["source"] == "incorrect_assessment_response"
@@ -1002,8 +1003,9 @@ class GroundedServiceTests(unittest.TestCase):
         self.addCleanup(reopened.close, wait=True)
         second = reopened.teacher_session(sid)[
             "feedback_delivery"]["preview"]
-        self.assertEqual(second["template_version"],
-                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(
+            second["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         self.assertEqual(second["review_examples"],
                          first["review_examples"])
 
@@ -1014,13 +1016,14 @@ class GroundedServiceTests(unittest.TestCase):
         self._wait(service, sid)
         meta = service._load_meta(sid)
         self.assertEqual(meta["review_presentation_version"],
-                         QUESTION_FIRST_VERSION)
+                         "question_first_full_feedback_v2")
         detail = service.teacher_session(sid)
         preview = detail["feedback_delivery"]["preview"]
-        self.assertEqual(preview["template_version"],
-                         QUESTION_FIRST_TEMPLATE_VERSION)
+        self.assertEqual(
+            preview["template_version"],
+            "phase3_student_feedback_question_first_full_v2")
         self.assertEqual(preview["review_presentation_version"],
-                         QUESTION_FIRST_VERSION)
+                         "question_first_full_feedback_v2")
         self.assertEqual(len(preview["review_examples"]), 1)
         card = preview["review_examples"][0]
         self.assertEqual(card["subtopic_id"], "percentage_amount")
@@ -1925,6 +1928,51 @@ class QuestionFirstPreviewTests(unittest.TestCase):
         text = self._texts(result)["next_steps"]
         self.assertTrue(text.startswith(QUESTION_FIRST_NEXT_STEPS))
         self.assertIn("ask your teacher for help", text)
+
+    def test_preserve_narrative_keeps_sections_and_versions(self):
+        bank = make_grounded_bank()
+        wrong = (positions(bank, "pct", 0)[0],
+                 positions(bank, "div", 0)[0])
+        full = self._concise(wrong)
+        full["template_version"] = (
+            "phase3_student_feedback_worked_first_full_v1")
+        full["review_presentation_version"] = (
+            "worked_first_full_feedback_v1")
+        original = copy.deepcopy(full)
+        result = question_first_preview(full, preserve_narrative=True)
+        self.assertEqual(full, original)
+        self.assertEqual(result["template_version"],
+                         original["template_version"])
+        self.assertEqual(result["review_presentation_version"],
+                         original["review_presentation_version"])
+        self.assertEqual(result["sections"], original["sections"])
+        self.assertEqual(result["text"], original["text"])
+        for before, after in zip(original["review_examples"],
+                                 result["review_examples"]):
+            self.assertEqual(after["presentation_version"],
+                             QUESTION_FIRST_VERSION)
+            self.assertEqual(after["scaffold_source"],
+                             "application_authored_method_prompt_v1")
+            self.assertTrue(after["socratic_prompt"])
+            self.assertEqual(after["steps"], before["steps"])
+            self.assertEqual(after["notice"],
+                             QUESTION_FIRST_READY_NOTICE)
+
+    def test_preserve_narrative_unavailable_generic_fallback(self):
+        bank = make_grounded_bank(unsupported_fri=True)
+        pos = positions(bank, "fri", 0)[0]
+        full = self._concise((pos,), unsupported_fri=True)
+        result = question_first_preview(full, preserve_narrative=True)
+        card = result["review_examples"][0]
+        self.assertEqual(card["socratic_prompt"],
+                         worked_review_math.GENERIC_SOCRATIC_PROMPT)
+        self.assertEqual(card["progressive_hints"], [])
+        self.assertEqual(card["option_contrast"], "")
+        self.assertIsNone(card["option_contrast_source"])
+        self.assertEqual(card["presentation_version"],
+                         QUESTION_FIRST_VERSION)
+        self.assertEqual(result["sections"], full["sections"])
+        self.assertEqual(result["text"], full["text"])
 
 
 EXPECTED_WARM_CONTRASTS = {
