@@ -2843,12 +2843,24 @@ class MultiModeTests(unittest.TestCase):
         cards = preview["review_examples"]
         self.assertTrue(cards)
         for card in cards:
+            qid = card["question_id"]
             self.assertEqual(card["presentation_version"],
                              "question_first_worked_review_v1")
             self.assertEqual(card["scaffold_source"],
-                             "application_authored_method_prompt_v1")
-            self.assertTrue(card["socratic_prompt"])
-            self.assertEqual(card["progressive_hints"], [])
+                             "provider_authored_method_prompt_v1")
+            self.assertEqual(
+                card["socratic_prompt"],
+                f"What is this question {qid} asking you to find?")
+            self.assertEqual(
+                card["progressive_hints"],
+                [f"Hint one for {qid}: identify the given "
+                 "quantities.",
+                 f"Hint two for {qid}: which operation connects "
+                 "them?"])
+            self.assertEqual(card["scaffold_validation"],
+                             "shape_only_requires_educator_review")
+            self.assertEqual(card["scaffold_input"],
+                             "question_and_recorded_answers_v1")
             self.assertEqual(card["option_contrast"], "")
             self.assertIsNone(card["option_contrast_source"])
 
@@ -2864,6 +2876,14 @@ class MultiModeTests(unittest.TestCase):
         meta = service._load_meta(sid)
         meta.pop("review_presentation_version")
         meta.pop("feedback_context_version", None)
+        # Simulate a genuinely historical record: provider scaffold
+        # fields did not exist when the v8 template was current.
+        for example in (meta["checkpoints"]["end"]["student_review"]
+                        ["review_examples"]):
+            for field in ("socratic_prompt", "progressive_hints",
+                          "scaffold_source", "scaffold_validation",
+                          "scaffold_input"):
+                example.pop(field, None)
         service._save_meta(meta)
         preview = self._delivery(service, sid)["preview"]
         self.assertEqual(preview["template_version"],
@@ -2890,6 +2910,60 @@ class MultiModeTests(unittest.TestCase):
         for card in released["review_examples"]:
             self.assertNotIn("socratic_prompt", card)
 
+    def test_missing_marker_provider_scaffold_retained_in_v8(self):
+        selector = MultiSelector(prefer=("sA", "sB"))
+        generator = MultiGenerator()
+        recommender, _ = self._aligned(
+            {"pool_q1": 0.6, "pool_q2": 0.55})
+        service = self._service(selector=selector, generator=generator,
+                                recommender=recommender)
+        sid, token = self._complete(service, self._rows_wrong())
+        self._wait_done(service, sid)
+        meta = service._load_meta(sid)
+        meta.pop("review_presentation_version")
+        meta.pop("feedback_context_version", None)
+        service._save_meta(meta)
+        stored = copy.deepcopy(
+            meta["checkpoints"]["end"]["student_review"]
+            ["review_examples"])
+        preview = self._delivery(service, sid)["preview"]
+        self.assertEqual(preview["template_version"],
+                         "phase3_student_feedback_template_v8")
+        self.assertNotIn("review_presentation_version", preview)
+        for card, stored_card in zip(preview["review_examples"],
+                                     stored):
+            for field in ("presentation_version", "option_contrast",
+                          "option_contrast_source"):
+                self.assertNotIn(field, card)
+            for field in ("socratic_prompt", "progressive_hints",
+                          "scaffold_source", "scaffold_validation",
+                          "scaffold_input"):
+                self.assertEqual(card[field], stored_card[field])
+            self.assertEqual(card["scaffold_source"],
+                             "provider_authored_method_prompt_v1")
+            self.assertEqual(len(card["progressive_hints"]), 2)
+        delivery = self._delivery(service, sid)
+        service.release_feedback(sid, {
+            "message_sha256": delivery["preview_sha256"]})
+        service.close(wait=True)
+        reopened = DemoService(
+            root=Path(self.tmp.name), bank=self.bank,
+            taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank))
+        self.addCleanup(reopened.close, wait=True)
+        released = reopened.snapshot(sid, token)["feedback"]["end"]
+        self.assertEqual(released["template_version"],
+                         "phase3_student_feedback_template_v8")
+        for card, stored_card in zip(released["review_examples"],
+                                     stored):
+            self.assertNotIn("presentation_version", card)
+            self.assertEqual(card["socratic_prompt"],
+                             stored_card["socratic_prompt"])
+            self.assertEqual(card["progressive_hints"],
+                             stored_card["progressive_hints"])
+            self.assertEqual(card["scaffold_source"],
+                             stored_card["scaffold_source"])
+
     def test_question_first_card_edits_release_and_rejections(self):
         selector = MultiSelector(prefer=("sA", "sB"))
         generator = MultiGenerator()
@@ -2904,7 +2978,8 @@ class MultiModeTests(unittest.TestCase):
                                   ["review_examples"])
         patch = [{"socratic_prompt": "Teacher prompt.",
                   "option_contrast": "Teacher observation.",
-                  "progressive_hints": []},
+                  "progressive_hints": ["Teacher hint one.",
+                                        "Teacher hint two."]},
                  {"option_contrast": ""}]
         res = service.save_feedback_edit(sid, {
             "message_sha256": delivery["preview_sha256"],
@@ -2916,9 +2991,15 @@ class MultiModeTests(unittest.TestCase):
                          "Teacher prompt.")
         self.assertEqual(cards[0]["option_contrast"],
                          "Teacher observation.")
+        self.assertEqual(cards[0]["progressive_hints"],
+                         ["Teacher hint one.", "Teacher hint two."])
         self.assertTrue(cards[0]["teacher_edited"])
         self.assertEqual(cards[0]["original_content"],
                          originals[0])
+        original = cards[0]["original_content"]
+        self.assertEqual(original["scaffold_source"],
+                         "provider_authored_method_prompt_v1")
+        self.assertEqual(len(original["progressive_hints"]), 2)
         self.assertEqual(cards[1]["option_contrast"], "")
         self.assertNotIn("teacher_edited", cards[1])
         service.release_feedback(sid, {
@@ -2926,6 +3007,7 @@ class MultiModeTests(unittest.TestCase):
         released = service.snapshot(sid, token)["feedback"]["end"]
         self.assertEqual(released["review_examples"], cards)
         for bad in ({"progressive_hints": ["x"]},
+                    {"progressive_hints": []},
                     {"progressive_hints": "x"},
                     {"progressive_hints": [""]},
                     {"progressive_hints": [5]},
@@ -3640,7 +3722,7 @@ class WorkedFirstDiagnosticsWaitTests(unittest.TestCase):
             "worked_first_assessment_research_context_v2")
         self.assertEqual(
             meta["provider_job"]["prompt_versions"]["generation"],
-            "aitta_worked_first_evidence_author_v10")
+            "aitta_worked_first_evidence_author_v11")
         preview = service.teacher_session(sid)["feedback_delivery"][
             "preview"]
         self.assertNotIn("provider_context", json.dumps(preview))

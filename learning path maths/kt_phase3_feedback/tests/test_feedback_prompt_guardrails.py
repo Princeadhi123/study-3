@@ -22,10 +22,10 @@ from worked_first_context import PROMPT_VERSION as WORKED_FIRST_PROMPT_VERSION
 class FeedbackPromptGuardrailTests(unittest.TestCase):
     def test_new_versions_isolate_previous_requests(self):
         self.assertEqual(FULL_FEEDBACK_PROMPT_VERSION, "aitta_feedback_with_practice_v8")
-        self.assertEqual(MULTI_FULL_FEEDBACK_PROMPT_VERSION, "aitta_assessment_grounded_two_topic_feedback_v12")
-        self.assertEqual(WORKED_FIRST_PROMPT_VERSION, "aitta_worked_first_evidence_author_v10")
+        self.assertEqual(MULTI_FULL_FEEDBACK_PROMPT_VERSION, "aitta_assessment_grounded_two_topic_feedback_v13")
+        self.assertEqual(WORKED_FIRST_PROMPT_VERSION, "aitta_worked_first_evidence_author_v11")
         self.assertEqual(MIDPOINT_PROMPT_VERSION, "aitta_midpoint_check_in_v6")
-        self.assertEqual(SCOPED_PROMPT_VERSION, "aitta_selected_worked_example_v5")
+        self.assertEqual(SCOPED_PROMPT_VERSION, "aitta_selected_worked_example_v6")
 
     def test_math_fidelity_reaches_every_generation_path(self):
         for instructions in (FULL_FEEDBACK_INSTRUCTIONS,

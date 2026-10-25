@@ -171,9 +171,9 @@ def _validate_name(value):
         raise ValueError("invalid aggregate content name")
 
 
-def validate_evidence(evidence):
-    """Reject inconsistent aggregates or widened payloads before callbacks."""
-    _exact_dict(evidence, EVIDENCE_KEYS, "evidence")
+def _validate_evidence_header(evidence):
+    """Versions, fingerprints and checkpoint totals/halves. Returns
+    whether the evidence is an end-checkpoint payload."""
     if (evidence["schema"] != EVIDENCE_SCHEMA
             or evidence["data_origin"] != "synthetic"
             or evidence["checkpoint"] not in CHECKPOINTS):
@@ -189,11 +189,11 @@ def validate_evidence(evidence):
     _validate_halves({**evidence["total"], "halves": evidence["halves"]})
     if [h["out_of"] for h in evidence["halves"]] != [20, 20 if end else 0]:
         raise ValueError("checkpoint half sizes are incorrect")
-    skills, subtopics = evidence["skills"], evidence["subtopics"]
-    if not isinstance(skills, list) or len(skills) != 4:
-        raise ValueError("exactly four assessed skill rows are required")
-    if not isinstance(subtopics, list) or not 1 <= len(subtopics) <= 40:
-        raise ValueError("assessed subtopic rows are required")
+    return end
+
+
+def _validate_skill_records(skills, end):
+    """Validate each skill row; return the id->skill mapping."""
     skill_by_id = {}
     for skill in skills:
         _exact_dict(skill, SKILL_KEYS, "skill")
@@ -206,8 +206,11 @@ def validate_evidence(evidence):
                 or [h["out_of"] for h in skill["halves"]] != [5, 5 if end else 0]):
             raise ValueError("duplicate skill or invalid skill checkpoint size")
         skill_by_id[skill["skill_id"]] = skill
-    if _sum_counts(skills) != evidence["total"]:
-        raise ValueError("skill counts disagree with total")
+    return skill_by_id
+
+
+def _validate_subtopic_records(subtopics, skill_by_id):
+    """Validate each subtopic row against its parent skill."""
     seen = set()
     for subtopic in subtopics:
         _exact_dict(subtopic, SUBTOPIC_KEYS, "subtopic")
@@ -221,6 +224,11 @@ def validate_evidence(evidence):
                 or subtopic["subtopic_id"] in seen):
             raise ValueError("subtopic must have a unique id and matching parent")
         seen.add(subtopic["subtopic_id"])
+
+
+def _reconcile_evidence_counts(evidence, skill_by_id, subtopics):
+    """Subtopic children must rebuild each skill's totals/halves, and
+    skill halves must rebuild the evidence halves."""
     for sid, skill in skill_by_id.items():
         leaves = [s for s in subtopics if s["skill_id"] == sid]
         if not leaves or _sum_counts(leaves) != {key: skill[key] for key in COUNT_KEYS}:
@@ -229,8 +237,24 @@ def validate_evidence(evidence):
             if _sum_counts([s["halves"][half] for s in leaves]) != skill["halves"][half]:
                 raise ValueError("subtopic half counts disagree with parent skill")
     for half in (0, 1):
-        if _sum_counts([s["halves"][half] for s in skills]) != evidence["halves"][half]:
+        if _sum_counts([s["halves"][half] for s in skill_by_id.values()]) != evidence["halves"][half]:
             raise ValueError("skill half counts disagree with total")
+
+
+def validate_evidence(evidence):
+    """Reject inconsistent aggregates or widened payloads before callbacks."""
+    _exact_dict(evidence, EVIDENCE_KEYS, "evidence")
+    end = _validate_evidence_header(evidence)
+    skills, subtopics = evidence["skills"], evidence["subtopics"]
+    if not isinstance(skills, list) or len(skills) != 4:
+        raise ValueError("exactly four assessed skill rows are required")
+    if not isinstance(subtopics, list) or not 1 <= len(subtopics) <= 40:
+        raise ValueError("assessed subtopic rows are required")
+    skill_by_id = _validate_skill_records(skills, end)
+    if _sum_counts(skills) != evidence["total"]:
+        raise ValueError("skill counts disagree with total")
+    _validate_subtopic_records(subtopics, skill_by_id)
+    _reconcile_evidence_counts(evidence, skill_by_id, subtopics)
     return copy.deepcopy(evidence)
 
 
@@ -356,6 +380,55 @@ def _validate_multi_selection_payload(payload):
             "checkpoint": "end", "evidence": safe, "candidates": expected}
 
 
+def _checked_callback_selection(reply, original_payload,
+                                callback_payload, candidates):
+    """Validate a selector reply against the served payload and
+    candidates. Mutation is detected first, then the exact
+    ``{"candidate_id"}`` string contract, then first-match membership.
+    Returns ``(selected, None)`` on a match else ``(None, reason)``."""
+    if callback_payload != original_payload:
+        return None, "mutated_selection_payload"
+    if (not isinstance(reply, dict) or set(reply) != {"candidate_id"}
+            or not isinstance(reply["candidate_id"], str)):
+        return None, "invalid_selection"
+    matches = [c for c in candidates
+               if c["candidate_id"] == reply["candidate_id"]]
+    if not matches:
+        return None, "invalid_selection"
+    return matches[0], None
+
+
+def _bundle_selector_selection(selector, payload, bundles):
+    """Invoke the bundle selector callback and capture its execution
+    once. Returns (selected, source, reason, failed, execution)."""
+    callback_payload = copy.deepcopy(payload)
+    selected = None
+    selection_source = "rules"
+    fallback_reason = None
+    selector_failed = False
+    try:
+        reply = selector.select(callback_payload)
+    # CaptureCache.obtain raises SystemExit when the new-call budget
+    # is exhausted; keep it a recorded fallback. KeyboardInterrupt is
+    # deliberately not caught.
+    except SystemExit:  # NOSONAR python:S5754 - budget-exhaustion boundary
+        fallback_reason = "demo_call_budget_exhausted"
+        selector_failed = True
+    except Exception:
+        fallback_reason = "selector_error"
+        selector_failed = True
+    else:
+        selected, fallback_reason = _checked_callback_selection(
+            reply, payload, callback_payload, bundles)
+        if selected is not None:
+            selection_source = "injected_selector"
+        else:
+            selector_failed = True
+    execution = copy.deepcopy(getattr(selector, "execution", None))
+    return (selected, selection_source, fallback_reason,
+            selector_failed, execution)
+
+
 def select_review_bundle(evidence, selector=None):
     payload = bundle_selection_payload(evidence)
     bundles = payload["candidates"]
@@ -368,36 +441,11 @@ def select_review_bundle(evidence, selector=None):
     if len(bundles) == 1:
         selection_source = "rules_single_candidate"
     elif selector is not None:
-        callback_payload = copy.deepcopy(payload)
-        try:
-            reply = selector.select(callback_payload)
-        # CaptureCache.obtain raises SystemExit when the new-call budget
-        # is exhausted; keep it a recorded fallback. KeyboardInterrupt is
-        # deliberately not caught.
-        except SystemExit:  # NOSONAR python:S5754 - budget-exhaustion boundary
-            fallback_reason = "demo_call_budget_exhausted"
-            selector_failed = True
-        except Exception:
-            fallback_reason = "selector_error"
-            selector_failed = True
-        else:
-            if callback_payload != payload:
-                fallback_reason = "mutated_selection_payload"
-                selector_failed = True
-            elif (not isinstance(reply, dict) or set(reply) != {"candidate_id"}
-                  or not isinstance(reply["candidate_id"], str)):
-                fallback_reason = "invalid_selection"
-                selector_failed = True
-            else:
-                matches = [b for b in bundles
-                           if b["candidate_id"] == reply["candidate_id"]]
-                if not matches:
-                    fallback_reason = "invalid_selection"
-                    selector_failed = True
-                else:
-                    selected = matches[0]
-                    selection_source = "injected_selector"
-        execution = copy.deepcopy(getattr(selector, "execution", None))
+        (chosen, selection_source, fallback_reason, selector_failed,
+         execution) = _bundle_selector_selection(
+             selector, payload, bundles)
+        if chosen is not None:
+            selected = chosen
     return {"bundle": copy.deepcopy(selected), "execution": execution,
             "trace": {
                 "selection_source": selection_source,
@@ -450,6 +498,83 @@ def _feedback_validation_label(full_message, opening):
     return "deterministic_evidence_and_draft_actions"
 
 
+def _single_selection(payload, selector):
+    """Invoke the single-candidate selector callback, if any. Returns
+    (selected, source, reason, failed). SystemExit and
+    KeyboardInterrupt from a legacy single selector propagate."""
+    candidates = payload["candidates"]
+    baseline = candidates[0]
+    if len(candidates) == 1:
+        return baseline, "rules_single_candidate", None, False
+    if selector is None:
+        return baseline, "rules", None, False
+    callback_payload = copy.deepcopy(payload)
+    try:
+        reply = selector.select(callback_payload)
+    except Exception:
+        return baseline, "rules", "selector_error", True
+    selected, reason = _checked_callback_selection(
+        reply, payload, callback_payload, candidates)
+    if selected is None:
+        return baseline, "rules", reason, True
+    return selected, "injected_selector", None, False
+
+
+def _full_sections_message(safe, audience, selected, integrated_ctx,
+                           generator):
+    """Full-feedback generator callback. Returns
+    (message_or_None, reason_or_None, source, prompt_version)."""
+    from full_feedback import (
+        FULL_FEEDBACK_PROMPT_VERSION, build_full_input,
+        full_message_sections, validate_full_reply)
+    prompt_version = FULL_FEEDBACK_PROMPT_VERSION
+    full_input = build_full_input(safe, audience, selected,
+                                  integrated_ctx)
+    callback_payload = copy.deepcopy(full_input)
+    try:
+        reply = generator.generate(callback_payload)
+    # CaptureCache.obtain raises SystemExit when the new-call budget
+    # is exhausted; keep it a recorded generator fallback.
+    # KeyboardInterrupt is deliberately not caught.
+    except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
+        return None, "generator_error", "deterministic", prompt_version
+    checked = validate_full_reply(reply, selected["candidate_id"])
+    if callback_payload != full_input or checked is None:
+        return None, "invalid_generation", "deterministic", \
+            prompt_version
+    full_message = {"sections": full_message_sections(checked)}
+    full_message["text"] = "\n\n".join(
+        s["text"] for s in full_message["sections"])
+    return (full_message, None, "injected_generator_full_sections",
+            prompt_version)
+
+
+def _opening_message(evidence, audience, checkpoint, selected,
+                     generator):
+    """Opening-only generator callback over the narrow JSON schema.
+    Returns (opening_or_None, reason_or_None, source). SystemExit and
+    KeyboardInterrupt propagate as before."""
+    generation = {
+        "schema": GENERATION_SCHEMA, "audience": audience,
+        "checkpoint": checkpoint,
+        "selected_candidate": {key: selected[key] for key in
+                               ("candidate_id", "strategy", "review_status")}}
+    callback_payload = copy.deepcopy(generation)
+    try:
+        reply = generator.generate(callback_payload)
+    except Exception:
+        return None, "generator_error", "deterministic"
+    names = [s["skill_name"] for s in evidence["skills"]]
+    names.extend(s["subtopic_name"] for s in evidence["subtopics"])
+    checked = _check_generated_opening(
+        reply, selected["candidate_id"], names)
+    if (callback_payload != generation or checked is None
+            or (audience == "teacher" and re.search(
+                r"\b(?:you|your|yours)\b", checked, re.IGNORECASE))):
+        return None, "invalid_generation", "deterministic"
+    return checked, None, "injected_generator_opening_only"
+
+
 def run_feedback(evidence, audience, checkpoint, selector=None,
                  generator=None, practice_context=None):
     """Return an auditable review draft with a fixed evidence-rendered body.
@@ -470,37 +595,9 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
         integrated_ctx = feedback_practice.validate_practice_context(
             practice_context, safe)
     baseline = candidates[0]
-    selected = baseline
-    selection_source = "rules"
+    (selected, selection_source, fallback_reason,
+     selector_failed) = _single_selection(payload, selector)
     phrasing_source = "deterministic"
-    fallback_reason = None
-    selector_failed = False
-    if len(candidates) == 1:
-        selection_source = "rules_single_candidate"
-    elif selector is not None:
-        callback_payload = copy.deepcopy(payload)
-        try:
-            reply = selector.select(callback_payload)
-        except Exception:
-            fallback_reason = "selector_error"
-            selector_failed = True
-        else:
-            if callback_payload != payload:
-                fallback_reason = "mutated_selection_payload"
-                selector_failed = True
-            elif (not isinstance(reply, dict) or set(reply) != {"candidate_id"}
-                  or not isinstance(reply["candidate_id"], str)):
-                fallback_reason = "invalid_selection"
-                selector_failed = True
-            else:
-                matches = [c for c in candidates
-                           if c["candidate_id"] == reply["candidate_id"]]
-                if not matches:
-                    fallback_reason = "invalid_selection"
-                    selector_failed = True
-                else:
-                    selected = matches[0]
-                    selection_source = "injected_selector"
     # Application-owned plan snapshot of the validated selection. Deep-copied
     # so it cannot alias candidates, evidence, or any callback-owned object,
     # and it is never included in the narrow generator payload.
@@ -511,52 +608,16 @@ def run_feedback(evidence, audience, checkpoint, selector=None,
     if (generator is not None and not selector_failed
             and getattr(generator, "supports_full_feedback", False)
             and checkpoint == "end"):
-        from full_feedback import (
-            FULL_FEEDBACK_PROMPT_VERSION, build_full_input,
-            full_message_sections, validate_full_reply)
-        generation_prompt_version = FULL_FEEDBACK_PROMPT_VERSION
-        full_input = build_full_input(safe, audience, selected,
-                                      integrated_ctx)
-        callback_payload = copy.deepcopy(full_input)
-        try:
-            reply = generator.generate(callback_payload)
-        # CaptureCache.obtain raises SystemExit when the new-call budget
-        # is exhausted; keep it a recorded generator fallback.
-        # KeyboardInterrupt is deliberately not caught.
-        except (Exception, SystemExit):  # NOSONAR python:S5754 - budget-exhaustion boundary
-            fallback_reason = "generator_error"
-        else:
-            checked = validate_full_reply(reply, selected["candidate_id"])
-            if callback_payload != full_input or checked is None:
-                fallback_reason = "invalid_generation"
-            else:
-                full_message = {"sections": full_message_sections(checked)}
-                full_message["text"] = "\n\n".join(
-                    s["text"] for s in full_message["sections"])
-                phrasing_source = "injected_generator_full_sections"
+        (full_message, reason, phrasing_source,
+         generation_prompt_version) = _full_sections_message(
+            safe, audience, selected, integrated_ctx, generator)
+        if reason is not None:
+            fallback_reason = reason
     elif generator is not None and not selector_failed:
-        generation = {
-            "schema": GENERATION_SCHEMA, "audience": audience,
-            "checkpoint": checkpoint,
-            "selected_candidate": {key: selected[key] for key in
-                                   ("candidate_id", "strategy", "review_status")}}
-        callback_payload = copy.deepcopy(generation)
-        try:
-            reply = generator.generate(callback_payload)
-        except Exception:
-            fallback_reason = "generator_error"
-        else:
-            names = [s["skill_name"] for s in evidence["skills"]]
-            names.extend(s["subtopic_name"] for s in evidence["subtopics"])
-            checked = _check_generated_opening(
-                reply, selected["candidate_id"], names)
-            if (callback_payload != generation or checked is None
-                    or (audience == "teacher" and re.search(
-                        r"\b(?:you|your|yours)\b", checked, re.IGNORECASE))):
-                fallback_reason = "invalid_generation"
-            else:
-                opening = checked
-                phrasing_source = "injected_generator_opening_only"
+        opening, reason, phrasing_source = _opening_message(
+            evidence, audience, checkpoint, selected, generator)
+        if reason is not None:
+            fallback_reason = reason
     validation = _feedback_validation_label(full_message, opening)
     return {
         "schema": REVIEW_SCHEMA, "status": "draft_not_for_learner_delivery",
@@ -677,6 +738,12 @@ def _overlay_worked_review(card, overlay):
     card["explanation_source"] = "provider"
     card["explanation_validation"] = "shape_only_requires_educator_review"
     card["explanation_input"] = "question_and_recorded_answers_v1"
+    card["socratic_prompt"] = overlay["socratic_prompt"]
+    card["progressive_hints"] = copy.deepcopy(
+        overlay["progressive_hints"])
+    card["scaffold_source"] = "provider_authored_method_prompt_v1"
+    card["scaffold_validation"] = "shape_only_requires_educator_review"
+    card["scaffold_input"] = "question_and_recorded_answers_v1"
 
 
 def _display_worked_review_examples(examples, assessment_context,

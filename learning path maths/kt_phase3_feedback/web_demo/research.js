@@ -457,27 +457,31 @@ function initResearchWorkspace({mountDetail, getConfig}) {
     mode.id = "replay-provider-mode";
     mode.options[1].disabled = getConfig().provider_mode !== "hosted";
     const variant = select([
-      ["question_first", "Question-first / current version"],
+      ["question_first", getConfig().review_mode === "aligned_two_topic"
+        ? "Question-first / full narrative + hints"
+        : "Question-first / current version"],
       ["worked_first", "Worked-first / full Aitta narrative"]]);
     variant.id = "replay-feedback-variant";
     variant.options[1].disabled =
       getConfig().review_mode !== "aligned_two_topic";
     const variantNote = notice("", "meta small");
+    variantNote.id = "replay-variant-note";
     variantNote.hidden = true;
     const updateVariantNote = () => {
-      if (variant.value !== "worked_first") {
+      if (getConfig().review_mode !== "aligned_two_topic") {
         variantNote.hidden = true;
         return;
       }
       variantNote.textContent = "Aitta narrative is shape-checked, " +
         "not fact-verified; educator review is required." +
         (mode.value === "rules"
-          ? " Rules only records the worked-first presentation with " +
-            "deterministic wording; no provider narrative runs."
+          ? " Rules only uses deterministic wording; no provider " +
+            "narrative runs."
           : "");
       variantNote.hidden = false;
     };
     variant.addEventListener("change", updateVariantNote);
+    updateVariantNote();
     const parallel = select([
       ["8", "8 scenarios at a time (parallel)"],
       ["6", "6 scenarios at a time (parallel)"],

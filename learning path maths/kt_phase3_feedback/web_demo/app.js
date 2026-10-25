@@ -1530,6 +1530,15 @@ function renderStructuredFeedback(container, payload) {
         think.appendChild(el("h4", "Think first"));
         think.appendChild(el("p",
           example.socratic_prompt || "", "sec"));
+        think.appendChild(el("p",
+          (changed("socratic_prompt") || changed("progressive_hints"))
+            ? "Teacher-edited prompts and hints."
+            : (example.scaffold_source
+               === "provider_authored_method_prompt_v1"
+               ? "AI-drafted prompts and hints; teacher review "
+                 + "required."
+               : "Application-authored prompts and hints."),
+          "meta small scaffold-provenance"));
         box.appendChild(think);
         if (example.option_contrast) {
           const contrast = el("div", null, "option-contrast");
@@ -3704,16 +3713,17 @@ function createDetailView(root, options = {}) {
   function workedJobNote(job) {
     if (!job) {
       return "Worked example updated; only the selected example's " +
-        "explanation was regenerated. Review it again before " +
-        "approval.";
+        "explanation and Think-first scaffolds were regenerated. " +
+        "Review it again before approval.";
     }
     if (job.status === "pending") {
-      return "Selection saved; the updated worked example is being " +
-        "generated. The rest of the feedback and practice is " +
-        "unchanged.";
+      return "Selection saved; the updated worked example's " +
+        "explanation and hints are being generated. The rest of the " +
+        "feedback and practice is unchanged.";
     }
     if (job.status === "fallback") {
-      return "Selection saved; AI generation did not complete. " +
+      return "Selection saved; AI generation did not complete, so " +
+        "the selected example shows application fallback wording. " +
         "Review the selected example's available content before approval.";
     }
     if (job.status === "unavailable") {
@@ -3730,8 +3740,8 @@ function createDetailView(root, options = {}) {
         "unchanged.";
     }
     return "Worked example updated; only the selected example's " +
-      "explanation was regenerated. Review it again before " +
-      "approval.";
+      "explanation and Think-first scaffolds were regenerated. " +
+      "Review it again before approval.";
   }
 
   function editDraftFor(sid, delivery) {
@@ -4036,8 +4046,9 @@ function createDetailView(root, options = {}) {
       waiting.setAttribute("aria-busy", "true");
       waiting.appendChild(el("p",
         exampleBusy
-          ? "Aitta is updating the selected worked example. Please " +
-            "wait while generation and any automatic retries finish."
+          ? "Aitta is updating the selected worked example's " +
+            "solution and hints. Please wait while generation and " +
+            "any automatic retries finish."
           : "Aitta is preparing the end feedback and practice. " +
             "Please wait while generation and any automatic retries " +
             "finish."));
@@ -4144,8 +4155,9 @@ function createDetailView(root, options = {}) {
         }
         fieldset.appendChild(el("p",
           "Either button applies all changed question selections to " +
-          "the feedback. Only those examples' explanations are " +
-          "regenerated. Saved edits inside those examples are " +
+          "the feedback. Only those examples' explanations and " +
+          "Think-first hints are regenerated; the narrative and other " +
+          "cards stay. Saved edits inside those examples are " +
           "replaced. Review the updated feedback before approval.",
           "warn"));
         const apply = el("button",

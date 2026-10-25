@@ -105,7 +105,13 @@ class SequenceWorkedOpener(WorkedReviewOpener):
                 reviews.append({
                     "question_id": example["question_id"],
                     "steps": list(steps),
-                    "reasoning_question": reasoning})
+                    "reasoning_question": reasoning,
+                    "socratic_prompt":
+                        f"What is question {example['question_id']} "
+                        "asking you to find?",
+                    "progressive_hints": [
+                        f"Hint one for {example['question_id']}.",
+                        "Hint two for the same question."]})
         self.payload = wire_reply(
             candidate_id=context["selected_candidate"]["candidate_id"],
             sections=self.sections, worked_reviews=reviews)
@@ -260,18 +266,57 @@ class AutomaticRetryTests(unittest.TestCase):
                     execution["automatic_retry"]["stop_reason"],
                     "non_retryable")
 
-    def test_contract_rejection_not_retried(self):
+    def test_contract_rejection_retried_then_success(self):
         malformed = {"unexpected": "shape"}
         opener = SequenceOpener([malformed, _midpoint_reply()])
         reply, execution = self._obtain(
             self._cache(), self._native(opener))
+        self.assertIsNotNone(reply)
+        self.assertEqual(len(opener.calls), 2)
+        self.assertEqual(len(self._captures()), 2)
+        self.assertEqual(execution["automatic_retry"]["attempts"], 2)
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "success")
+        self.assertEqual(len(self.waits), 1)
+        record = self._failed_record()
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            record["metadata"]["transport"]["stage"],
+            "body_received")
+        self.assertEqual(
+            record["metadata"]["failure_stage"],
+            "response_contract_or_full_feedback_validation")
+
+    def test_contract_rejections_exhaust_then_failed(self):
+        malformed = {"unexpected": "shape"}
+        opener = SequenceOpener(
+            [dict(malformed) for _ in range(3)])
+        reply, execution = self._obtain(
+            self._cache(), self._native(opener))
+        self.assertIsNone(reply)
+        self.assertEqual(len(opener.calls), 3)
+        captures = self._captures()
+        self.assertEqual(len(captures), 3)
+        self.assertTrue(all(
+            not json.loads(path.read_text(encoding="utf-8"))["ok"]
+            for path in captures))
+        self.assertEqual(execution["automatic_retry"]["attempts"], 3)
+        self.assertEqual(execution["automatic_retry"]["stop_reason"],
+                         "attempts_exhausted")
+
+    def test_contract_rejection_automatic_disabled_not_retried(self):
+        malformed = {"unexpected": "shape"}
+        opener = SequenceOpener([malformed, _midpoint_reply()])
+        cache = self._cache(automatic=False)
+        payload = copy.deepcopy(self.input)
+        native = self._native(opener)
+        reply, execution = cache.obtain(
+            PROVIDER, {"req": "fixed"},
+            lambda: native.generate(payload), native)
         self.assertIsNone(reply)
         self.assertEqual(len(opener.calls), 1)
-        self.assertEqual(execution["automatic_retry"]["stop_reason"],
-                         "non_retryable")
-        self.assertEqual(
-            self._failed_record()["metadata"]["transport"]["stage"],
-            "body_received")
+        self.assertNotIn("automatic_retry", execution)
+        self.assertEqual(self.waits, [])
 
     def test_ssl_certificate_failure_not_retried(self):
         error = urllib.error.URLError(
@@ -284,9 +329,50 @@ class AutomaticRetryTests(unittest.TestCase):
         record = self._failed_record()
         self.assertEqual(
             record["metadata"]["transport"]["failure_kind"],
-            "transport_error")
+            "tls_certificate_error")
+        self.assertEqual(execution["automatic_retry"]["attempts"], 1)
         self.assertEqual(execution["automatic_retry"]["stop_reason"],
                          "non_retryable")
+        self.assertEqual(self.waits, [])
+        self.assertEqual(len(self._captures()), 1)
+
+    def test_ssl_handshake_failure_not_retried(self):
+        cases = {
+            "wrapped": urllib.error.URLError(
+                ssl.SSLError(1, "handshake failure")),
+            "direct": ssl.SSLError(1, "handshake failure")}
+        for label, error in cases.items():
+            with self.subTest(case=label):
+                root = self.root / f"tls_{label}"
+                root.mkdir()
+                cache = CaptureCache(root, None,
+                                     automatic_retries=True)
+                cache._stop_retries.wait = mock.Mock(
+                    return_value=False)
+                wait = cache._stop_retries.wait
+                opener = SequenceOpener([error, _midpoint_reply()])
+                native = self._native(opener)
+                payload = copy.deepcopy(self.input)
+                reply, execution = cache.obtain(
+                    PROVIDER, {"req": "fixed"},
+                    lambda: native.generate(payload), native)
+                self.assertIsNone(reply)
+                self.assertEqual(len(opener.calls), 1)
+                self.assertEqual(
+                    execution["automatic_retry"]["attempts"], 1)
+                self.assertEqual(
+                    execution["automatic_retry"]["stop_reason"],
+                    "non_retryable")
+                captures = sorted(
+                    root.glob(f"{PROVIDER}_*.json"))
+                self.assertEqual(len(captures), 1)
+                record = json.loads(
+                    captures[0].read_text(encoding="utf-8"))
+                self.assertFalse(record["ok"])
+                self.assertEqual(
+                    record["metadata"]["transport"]["failure_kind"],
+                    "tls_error")
+                wait.assert_not_called()
 
     def test_budget_exhausted_mid_chain(self):
         opener = SequenceOpener([TimeoutError("n"), _midpoint_reply()])

@@ -420,7 +420,13 @@ class ContextOpener(RecordingOpener):
                  "steps": ["Follow the checked method shown for "
                            "this question."],
                  "reasoning_question":
-                     "Why does the checked method work here?"}
+                     "Why does the checked method work here?",
+                 "socratic_prompt":
+                     f"What is question {example['question_id']} "
+                     "asking?",
+                 "progressive_hints": [
+                     f"Hint one for {example['question_id']}.",
+                     "Hint two for the same question."]}
                 for example in context.get("review_examples") or []
                 if example.get("status") == "ready"]
         self.payload = wire_reply(

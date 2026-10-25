@@ -10,8 +10,8 @@ from full_feedback import (
     validate_worked_reviews)
 from research_content_descriptions import MATHEMATICAL_TASKS
 
-PROMPT_VERSION = "aitta_selected_worked_example_v5"
-MAX_TOKENS = 1800
+PROMPT_VERSION = "aitta_selected_worked_example_v6"
+MAX_TOKENS = 2400
 INSTRUCTIONS = (
     "Write an English teaching explanation for exactly one synthetic "
     "assessment question selected by a teacher, as a draft requiring "
@@ -38,7 +38,23 @@ INSTRUCTIONS = (
     "instead of inventing a justification. Generated steps are not "
     "independently verified. Do not write an assessment summary, strengths, "
     "review focus, next steps or practice activity. Return only a JSON "
-    "object with exactly the keys question_id, steps and reasoning_question. "
+    "object with exactly the keys question_id, steps, reasoning_question, "
+    "socratic_prompt and progressive_hints. socratic_prompt must be one "
+    "nonempty plain-text English question of at most 600 characters "
+    "inviting the student to plan an approach to this exact question "
+    "before seeing its solution. progressive_hints must be a list of "
+    "exactly two nonempty plain-text English strings, each at most 600 "
+    "characters. The first hint points to a relevant quantity, relationship "
+    "or feature in this question; the second gives a more specific method "
+    "cue without carrying out the calculation. Neither the prompt nor "
+    "either hint may state the correct answer, identify its option, give "
+    "a completed calculation or repeat the worked solution. Use the "
+    "actual question's quantities or expression where helpful, not a "
+    "generic topic-only template. Do not infer the student's reasoning "
+    "or diagnose an error. If the question or key appears inconsistent, "
+    "ask the student to clarify the wording with their teacher rather "
+    "than implying a solution. Keep the full solution in steps and the "
+    "post-solution reasoning_question only. "
     "Copy question_id exactly. steps must be an array of one to six "
     "nonempty English plain-text strings, each at most 1000 characters. "
     "reasoning_question must be one nonempty English plain-text string of "
@@ -204,7 +220,9 @@ class WorkedExampleAittaGenerator(FullFeedbackAittaGenerator):
             self._reject_response("invalid_worked_reviews")
         overlay = overlays[0]
         api_key = self._generator._api_key
-        texts = overlay["steps"] + [overlay["reasoning_question"]]
+        texts = (overlay["steps"] + [overlay["reasoning_question"],
+                                     overlay["socratic_prompt"]]
+                 + overlay["progressive_hints"])
         if any(api_key in text for text in texts):
             self._reject_response("secret_in_worked_reviews")
         model = self._parse_model_metadata(data)

@@ -1,7 +1,40 @@
 """Synthetic bank fixture for Phase 3 unit tests."""
+import unittest
+from pathlib import Path
+
+import phase3_paths
 from session_store import bank_fingerprint
 
 SKILLS = ("sA", "sB", "sC", "sD")
+
+# Original frozen research inputs: the v3 capture, its v2 parent
+# graph, the warm/cold shadow-smoke banks it binds, and the original
+# 24-question v2 practice pool. Recovered copies must be activated
+# explicitly; tests requiring the originals skip when they are absent.
+FROZEN_RESEARCH_FILES = (
+    phase3_paths.ARTIFACTS / "bounded_content_graph_v3_20261007"
+    / "content_graph_private.json",
+    phase3_paths.ARTIFACTS / "bounded_content_graph_v3_20261007"
+    / "manifest.json",
+    phase3_paths.ARTIFACTS / "bounded_content_graph_v2_20261006"
+    / "content_graph_private.json",
+    phase3_paths.ARTIFACTS / "shadow_smoke_20261006"
+    / "warm_bank_private.json",
+    phase3_paths.ARTIFACTS / "shadow_smoke_20261006"
+    / "cold_bank_private.json",
+    phase3_paths.ARTIFACTS / "synthetic_practice_supplement_20261006"
+    / "practice_pool_v2_private.json",
+)
+
+
+def requires_private_artifacts(*paths):
+    """Skip when a required private file is absent; preserve
+    validation failures."""
+    missing = [str(path) for path in paths
+               if not Path(path).is_file()]
+    return unittest.skipUnless(
+        not missing,
+        "private frozen artifacts not installed: " + ", ".join(missing))
 
 
 def make_bank():

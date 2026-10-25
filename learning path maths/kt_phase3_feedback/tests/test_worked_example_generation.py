@@ -42,7 +42,12 @@ def ok_body(card, inner=None, model="openai/gpt-oss-120b",
             "question_id": card["question_id"],
             "steps": ["First multiply by the percentage.",
                       "The result stays 75."],
-            "reasoning_question": "Why is 100% of a number the number?"})
+            "reasoning_question": "Why is 100% of a number the number?",
+            "socratic_prompt":
+                "How could you plan to find 100% of 75?",
+            "progressive_hints": [
+                "Look at the whole amount 75 and the percent asked.",
+                "100% means the whole amount itself."]})
     if usage is None:
         usage = {"prompt_tokens": 40, "completion_tokens": 20,
                  "total_tokens": 60}
@@ -229,8 +234,9 @@ class RequestAndReplyTests(unittest.TestCase):
 
     def test_reply_only_carries_card_overlay(self):
         overlay = native().generate(make_card())
-        self.assertEqual(set(overlay), {"question_id", "steps",
-                                       "reasoning_question"})
+        self.assertEqual(set(overlay),
+                         {"question_id", "steps", "reasoning_question",
+                          "socratic_prompt", "progressive_hints"})
         self.assertEqual(native().generate(make_card())["steps"][0],
                          "First multiply by the percentage.")
 
@@ -248,12 +254,18 @@ class RequestAndReplyTests(unittest.TestCase):
     def test_wrong_question_id_rejected(self):
         self.assert_rejected(json.dumps({
             "question_id": "other", "steps": ["A."],
-            "reasoning_question": "Why?"}), "invalid_worked_reviews")
+            "reasoning_question": "Why?",
+            "socratic_prompt": "What is the question asking you to find?",
+            "progressive_hints": ["Look at the given quantities.",
+                                  "Choose the operation connecting them."]}), "invalid_worked_reviews")
 
     def test_extra_narrative_keys_rejected(self):
         self.assert_rejected(json.dumps({
             "question_id": "q-pct-8", "steps": ["A."],
             "reasoning_question": "Why?",
+            "socratic_prompt": "What is the question asking you to find?",
+            "progressive_hints": ["Look at the given quantities.",
+                                  "Choose the operation connecting them."],
             "sections": {"assessment_summary": "x"}}),
             "invalid_worked_reviews")
 
@@ -261,14 +273,36 @@ class RequestAndReplyTests(unittest.TestCase):
         self.assert_rejected(json.dumps({
             "question_id": "q-pct-8",
             "steps": ["<b>bold</b> step"],
-            "reasoning_question": "Why?"}), "invalid_worked_reviews")
+            "reasoning_question": "Why?",
+            "socratic_prompt": "What is the question asking you to find?",
+            "progressive_hints": ["Look at the given quantities.",
+                                  "Choose the operation connecting them."]}), "invalid_worked_reviews")
 
     def test_secret_in_steps_rejected(self):
         self.assert_rejected(json.dumps({
             "question_id": "q-pct-8",
             "steps": [f"token {FAKE_KEY}"],
-            "reasoning_question": "Why?"}),
+            "reasoning_question": "Why?",
+            "socratic_prompt": "What is the question asking you to find?",
+            "progressive_hints": ["Look at the given quantities.",
+                                  "Choose the operation connecting them."]}),
             "secret_in_worked_reviews")
+
+    def test_secret_in_scaffold_fields_rejected(self):
+        for field in ("socratic_prompt", "hint_first", "hint_second"):
+            with self.subTest(field=field):
+                reply = {"question_id": "q-pct-8", "steps": ["A."],
+                         "reasoning_question": "Why?",
+                         "socratic_prompt": "What is asked?",
+                         "progressive_hints": ["a", "b"]}
+                if field == "socratic_prompt":
+                    reply["socratic_prompt"] = f"token {FAKE_KEY}"
+                elif field == "hint_first":
+                    reply["progressive_hints"][0] = f"token {FAKE_KEY}"
+                else:
+                    reply["progressive_hints"][1] = f"token {FAKE_KEY}"
+                self.assert_rejected(json.dumps(reply),
+                                     "secret_in_worked_reviews")
 
     def test_truncated_completion_rejected(self):
         card = make_card()
@@ -293,15 +327,25 @@ class RequestAndReplyTests(unittest.TestCase):
 class ValidateReplyTests(unittest.TestCase):
     def test_valid_overlay(self):
         reply = {"question_id": "q-pct-8", "steps": ["A.", "B."],
-                 "reasoning_question": "Why?"}
+                 "reasoning_question": "Why?",
+                 "socratic_prompt": "What is the question asking?",
+                 "progressive_hints": ["Hint one.", "Hint two."]}
         self.assertEqual(validate_reply(reply, make_card()), reply)
 
     def test_bad_replies(self):
         card = make_card()
         for reply in (None, "x", {"question_id": "other",
                                   "steps": ["A."],
-                                  "reasoning_question": "Why?"},
-                      {"question_id": "q-pct-8", "steps": ["A."]}):
+                                  "reasoning_question": "Why?",
+                                  "socratic_prompt": "What?",
+                                  "progressive_hints": ["a", "b"]},
+                      {"question_id": "q-pct-8", "steps": ["A."],
+                       "reasoning_question": "Why?"},
+                      {"question_id": "q-pct-8", "steps": ["A."],
+                       "reasoning_question": "Why?",
+                       "socratic_prompt": "What?",
+                       "progressive_hints": ["a", "b"],
+                       "extra": "x"}):
             self.assertIsNone(validate_reply(reply, card),
                               msg=repr(reply))
 
@@ -347,9 +391,15 @@ class CachedGeneratorTests(unittest.TestCase):
             cache = CaptureCache(Path(tmp), 4,
                                  automatic_retries=True,
                                  reuse_captures=False)
-            bad = json.dumps({"question_id": "other",
-                              "steps": ["A."],
-                              "reasoning_question": "Why?"})
+            bad = json.dumps({
+                "question_id": "other",
+                "steps": ["A."],
+                "reasoning_question": "Why?",
+                "socratic_prompt":
+                    "What is the question asking you to find?",
+                "progressive_hints": ["Look at the given quantities.",
+                                      "Choose the operation "
+                                      "connecting them."]})
             opener = FakeOpener(ok_body(card, inner=bad))
             generator = self._generator(cache, opener)
             with cache.session_scope("s" * 32):

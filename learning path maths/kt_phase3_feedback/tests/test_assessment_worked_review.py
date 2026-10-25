@@ -39,6 +39,8 @@ from research_runtime import load_research_bank
 from session_store import bank_fingerprint
 from tests.test_kt_adapter import FakeKT
 from tests.test_demo_service import GatedDiagnostics, wait_for
+from tests.helpers import (
+    FROZEN_RESEARCH_FILES, requires_private_artifacts)
 from live_diagnostics import LiveDiagnostics
 
 
@@ -188,7 +190,15 @@ def fixture_reviews(payload):
     expected = worked_review_examples_for_reply(payload) or []
     return [{"question_id": e["question_id"],
              "steps": ["Fixture authored step."],
-             "reasoning_question": "Why does the fixture step work?"}
+             "reasoning_question": "Why does the fixture step work?",
+             "socratic_prompt":
+                 f"What is this question {e['question_id']} asking you "
+                 "to find?",
+             "progressive_hints": [
+                 f"Hint one for {e['question_id']}: identify the "
+                 "given quantities.",
+                 f"Hint two for {e['question_id']}: which operation "
+                 "connects them?"]}
             for e in expected]
 
 
@@ -819,6 +829,7 @@ class GroundedPipelineTests(unittest.TestCase):
             for c in aborted["review_examples"]))
 
 
+@requires_private_artifacts(*FROZEN_RESEARCH_FILES)
 class WarmBankGroundedTests(unittest.TestCase):
     def setUp(self):
         self.bank, self.taxonomy, _ = load_research_bank("warm")
@@ -918,8 +929,9 @@ class GroundedServiceTests(unittest.TestCase):
         self.addCleanup(service.close, wait=True)
         return service
 
-    def _complete(self, service, wrong):
-        created = service.create_session()
+    def _complete(self, service, wrong, variant=None):
+        created = service.create_session(
+            feedback_variant=variant or "question_first")
         sid, token = created["session_id"], created["student_token"]
         snapshot = None
         for row in grounded_rows(self.bank, wrong):
@@ -1989,6 +2001,7 @@ EXPECTED_WARM_CONTRASTS = {
         "What operation is shown between x and y in the question?"}
 
 
+@requires_private_artifacts(*FROZEN_RESEARCH_FILES)
 class WarmBankQuestionFirstTests(unittest.TestCase):
     def setUp(self):
         self.bank, self.taxonomy, _ = load_research_bank("warm")
@@ -2923,6 +2936,11 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.fail("worked_example_job did not finish")
 
     def test_hosted_scoped_job_updates_only_target_card(self):
+        for variant in ("question_first", "worked_first"):
+            with self.subTest(variant=variant):
+                self._hosted_scoped_target_card(variant)
+
+    def _hosted_scoped_target_card(self, variant):
         gate = threading.Event()
         scoped_calls = []
         full_calls = []
@@ -2937,14 +2955,22 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                 return {"question_id": card["question_id"],
                         "steps": ["Provider step one.",
                                   "Provider step two."],
-                        "reasoning_question": "Provider reasoning?"}
+                        "reasoning_question": "Provider reasoning?",
+                        "socratic_prompt":
+                            f"Scoped plan for {card['question_id']}?",
+                        "progressive_hints": [
+                            f"Scoped hint one for "
+                            f"{card['question_id']}.",
+                            f"Scoped hint two for "
+                            f"{card['question_id']}."]}
 
         service = self._service(
             provider_mode="hosted",
             generator=self._full_generator(full_calls),
             worked_example_generator=Scoped(),
             diagnostics=self._diagnostics())
-        sid, token, _ = self._complete(service, SELECTION_WRONG)
+        sid, token, _ = self._complete(service, SELECTION_WRONG,
+                                       variant=variant)
         self._wait(service, sid)
         self.assertEqual(len(full_calls), 1)
         pct, delivery = self._pct_choice(service, sid)
@@ -2986,6 +3012,25 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(meta["checkpoints"]["end"]
                          ["practice_contexts"],
                          before["practice_contexts"])
+        # While pending, the replacement card shows only its own
+        # application scaffold — never the previous question's
+        # provider prompt or hints.
+        old_qid = next(
+            c["question_id"] for c in before_review["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        pending_preview = service.teacher_session(
+            sid)["feedback_delivery"]["preview"]
+        pending_card = next(
+            c for c in pending_preview["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        if variant == "question_first":
+            self.assertEqual(
+                pending_card["scaffold_source"],
+                "application_authored_method_prompt_v1")
+            self.assertNotIn(old_qid, pending_card["socratic_prompt"])
+            for hint in pending_card["progressive_hints"]:
+                self.assertNotIn("Scoped hint", hint)
+                self.assertNotIn(old_qid, hint)
         # While pending, release/edit/re-selection all conflict.
         pending_hash = res["preview_sha256"]
         for fn in (
@@ -3015,7 +3060,9 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(sent["mathematical_task"],
                          MATHEMATICAL_TASKS["percentage_amount"])
         for field in ("checked_steps", "checked_reasoning_question",
-                      "steps", "explanation", "reasoning_question"):
+                      "steps", "explanation", "reasoning_question",
+                      "socratic_prompt", "progressive_hints",
+                      "scaffold_source"):
             self.assertNotIn(field, sent)
         self.assertNotIn("sections", sent)
         self.assertNotIn("review_examples", sent)
@@ -3026,7 +3073,18 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(card["steps"], ["Provider step one.",
                                          "Provider step two."])
         self.assertEqual(card["explanation_source"], "provider")
-        self.assertEqual(card["checked_steps"] is not None, True)
+        self.assertTrue(card["checked_steps"] is not None)
+        self.assertEqual(card["socratic_prompt"],
+                         f"Scoped plan for {qid8}?")
+        self.assertEqual(card["progressive_hints"],
+                         [f"Scoped hint one for {qid8}.",
+                          f"Scoped hint two for {qid8}."])
+        self.assertEqual(card["scaffold_source"],
+                         "provider_authored_method_prompt_v1")
+        self.assertEqual(card["scaffold_validation"],
+                         "shape_only_requires_educator_review")
+        self.assertEqual(card["scaffold_input"],
+                         "question_and_recorded_answers_v1")
         self.assertEqual(review["trace"]["worked_review_sources"]
                          [qid8], "provider")
         # After success the unaffected review fields, other cards and
@@ -3046,18 +3104,37 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         # current card uses it.
         current_ids = {c["question_id"]
                        for c in review["review_examples"]}
-        old_qid = next(
-            c["question_id"] for c in before_review["review_examples"]
-            if c["candidate_id"] == pct["candidate_id"])
         sources = review["trace"]["worked_review_sources"]
         if old_qid not in current_ids:
             self.assertNotIn(old_qid, sources)
         self.assertEqual(set(sources) - current_ids, set())
-        # Terminal state releases normally.
+        # The teacher-facing preview carries the new scaffold; terminal
+        # state releases it verbatim.
         delivery = service.teacher_session(sid)["feedback_delivery"]
+        preview_card = next(
+            c for c in delivery["preview"]["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        if variant == "question_first":
+            self.assertEqual(preview_card["socratic_prompt"],
+                             f"Scoped plan for {qid8}?")
+            self.assertEqual(preview_card["progressive_hints"],
+                             [f"Scoped hint one for {qid8}.",
+                              f"Scoped hint two for {qid8}."])
+            self.assertEqual(preview_card["scaffold_source"],
+                             "provider_authored_method_prompt_v1")
         released = service.release_feedback(sid, {
             "message_sha256": delivery["preview_sha256"]})
         self.assertTrue(released["released"])
+        out = service._load_meta(sid)["feedback_release"][
+            "released_feedback"]
+        released_card = next(
+            c for c in out["review_examples"]
+            if c["candidate_id"] == pct["candidate_id"])
+        if variant == "question_first":
+            self.assertEqual(released_card["progressive_hints"],
+                             preview_card["progressive_hints"])
+            self.assertEqual(released_card["socratic_prompt"],
+                             preview_card["socratic_prompt"])
 
     def test_hosted_scoped_failure_falls_back_preserving_review(self):
         class Failing:
@@ -3127,7 +3204,10 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                 gate.wait(10)
                 return {"question_id": card["question_id"],
                         "steps": ["Late provider step."],
-                        "reasoning_question": "Late?"}
+                        "reasoning_question": "Late?",
+                        "socratic_prompt": "Late prompt?",
+                        "progressive_hints": ["Late hint one.",
+                                              "Late hint two."]}
 
         service = self._service(
             provider_mode="hosted",
@@ -3256,7 +3336,10 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                 gate.wait(10)
                 return {"question_id": card["question_id"],
                         "steps": ["Provider step."],
-                        "reasoning_question": "Why?"}
+                        "reasoning_question": "Why?",
+                        "socratic_prompt": "Provider prompt?",
+                        "progressive_hints": ["Provider hint one.",
+                                              "Provider hint two."]}
 
         service = self._service(
             provider_mode="hosted", generator=Full(),
@@ -3324,7 +3407,10 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                 gate.wait(10)
                 return {"question_id": card["question_id"],
                         "steps": ["Scoped provider step."],
-                        "reasoning_question": "Scoped check?"}
+                        "reasoning_question": "Scoped check?",
+                        "socratic_prompt": "Scoped prompt?",
+                        "progressive_hints": ["Scoped hint one.",
+                                              "Scoped hint two."]}
 
         service = self._service(
             provider_mode="hosted",
@@ -3471,7 +3557,11 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
                         "steps": ["Teacher checking is needed for this "
                                   "recorded answer."],
                         "reasoning_question":
-                            "What should the teacher verify here?"}
+                            "What should the teacher verify here?",
+                        "socratic_prompt":
+                            "How would you plan this one?",
+                        "progressive_hints": ["Unclear scaffold hint.",
+                                              "Unclear method cue."]}
 
         service, sid, choice, target, res = (
             self._unchecked_scoped_service(Scoped(), "nocheck"))
@@ -3484,7 +3574,9 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertEqual(sent["mathematical_task"],
                          MATHEMATICAL_TASKS["percentage_amount"])
         for field in ("checked_steps", "checked_reasoning_question",
-                      "steps", "explanation", "reasoning_question"):
+                      "steps", "explanation", "reasoning_question",
+                      "socratic_prompt", "progressive_hints",
+                      "scaffold_source"):
             self.assertNotIn(field, sent)
         meta = service._load_meta(sid)
         card = next(
@@ -3496,6 +3588,14 @@ class WorkedExampleSelectionServiceTests(GroundedServiceTests):
         self.assertIsNone(card["solution_version"])
         self.assertEqual(card["explanation_validation"],
                          "shape_only_requires_educator_review")
+        # Provider scaffolds are not gated on the local solver.
+        self.assertEqual(card["socratic_prompt"],
+                         "How would you plan this one?")
+        self.assertEqual(card["progressive_hints"],
+                         ["Unclear scaffold hint.",
+                          "Unclear method cue."])
+        self.assertEqual(card["scaffold_source"],
+                         "provider_authored_method_prompt_v1")
 
     def test_scoped_no_checked_solution_failure_keeps_unavailable(self):
         class Failing:

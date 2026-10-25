@@ -3770,11 +3770,17 @@ class ResearchBrowserTests(unittest.TestCase):
             b.wait("!document.querySelector('#scenario-ws-detail').hidden")
             b.js("document.querySelector('#replay-selected').click()")
             b.wait("document.querySelector('dialog[open]')")
-            b.js(f"document.querySelector('#replay-feedback-variant').value={json.dumps(variant)}")
-            if variant == "worked_first":
-                b.js("document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
-                self.assertIn("educator review is required",
-                              b.js("document.querySelector('.replay-dialog').textContent"))
+            # Aligned mode warns for either variant, including the
+            # default question-first selection.
+            note_text = b.js(
+                "document.querySelector('#replay-variant-note')"
+                ".textContent")
+            self.assertIn("educator review is required", note_text)
+            self.assertIn("deterministic wording", note_text)
+            b.js(f"document.querySelector('#replay-feedback-variant').value={json.dumps(variant)};"
+                 "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+            self.assertIn("educator review is required",
+                          b.js("document.querySelector('.replay-dialog').textContent"))
             if hosted:
                 b.js("document.querySelector('#replay-provider-mode').value='hosted';"
                      "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));"
@@ -3856,6 +3862,14 @@ class ResearchBrowserTests(unittest.TestCase):
             "question_first",
             b.js("document.querySelector('#replay-feedback-variant')"
                  ".value"))
+        self.assertEqual(
+            "Question-first / current version",
+            b.js("document.querySelector('#replay-feedback-variant')"
+                 ".options[0].textContent"))
+        # Legacy question-first is the concise historical presentation;
+        # no full-narrative warning applies.
+        self.assertTrue(b.js(
+            "document.querySelector('#replay-variant-note').hidden"))
         b.js("document.querySelector('dialog[open]').close()")
         self.assertEqual(b.errors, [])
 
@@ -3895,10 +3909,29 @@ class ResearchBrowserTests(unittest.TestCase):
         b.viewport(390, 844)
         b.screenshot("replay_dialog_mobile.png")
         b.viewport(1440, 1100)
-        b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
-             "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+        # Aligned mode warns by default (rules, question-first).
+        self.assertEqual(
+            "Question-first / full narrative + hints",
+            b.js("document.querySelector('#replay-feedback-variant')"
+                 ".options[0].textContent"))
+        self.assertFalse(b.js(
+            "document.querySelector('#replay-variant-note').hidden"))
+        self.assertIn("deterministic wording",
+                      b.js("document.querySelector('#replay-variant-note')"
+                           ".textContent"))
+        # Hosted question-first warns without the rules-only suffix.
         b.js("document.querySelector('#replay-provider-mode').value='hosted';"
              "document.querySelector('#replay-provider-mode').dispatchEvent(new Event('change'));")
+        note_text = b.js("document.querySelector('#replay-variant-note')"
+                         ".textContent")
+        self.assertIn("educator review is required", note_text)
+        self.assertNotIn("deterministic wording", note_text)
+        # Hosted worked-first keeps the same warning.
+        b.js("document.querySelector('#replay-feedback-variant').value='worked_first';"
+             "document.querySelector('#replay-feedback-variant').dispatchEvent(new Event('change'))")
+        self.assertIn("educator review is required",
+                      b.js("document.querySelector('#replay-variant-note')"
+                           ".textContent"))
         b.js("document.querySelector('#replay-hosted-consent').click()")
         b.js("document.querySelector('#confirm-replay').click()")
         b.wait("!document.querySelector('dialog[open]')")
@@ -3969,7 +4002,8 @@ class ResearchBrowserTests(unittest.TestCase):
         self.assertEqual({s["kind"]: s["text"] for s in
                           released_preview["sections"]}, texts)
 
-        # Question-first on the same answers stays summary-only.
+        # Question-first on the same answers runs the same full
+        # narrative pipeline; only the card presentation differs.
         known = {r["id"] for r in self.service.replays.list()["runs"]}
         b.js("document.querySelectorAll('.scenario-row')[1].click()")
         b.wait("!document.querySelector('#scenario-ws-detail').hidden")
@@ -3994,19 +4028,20 @@ class ResearchBrowserTests(unittest.TestCase):
             run_q["id"], case["scenario_id"])
         preview_q = view_q["feedback_delivery"]["preview"]
         self.assertEqual(preview_q["review_presentation_version"],
-                         "question_first_worked_review_v1")
+                         "question_first_full_feedback_v2")
         qtexts = {s["kind"]: s["text"] for s in preview_q["sections"]}
-        self.assertNotEqual(qtexts["observed_strengths"],
-                            WORKED_SECTIONS["observed_strengths"])
+        self.assertEqual(qtexts, texts)
         review_q = view_q["checkpoints"]["end"]["student_review"]
-        self.assertEqual(
-            review_q["message"]["section_sources"],
-            {"assessment_summary": "provider",
-             "observed_strengths": "application",
-             "review_focus": "application",
-             "next_steps": "application"})
-        self.assertEqual([c["steps"] for c in
-                          preview_q["review_examples"]], before_steps)
+        self.assertTrue(all(
+            source == "provider"
+            for source in
+            review_q["message"]["section_sources"].values()))
+        q_cards = preview_q["review_examples"]
+        self.assertEqual([c["steps"] for c in q_cards], before_steps)
+        self.assertTrue(all(
+            c["presentation_version"] == "question_first_worked_review_v1"
+            and c["socratic_prompt"]
+            for c in q_cards))
         self.assert_no_overflow()
         self.assertEqual(b.errors, [])
 
@@ -4038,7 +4073,14 @@ class ResearchBrowserTests(unittest.TestCase):
                     raise RuntimeError("test provider failure")
                 return {"question_id": card["question_id"],
                         "steps": ["Scoped replay explanation."],
-                        "reasoning_question": "Explain this checked step?"}
+                        "reasoning_question": "Explain this checked step?",
+                        "socratic_prompt":
+                            f"Scoped prompt for {card['question_id']}?",
+                        "progressive_hints": [
+                            f"Scoped hint one for "
+                            f"{card['question_id']}.",
+                            f"Scoped hint two for "
+                            f"{card['question_id']}."]}
 
         scoped = Scoped()
         self.service = DemoService(

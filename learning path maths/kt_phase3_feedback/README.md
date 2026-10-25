@@ -234,8 +234,13 @@ shutdown fallback can additionally freeze the snapshot as unavailable
 before diagnostics finish. The ranking snapshot and
 alternate-candidate list stay private to the educator workspace.
 Before approval the teacher can override the choice per focus from a
-digest-bound picker, which rebuilds the draft, clears saved wording
-edits, and must be approved again. Older sessions keep their recorded
+digest-bound picker, which rebuilds only the replaced card and — in
+hosted mode — requests a fresh Aitta explanation and question-first
+scaffolding for the new question (scoped prompt
+`aitta_selected_worked_example_v6`), while the narrative, other cards
+and practice stay; saved wording edits
+inside that card are replaced, and the new preview must be approved
+again. Older sessions keep their recorded
 examples and offer no override; approved content stays in the
 educator workspace and is never rendered in the student Assessment.
 See `FEEDBACK_AND_PRACTICE.md`.
@@ -265,12 +270,24 @@ updates.
 `aligned_two_topic` sessions carry an explicit per-session `feedback_variant`
 recorded at creation and never reinterpreted afterwards:
 
-- `question_first` (default): the current presentation — concise student
-  titles and question-first worked review cards; a hosted Aitta reply
-  contributes only the shape-checked completion wording while strengths,
-  review focus and next steps stay application-owned. Grounded review
-  cards may additionally carry provider-authored worked explanations
-  (same shape-only checks and teacher approval as below).
+- `question_first` (default): the same full four-section narrative and
+  provider context as worked-first — identical sections, counts,
+  selected cards and practice payloads — presented question-first: each
+  worked review card hides its explanation behind a separate
+  scaffold/hint/reveal flow (`question_first_full_feedback_v2`,
+  template `phase3_student_feedback_question_first_full_v2`; cards keep
+  `question_first_worked_review_v1` scaffolds). Accepted Aitta replies
+  author the question-specific Think-first prompt and exactly two
+  progressive hints per card (`scaffold_source`
+  `provider_authored_method_prompt_v1`); rules mode, rejected replies
+  and historical cards fall back to application-authored prompts and
+  hints. Hosted runs use the
+  same wire schema, context, reply shape and validation described for
+  worked-first below; the same shape-checked-not-fact-verified warning
+  and educator review requirement apply. Historical question-first
+  sessions recorded before the full variant keep the original concise
+  summary-only preview — where a hosted Aitta reply contributed only
+  the shape-checked completion wording — and are not migrated.
 - `worked_first` (aligned mode only): the original structured four sections
   with standard titles and the selected review/practice cards. When a
   validated Aitta reply is available it may supply all four narrative
@@ -280,11 +297,12 @@ recorded at creation and never reinterpreted afterwards:
   application-owned. This narrative is shape-checked only — **not**
   fact-verified — and always requires educator review. Invalid provider
   output falls back to the deterministic four sections.
-  For hosted worked-first runs the provider job first waits for terminal
+  For hosted runs of either aligned variant the provider job first
+  waits for terminal
   model diagnostics (status `waiting_for_diagnostics`), then calls Aitta
   with a distinct wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v9`) whose context contains all 40
+  `aitta_worked_first_evidence_author_v11`) whose context contains all 40
   answered assessment records with selected/correct options, a
   descriptive concept graph (content membership only — not prerequisite
   order), the selected review questions (recorded prompt, options,
@@ -297,7 +315,11 @@ recorded at creation and never reinterpreted afterwards:
   prompt/context intentionally invalidates earlier request captures.
   The v4 reply additionally carries `worked_reviews`: exactly one entry
   per selected review card — including cards whose local solver was
-  unavailable — with provider-authored `steps` and a `reasoning_question`
+  unavailable — with provider-authored `steps`, a `reasoning_question`,
+  a question-specific `socratic_prompt` and exactly two
+  `progressive_hints` (pre-reveal scaffolds instructed not to state the
+  answer or repeat the solution — a prompt requirement, not a semantic
+  guarantee)
   generated from the question and recorded answers (shape-checked only —
   the teaching text is not independently mathematically verified;
   `solution_version` still refers to the application-checked mathematics,
@@ -336,8 +358,8 @@ recorded at creation and never reinterpreted afterwards:
   midpoint and end feedback; there is no phrase-based wording warning.
   Structural and security checks remain hard rejections. Wording is not
   fact-verified, and prompt instructions do not guarantee that internal
-  terminology never appears. Prompt versions (single-topic v7,
-  two-topic v11, midpoint v5, worked-first v9, selected worked-example v4)
+  terminology never appears. Prompt versions (single-topic v8,
+  two-topic v13, midpoint v6, worked-first v11, selected worked-example v6)
   distinguish new requests from prior captures. Existing captures remain
   unchanged; a fresh hosted call happens only when the user explicitly
   starts one.
@@ -381,15 +403,17 @@ recorded at creation and never reinterpreted afterwards:
   without a midpoint adapter record `not_requested` and make no call.
 
   The hosted demo's shared capture cache performs bounded automatic
-  retries for the narrative namespaces (`aitta_full`, `aitta_midpoint`):
-  after a newly made call fails with a transient transport error — a
-  timeout, a network error, HTTP 429, or HTTP 5xx while opening or
-  reading the response — it waits about 2 seconds before a second
-  attempt and about 4 seconds before a third (plus small jitter, and
-  honouring a valid `Retry-After` response header; a requested delay
-  over 60 seconds stops the chain). Credential errors, contract or
-  content rejections, TLS certificate failures, and other non-transient
-  failures are never retried automatically. At most three new attempts
+  retries for the narrative namespaces (`aitta_full`, `aitta_midpoint`,
+  `aitta_worked_example`): after a newly made call fails with a
+  transient transport error — a timeout, a network error, HTTP 429, or
+  HTTP 5xx while opening or reading the response — or is rejected by
+  the response contract or full-feedback content validation (a fresh
+  stochastic sample may validate), it waits about 2 seconds before a
+  second attempt and about 4 seconds before a third (plus small jitter,
+  and honouring a valid `Retry-After` response header; a requested
+  delay over 60 seconds stops the chain). Credential errors and TLS
+  failures (`tls_certificate_error`, `tls_error`) are never retried
+  automatically. At most three new attempts
   are made per invocation, every attempt is counted against the shared
   call budget and preserved as its own immutable capture file, and the
   saved teacher-only execution record notes `automatic_retry`
@@ -653,11 +677,13 @@ Aitta (current `aligned_two_topic` mode):
   deterministic steps, explanations, reasoning questions, or the
   baseline sections), and safe per-topic practice status/task
   descriptions (prompt
-  `aitta_assessment_grounded_two_topic_feedback_v11`) — **no** raw bank or
+  `aitta_assessment_grounded_two_topic_feedback_v13`) — **no** raw bank or
   responses, answer indices, practice answer keys, raw practice
   question/options, or KT probabilities;
 - does not score or select questions or topics; it authors worked-review
-  steps and a reasoning question per selected card from the question and
+  steps, a reasoning question and a pre-reveal scaffold (one
+  question-specific prompt plus exactly two progressive hints) per
+  selected card from the question and
   recorded answers — shape-checked only, not independently mathematically
   verified, requiring teacher approval — while any locally computed
   checked solution is retained privately for deterministic comparison
@@ -929,7 +955,13 @@ not educator preference or educational validity. Browser tests skip during norma
 unit discovery unless explicitly enabled.
 
 Most tests use synthetic or fake banks/providers. The optional real-bank test
-runs only when the approved Phase 2 bank is available. Earlier browser
+runs only when the approved Phase 2 bank is available. Historical checks
+against the original private frozen research captures (the v3 content
+graph, its v2 parent graph, the warm/cold banks, and the original
+24-question practice pool) skip explicitly when those files are absent;
+the recovered artifacts are exercised only through the separately and
+explicitly activated recovery path, never substituted for the originals
+automatically. Earlier browser
 verification scripts and screenshots under
 `artifacts/live_demo_20261002/verification/` and
 `artifacts/ui_verification_20261004/` were removed by the approved cleanup;

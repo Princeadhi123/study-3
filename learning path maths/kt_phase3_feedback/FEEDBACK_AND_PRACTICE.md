@@ -48,7 +48,7 @@ Key contracts:
 - **Aitta** writes one shared student-facing draft through
   `FullFeedbackAittaGenerator`'s multi schema
   `phase3_multi_topic_feedback_generation_v2`, prompt
-  `aitta_assessment_grounded_two_topic_feedback_v11`. It receives observed
+  `aitta_assessment_grounded_two_topic_feedback_v13`. It receives observed
   aggregate evidence, the validated bundle and per-focus plans, the
   deterministic baseline, the grounded review cards (see below), and safe
   practice status/task descriptions — never the whole bank, raw responses,
@@ -144,19 +144,24 @@ Key contracts:
   picks and the aggregate `provider_job` provenance are preserved;
   only the card-level `worked_example_job` runs (schema
   `phase3_selected_worked_example_v2`, prompt
-  `aitta_selected_worked_example_v4`). The scoped request carries the
+  `aitta_selected_worked_example_v6`). The scoped request carries the
   question, its options, the recorded selected and correct answers,
   the card's `subtopic_id` and the shared `mathematical_task`
   description from the same `MATHEMATICAL_TASKS` mapping the
   worked-first flow uses (`None` for an unmapped subtopic) — never
   the application's checked steps, explanation or reasoning question.
-  The provider authors the solution steps itself, matching the
+  The provider authors the solution steps, reasoning question and the
+  question-first scaffolding (one `socratic_prompt`, exactly two
+  `progressive_hints`) for the new question itself, matching the
   initial worked-first generation, so hosted regeneration also works
   when the local solver is unavailable. While the job is pending the
-  draft shows a processing state and edits/releases/another override
+  draft shows a processing state with only the replacement card's own
+  application scaffold — never the previous question's prompts or
+  hints — and edits/releases/another override
   conflict with 409; on failure the card keeps its
   application-checked steps if it has them — otherwise it stays
-  unavailable — with an explicit fallback marker. The checked
+  unavailable — with an explicit fallback marker and
+  application-authored scaffolds. The checked
   solution remains an internal fallback/audit record only. A
   saved free-form teacher document cannot be patched per example and
   blocks the override until structured fields are used; saved
@@ -199,52 +204,77 @@ Key contracts:
   `assessment_worked_review.py` and `worked_review_math.py`.
 - **Feedback variant**: aligned sessions record an explicit
   `feedback_variant` at creation (`question_first` default, or
-  `worked_first`; legacy mode rejects `worked_first`). Question-first
-  keeps the concise/question-first preview overlay
-  (`question_first_worked_review_v1`) and accepts only the Aitta
-  completion wording. Worked-first
-  (`worked_first_full_feedback_v1`, template
-  `phase3_student_feedback_worked_first_full_v1`) bypasses both
-  rewriting passes, keeps the standard four-section titles and exact
-  checked cards, and — only when a validated Aitta reply exists — lets
-  the provider supply all four narrative sections under guardrails
+  `worked_first`; legacy mode rejects `worked_first`). Both aligned
+  variants run the identical full pipeline: the standard four-section
+  titles, the exact checked cards, and — only when a validated Aitta
+  reply exists — all four narrative sections under guardrails
   `provider_full_narrative_shape_checked_v2` (shape-checked draft
   requiring educator review; counts, selections, keys, checked maths and
   practice cards stay application-owned; deterministic fallback keeps
-  the authored practice follow-up). For hosted worked-first sessions the
+  the authored practice follow-up). Worked-first
+  (`worked_first_full_feedback_v1`, template
+  `phase3_student_feedback_worked_first_full_v1`) presents the checked
+  cards directly. Question-first
+  (`question_first_full_feedback_v2`, template
+  `phase3_student_feedback_question_first_full_v2`) preserves the same
+  narrative and cards and differs only in presentation — each card's
+  explanation sits behind a scaffold/hint/reveal overlay
+  (`question_first_worked_review_v1`). Historical question-first
+  sessions recorded before the full variant keep the concise
+  summary-only preview overlay and are never migrated. For hosted
+  sessions of either aligned variant the
   provider job waits for terminal midpoint/end diagnostics
   (`waiting_for_diagnostics`, which explains added latency) and then calls
   Aitta under a separate wire schema
   (`phase3_worked_first_feedback_generation_v1`, prompt
-  `aitta_worked_first_evidence_author_v9`, context version
+  `aitta_worked_first_evidence_author_v11`, context version
   `worked_first_assessment_research_context_v2`) carrying all 40 answered
   records with recorded/correct options, a descriptive
-  membership-only concept graph, the checked review cards, practice
+  membership-only concept graph, the selected review questions
+  (recorded question/answer fields only, never deterministic worked
+  text), practice
   context, and explicitly available-or-unavailable experimental
   pre-answer KT estimates — never post-answer mastery. The deterministic
   baseline sections stay local (comparison/fallback reference, not a
   hallucination detector) and the new context deliberately misses old
-  v5 cache keys. The v3 reply also returns `worked_reviews` — one
-  provider-authored `steps`/`reasoning_question` entry per ready checked
-  card, shape-validated only (never semantically verified); displayed
+  v5 cache keys. The v4 reply also returns `worked_reviews` — one
+  provider-authored entry per selected
+  review card, including cards whose local solver was unavailable, and
+  an explicit empty list when no cards were selected. Each entry carries
+  exactly `question_id`, `steps`, `reasoning_question`, a
+  question-specific `socratic_prompt` and exactly two
+  `progressive_hints` (pre-reveal scaffolds instructed not to state the
+  answer or solution — a prompt requirement, not a semantic
+  guarantee) — shape-validated
+  only (never semantically verified); displayed
   cards retain the deterministic explanation as
   `checked_steps`/`checked_reasoning_question`, carry
   `explanation_source` provenance (`provider`/`application`) audited in
   `trace.worked_review_sources`, and keep the teacher edit/release gate
   with `solution_version` still naming the application-checked
-  mathematics. Malformed card explanations (`invalid_worked_reviews`,
-  `secret_in_worked_reviews`) reject the whole hosted reply and fall
-  back to the deterministic draft; a legacy two-field reply from an
-  injected generator still supplies the narrative and keeps the
-  deterministic checked cards without overlay. Rules-mode worked-first needs no wait and sends no
-  context. Scenario replays record the variant
+  mathematics rather than the provider prose. Provider scaffolds are
+  stamped `scaffold_source=provider_authored_method_prompt_v1` and kept
+  verbatim behind the question-first reveal; sessions without a provider
+  scaffold (rules mode, rejected reply, or a legacy card) show the
+  application-authored prompts and hints instead, marked
+  `application_authored_method_prompt_v1` with no provider metadata.
+  Malformed replies — bad
+  sections, malformed card explanations (`invalid_worked_reviews`,
+  `secret_in_worked_reviews`), missing `worked_reviews`, or a legacy
+  two-field reply without `worked_reviews`, including one from an
+  injected generator — reject the whole hosted generation and fall back
+  to the deterministic draft. Grounded card selection waits on terminal
+  diagnostics in either variant regardless of provider mode; rules-mode
+  runs send no context and make no provider calls. Scenario replays record the
+  variant
   per run; separate runs of the same answers under each variant are
   saved independently, and historical records without the field display
   as "Historical / unspecified" and are never regenerated.
 - **Midpoint hosted rewording**: at answer 20 the check-in is first
   saved deterministically (`compose_midpoint_message`) and stays the
   immutable baseline. In hosted sessions a phrasing job runs once —
-  up to three provider attempts for transient failures under the
+  up to three provider attempts for transient transport failures and
+  contract/content rejections under the
   bounded retry policy (shared budget/capture cache,
   `aitta_midpoint` namespace,
   `phase3_midpoint_feedback_generation_v1`, prompt

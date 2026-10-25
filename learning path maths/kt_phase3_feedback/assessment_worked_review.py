@@ -310,12 +310,29 @@ def question_first_preview(preview, preserve_narrative=False):
         if card.get("source") != "incorrect_assessment_response":
             continue
         ready = card.get("status") == "ready" and bool(card.get("steps"))
-        scaffold = (worked_review_math.pre_reveal_scaffold(card.get("subtopic_id"))
-                    if ready and card.get("solution_version")
-                    else {"socratic_prompt": GENERIC_SOCRATIC_PROMPT, "progressive_hints": []})
-        card.update(scaffold)
+        provider_scaffold = (
+            ready
+            and card.get("scaffold_source")
+            == "provider_authored_method_prompt_v1"
+            and isinstance(card.get("socratic_prompt"), str)
+            and card["socratic_prompt"].strip()
+            and isinstance(card.get("progressive_hints"), list)
+            and len(card["progressive_hints"]) == 2)
+        if provider_scaffold:
+            card.setdefault(
+                "scaffold_validation",
+                "shape_only_requires_educator_review")
+            card.setdefault(
+                "scaffold_input", "question_and_recorded_answers_v1")
+        else:
+            scaffold = (worked_review_math.pre_reveal_scaffold(card.get("subtopic_id"))
+                        if ready and card.get("solution_version")
+                        else {"socratic_prompt": GENERIC_SOCRATIC_PROMPT, "progressive_hints": []})
+            card.update(scaffold)
+            card["scaffold_source"] = "application_authored_method_prompt_v1"
+            card.pop("scaffold_validation", None)
+            card.pop("scaffold_input", None)
         card["presentation_version"] = QUESTION_FIRST_VERSION
-        card["scaffold_source"] = "application_authored_method_prompt_v1"
         card["option_contrast"] = ""
         card["option_contrast_source"] = None
         match = OPTION_CONTRASTS.get((card.get("question_id"), card.get("selected_answer")))

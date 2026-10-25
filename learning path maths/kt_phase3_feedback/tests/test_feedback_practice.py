@@ -10,7 +10,9 @@ from feedback_practice import (
     PRACTICE_STATUS_MESSAGES, empty_context, project_practice_context,
     resolve_practice, validate_practice_context)
 from session_store import bank_fingerprint
-from tests.helpers import make_bank, make_taxonomy, responses
+from tests.helpers import (
+    FROZEN_RESEARCH_FILES, make_bank, make_taxonomy,
+    requires_private_artifacts, responses)
 from tests.test_shadow_recommendation_service import make_pool
 
 
@@ -421,6 +423,7 @@ class ReviewExampleTests(PracticeCase):
             self.assertNotIn(needle, blob)
 
 
+@requires_private_artifacts(*FROZEN_RESEARCH_FILES)
 class RealAssetsBindingTests(unittest.TestCase):
     def test_current_pool_and_warm_bank_bind(self):
         from evidence_feedback import build_research_evidence

@@ -117,8 +117,8 @@ class CaptureRetryTests(unittest.TestCase):
         cache = CaptureCache(self.root, 1)
         calls = []
         _obtain(cache, calls, failures=(1,))
-        with self.assertRaises(SystemExit):
-            with cache.retry_failed_scope(True):
+        with cache.retry_failed_scope(True):
+            with self.assertRaises(SystemExit):
                 _obtain(cache, calls)
         self.assertEqual(calls, [1])
         self.assertEqual(list(self.root.glob("*_attempt_*.json")), [])
@@ -143,9 +143,10 @@ class CaptureRetryTests(unittest.TestCase):
                 self.assertFalse(self.cache._retry_failed.get())
             self.assertTrue(self.cache._retry_failed.get())
         self.assertFalse(self.cache._retry_failed.get())
+        boom = RuntimeError("boom")
         with self.assertRaises(RuntimeError):
             with self.cache.retry_failed_scope(True):
-                raise RuntimeError("boom")
+                raise boom
         self.assertFalse(self.cache._retry_failed.get())
 
     def test_scope_is_per_thread_and_lock_dedups(self):
@@ -218,8 +219,8 @@ class CaptureRetryTests(unittest.TestCase):
         self.cache._attempt_path(self._base(), 2).mkdir()
         with self.assertRaises(ValueError):
             _obtain(self.cache, calls)
-        with self.assertRaises(ValueError):
-            with self.cache.retry_failed_scope(True):
+        with self.cache.retry_failed_scope(True):
+            with self.assertRaises(ValueError):
                 _obtain(self.cache, calls)
         self.assertEqual(calls, [1])
         self.assertEqual(self.cache.new_calls, 1)
@@ -546,7 +547,12 @@ class SuccessOpener:
                 {"question_id": e["question_id"],
                  "steps": ["Fixture checked step."],
                  "reasoning_question":
-                     "Why does the fixture step work?"}
+                     "Why does the fixture step work?",
+                 "socratic_prompt":
+                     f"What is question {e['question_id']} asking?",
+                 "progressive_hints": [
+                     f"Hint one for {e['question_id']}.",
+                     "Hint two for the same question."]}
                 for e in context["review_examples"]
                 if e.get("status") == "ready"]
         reply = {"choices": [{"finish_reason": "stop",
@@ -618,11 +624,12 @@ class ReplayRetryApiTests(unittest.TestCase):
     def test_obsolete_retry_flag_rejected_like_any_unknown_key(self):
         for value in (True, False, "yes"):
             with self.subTest(value=value):
+                body = self.request(retry_failed_provider_calls=value)
                 with self.assertRaises(ValueError):
-                    self.service.replays.start(
-                        self.request(retry_failed_provider_calls=value))
+                    self.service.replays.start(body)
+        body = self.request(unknown_field=True)
         with self.assertRaises(ValueError):
-            self.service.replays.start(self.request(unknown_field=True))
+            self.service.replays.start(body)
         self.assertEqual(self.service.replays.list()["runs"], [])
 
     def test_run_records_fresh_provider_execution(self):

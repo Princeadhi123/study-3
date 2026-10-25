@@ -1488,6 +1488,36 @@ class SystemExitBoundaryTests(unittest.TestCase):
                          json.dumps(multi["message"]))
         self.assertEqual(evidence, pristine)
 
+    def test_single_selector_system_exit_propagates(self):
+        # The legacy single-candidate selector seam catches only
+        # Exception; budget SystemExit propagates unchanged.
+        evidence = end_evidence({0, 1})
+        selector = _ExitSelector()
+        with self.assertRaises(SystemExit):
+            run_feedback(evidence, "student", "end",
+                         selector=selector)
+
+    def test_opening_generator_exit_and_interrupt_propagate(self):
+        # The opening-only seam catches only Exception; SystemExit and
+        # KeyboardInterrupt propagate unchanged.
+        class ExitOpening:
+            def generate(self, payload):
+                raise SystemExit("new-call budget exhausted")
+
+        class InterruptOpening:
+            def generate(self, payload):
+                raise KeyboardInterrupt
+
+        evidence = end_evidence({0, 1})
+        exit_generator = ExitOpening()
+        interrupt_generator = InterruptOpening()
+        with self.assertRaises(SystemExit):
+            run_feedback(evidence, "student", "end",
+                         generator=exit_generator)
+        with self.assertRaises(KeyboardInterrupt):
+            run_feedback(evidence, "student", "end",
+                         generator=interrupt_generator)
+
     def test_keyboard_interrupt_propagates_from_all_callback_seams(self):
         evidence = self._multi_evidence()
         slots = self._multi_slots(evidence)

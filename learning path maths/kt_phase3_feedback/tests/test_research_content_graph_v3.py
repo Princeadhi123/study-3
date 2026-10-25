@@ -5,9 +5,27 @@ import unittest
 import research_content_catalog as catalog
 import research_content_descriptions_v3 as descriptions_v3
 import research_content_graph as rcg
+from tests.helpers import (
+    FROZEN_RESEARCH_FILES, requires_private_artifacts)
+
+V3_PARENT_FILES = (
+    rcg.V1_CAPTURE / "content_graph_private.json",
+    rcg.V1_CAPTURE / "manifest.json",
+    rcg.V2_PARENT_CAPTURE,
+    rcg.V2_PARENT_CAPTURE.parent / "manifest.json",
+    catalog.CAPTURE / "warm_bank_private.json",
+    catalog.CAPTURE / "cold_bank_private.json",
+    catalog.CAPTURE / "practice_pool_private.json",
+)
+
+V3_BUILD_FILES = (
+    descriptions_v3.PARENT_CAPTURE / "content_graph_private.json",
+    descriptions_v3.POOL_PATH,
+)
 
 
 class V3CaptureTests(unittest.TestCase):
+    @requires_private_artifacts(*FROZEN_RESEARCH_FILES)
     def test_v3_capture_loads_and_validates(self):
         graph = rcg.load_capture(rcg.DEFAULT_CAPTURE)
         self.assertEqual(graph["schema"], rcg.V3_SCHEMA)
@@ -20,6 +38,7 @@ class V3CaptureTests(unittest.TestCase):
         self.assertTrue(rcg.validate_graph(graph))
         self.assertEqual(len(graph["exercises"]), 104)
 
+    @requires_private_artifacts(*V3_BUILD_FILES)
     def test_v3_source_binding_and_counts(self):
         graph = descriptions_v3.build_practice_pool_v2()
         sources = {source["id"]: source for source in graph["sources"]}
@@ -39,6 +58,7 @@ class V3CaptureTests(unittest.TestCase):
                  for exercise in practice]
         self.assertEqual(len(set(stems)), 24)
 
+    @requires_private_artifacts(*V3_BUILD_FILES)
     def test_synthetic_questions_map_to_divisibility(self):
         graph = descriptions_v3.build_practice_pool_v2()
         synthetic = [exercise for exercise in graph["exercises"]
@@ -51,6 +71,7 @@ class V3CaptureTests(unittest.TestCase):
             exercise["exercise_format"] == "short_verbal_prompt"
             for exercise in synthetic))
 
+    @requires_private_artifacts(*V3_BUILD_FILES)
     def test_v3_review_and_provenance_boundaries(self):
         graph = descriptions_v3.build_practice_pool_v2()
         synthetic = graph["review_input"]["synthetic_practice_questions"]
@@ -65,6 +86,7 @@ class V3CaptureTests(unittest.TestCase):
             graph["practice_source_update"]["from_source_id"],
             "practice_pool")
 
+    @requires_private_artifacts(*V3_BUILD_FILES)
     def test_v3_render_notes_synthetic_scope(self):
         page = rcg.render_graph(descriptions_v3.build_practice_pool_v2())
         self.assertIn("Practice source v2 contains 24 questions", page)
@@ -73,6 +95,7 @@ class V3CaptureTests(unittest.TestCase):
         self.assertNotIn("http://", page)
         self.assertNotIn("https://", page)
 
+    @requires_private_artifacts(*V3_PARENT_FILES)
     def test_v1_and_v2_parent_captures_still_load(self):
         v1 = rcg.load_capture(rcg.V1_CAPTURE)
         v2 = rcg.load_capture(

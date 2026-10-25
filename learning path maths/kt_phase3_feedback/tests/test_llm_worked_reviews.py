@@ -85,7 +85,15 @@ class WorkedReviewOpener(RecordingOpener):
                 reviews.append({
                     "question_id": example["question_id"],
                     "steps": list(steps),
-                    "reasoning_question": reasoning})
+                    "reasoning_question": reasoning,
+                    "socratic_prompt":
+                        f"What is question {example['question_id']} "
+                        "asking you to find?",
+                    "progressive_hints": [
+                        f"First, note the quantities given in "
+                        f"{example['question_id']}.",
+                        "Then decide which operation connects "
+                        "them."]})
         self.payload = wire_reply(
             candidate_id=context["selected_candidate"]["candidate_id"],
             sections=self.sections, worked_reviews=reviews)
@@ -112,7 +120,15 @@ class SectionsStub:
                 {"question_id": e["question_id"],
                  "steps": ["Fixture authored step."],
                  "reasoning_question":
-                     "Why does the fixture step work?"}
+                     "Why does the fixture step work?",
+                 "socratic_prompt":
+                     f"What is question {e['question_id']} asking "
+                     "you to find?",
+                 "progressive_hints": [
+                     f"Hint one for {e['question_id']}: identify "
+                     "the given quantities.",
+                     f"Hint two for {e['question_id']}: which "
+                     "operation connects them?"]}
                 for e in expected]
         return reply
 
@@ -129,13 +145,23 @@ class WorkedReviewValidationTests(unittest.TestCase):
             {"question_id": "q_one",
              "steps": ["50% means half of the whole amount."],
              "reasoning_question":
-                 "Why does splitting the whole in half give 50%?"},
+                 "Why does splitting the whole in half give 50%?",
+             "socratic_prompt":
+                 "How could you plan to find this percentage?",
+             "progressive_hints": [
+                 "Look at the whole amount given in the question.",
+                 "Think about dividing it into two equal parts."]},
             {"question_id": "q_two",
              "steps": ["Five copies of v plus two copies of v make "
                        "seven copies of v.", "The result is 7v."],
              "reasoning_question":
                  "Why does the variable stay v when the coefficients "
-                 "are added?"}]
+                 "are added?",
+             "socratic_prompt":
+                 "What is this expression question asking you to do?",
+             "progressive_hints": [
+                 "Count how many copies of v appear on each side.",
+                 "Combine the coefficients while keeping v."]}]
 
     def test_valid_normalized_deep_copy(self):
         out = validate_worked_reviews(self.valid, self.examples)
@@ -146,6 +172,21 @@ class WorkedReviewValidationTests(unittest.TestCase):
             validate_worked_reviews(list(reversed(self.valid)),
                                     self.examples),
             [self.valid[1], self.valid[0]])
+        # Every nested entry and list is a fresh copy: mutating the
+        # normalized result leaves the caller's input intact.
+        for normalized, original in zip(out, self.valid):
+            self.assertIsNot(normalized, original)
+            self.assertIsNot(normalized["steps"], original["steps"])
+            self.assertIsNot(normalized["progressive_hints"],
+                             original["progressive_hints"])
+        out[0]["steps"][0] = "mutated"
+        out[0]["progressive_hints"][0] = "mutated"
+        self.assertEqual(self.valid[0]["steps"],
+                         ["50% means half of the whole amount."])
+        self.assertEqual(
+            self.valid[0]["progressive_hints"],
+            ["Look at the whole amount given in the question.",
+             "Think about dividing it into two equal parts."])
 
     def test_internal_process_wording_accepted(self):
         # Internal application terminology is a downstream teacher
@@ -218,6 +259,40 @@ class WorkedReviewValidationTests(unittest.TestCase):
         cases.append([dict(self.valid[0], steps=[42]),
                       self.valid[1]])
         cases.append([dict(self.valid[0], reasoning_question=True),
+                      self.valid[1]])
+        # Scaffold contract: prompt/hints required, exactly two hints,
+        # same plain-text bounds.
+        cases.append([{k: v for k, v in self.valid[0].items()
+                       if k != "socratic_prompt"}, self.valid[1]])
+        cases.append([{k: v for k, v in self.valid[0].items()
+                       if k != "progressive_hints"}, self.valid[1]])
+        cases.append([dict(self.valid[0], socratic_prompt=""),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0], socratic_prompt="x" * 601),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           socratic_prompt="<b>what</b>"),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0], socratic_prompt=5),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0], progressive_hints="x"),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0], progressive_hints=["a"]),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           progressive_hints=["a", "b", "c"]),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           progressive_hints=["a", ""]),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           progressive_hints=["a", "h" * 601]),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           progressive_hints=["<i>a</i>", "b"]),
+                      self.valid[1]])
+        cases.append([dict(self.valid[0],
+                           progressive_hints=["a", None]),
                       self.valid[1]])
         for case in cases:
             with self.subTest(case=repr(case)[:80]):
@@ -316,14 +391,17 @@ class WorkedReviewWireTests(unittest.TestCase):
             reply["worked_reviews"][0]["steps"], list(AUTHORED[0][0]))
         self.assertEqual(reply["worked_reviews"][0]
                          ["reasoning_question"], AUTHORED[0][1])
+        self.assertTrue(reply["worked_reviews"][0]["socratic_prompt"])
+        self.assertEqual(
+            len(reply["worked_reviews"][0]["progressive_hints"]), 2)
         body = opener.calls[0]["body"]
         self.assertEqual(body["max_tokens"], WF_MAX_TOKENS)
-        self.assertEqual(body["max_tokens"], 4096)
+        self.assertEqual(body["max_tokens"], 5120)
         context = json.loads(body["messages"][1]["content"])
         self.assertEqual(context["schema"], WF_SCHEMA)
         self.assertEqual(context["prompt_version"], WF_PROMPT)
         self.assertEqual(WF_PROMPT,
-                         "aitta_worked_first_evidence_author_v10")
+                         "aitta_worked_first_evidence_author_v11")
         # The wire context carries one shared task description per
         # graph leaf; the 40 records still join only by ids.
         wf = context["worked_first_context"]
@@ -579,7 +657,10 @@ class WorkedReviewWireTests(unittest.TestCase):
                     "worked_reviews": [
                         {"question_id": expected[0]["question_id"],
                          "steps": ["Fixture authored step."],
-                         "reasoning_question": "Why?"}]}
+                         "reasoning_question": "Why?",
+                         "socratic_prompt": "What is it asking?",
+                         "progressive_hints": ["Hint one.",
+                                               "Hint two."]}]}
 
         with mock.patch.object(
                 worked_review_math, "solution",
@@ -616,7 +697,9 @@ class WorkedReviewWireTests(unittest.TestCase):
 
     def test_invalid_worked_reviews_rejected_with_draft(self):
         bad = [dict(question_id=self.ready_ids[0], steps=["ok"],
-                    reasoning_question="Why?")]
+                    reasoning_question="Why?",
+                    socratic_prompt="What?",
+                    progressive_hints=["a", "b"])]
         opener = WorkedReviewOpener(reviews_override=lambda ready: bad)
         generator = self._generator(opener)
         payload = copy.deepcopy(self.full_input)
@@ -632,7 +715,9 @@ class WorkedReviewWireTests(unittest.TestCase):
         opener = WorkedReviewOpener(reviews_override=lambda ready: [
             {"question_id": e["question_id"],
              "steps": [f"Key leak {API_KEY}"],
-             "reasoning_question": "Why?"}
+             "reasoning_question": "Why?",
+             "socratic_prompt": "What?",
+             "progressive_hints": ["a", "b"]}
             for e in ready])
         generator = self._generator(opener)
         payload = copy.deepcopy(self.full_input)
@@ -656,7 +741,9 @@ class WorkedReviewWireTests(unittest.TestCase):
         opener = WorkedReviewOpener(reviews_override=lambda ready: [
             {"question_id": e["question_id"],
              "steps": [f"Leaked key {secret}"],
-             "reasoning_question": "Why?"}
+             "reasoning_question": "Why?",
+             "socratic_prompt": "What?",
+             "progressive_hints": ["a", "b"]}
             for e in ready])
         inner = AittaGenerator(secret, BASE_URL, model=MODEL,
                                opener=opener)
@@ -672,6 +759,48 @@ class WorkedReviewWireTests(unittest.TestCase):
                          json.dumps(generator.last_metadata))
         self.assertNotIn(
             secret, generator.last_rejected_draft["content"])
+
+    def test_secret_in_worked_review_scaffolds_dedicated_code(self):
+        # The dedicated secret scan covers socratic_prompt and each
+        # progressive hint, not just steps.
+        secret = "synthetic-secret-9876543210"
+        for field in ("socratic_prompt", "hint_first", "hint_second"):
+            with self.subTest(field=field):
+                def reviews(ready, field=field):
+                    out = []
+                    for e in ready:
+                        entry = {
+                            "question_id": e["question_id"],
+                            "steps": ["Follow the checked method."],
+                            "reasoning_question": "Why?",
+                            "socratic_prompt": "What is it asking?",
+                            "progressive_hints": ["a", "b"]}
+                        if field == "socratic_prompt":
+                            entry["socratic_prompt"] = (
+                                f"Leaked {secret}")
+                        elif field == "hint_first":
+                            entry["progressive_hints"][0] = (
+                                f"Leaked {secret}")
+                        else:
+                            entry["progressive_hints"][1] = (
+                                f"Leaked {secret}")
+                        out.append(entry)
+                    return out
+                opener = WorkedReviewOpener(reviews_override=reviews)
+                inner = AittaGenerator(secret, BASE_URL, model=MODEL,
+                                       opener=opener)
+                generator = FullFeedbackAittaGenerator(inner)
+                with self.assertRaises(AittaGenerationError) as caught:
+                    generator.generate(copy.deepcopy(self.full_input))
+                self.assertEqual(str(caught.exception),
+                                 "Aitta request failed")
+                self.assertEqual(
+                    generator.last_metadata["rejection_code"],
+                    "secret_in_worked_reviews")
+                self.assertNotIn(secret,
+                                 json.dumps(generator.last_metadata))
+                self.assertNotIn(
+                    secret, generator.last_rejected_draft["content"])
 
     def test_service_overlay_and_release(self):
         # Both aligned variants overlay provider worked_reviews onto
@@ -745,6 +874,15 @@ class WorkedReviewWireTests(unittest.TestCase):
                     self.assertEqual(
                         card["explanation_validation"],
                         "shape_only_requires_educator_review")
+                    self.assertEqual(
+                        card["scaffold_source"],
+                        "provider_authored_method_prompt_v1")
+                    self.assertEqual(
+                        card["scaffold_input"],
+                        "question_and_recorded_answers_v1")
+                    self.assertIn(qid, card["socratic_prompt"])
+                    self.assertEqual(
+                        len(card["progressive_hints"]), 2)
                     self.assertEqual(card["checked_steps"],
                                      det[qid]["steps"])
                     self.assertEqual(
@@ -933,6 +1071,91 @@ class WorkedReviewWireTests(unittest.TestCase):
             self.assertFalse(
                 authored & set(card.get("steps") or []))
 
+    def test_question_first_scaffold_verbatim_unsolved_and_release(self):
+        # Provider-authored Think-first scaffolds reach the
+        # question-first preview and release verbatim — even for cards
+        # whose local solver produced no checked solution.
+        with mock.patch.object(worked_review_math, "solution",
+                               side_effect=ValueError(
+                                   "unsupported question")):
+            opener = WorkedReviewOpener()
+            service = DemoService(
+                root=Path(self.tmp.name) / "svc_qf_scaf",
+                bank=self.bank, taxonomy=self.taxonomy,
+                diagnostics=fake_diagnostics(self.bank),
+                provider_mode="hosted",
+                generator=self._generator(opener))
+            self.addCleanup(service.close, wait=True)
+            created = service.create_session(
+                feedback_variant="question_first")
+            sid, token = (created["session_id"],
+                          created["student_token"])
+            for row in self.rows:
+                service.submit_response(sid, token, row)
+            self.assertTrue(wait_for(
+                lambda: service._load_meta(sid)["provider_job"]
+                ["status"] == "ready"))
+        detail = service.teacher_session(sid)
+        cards = detail["feedback_delivery"]["preview"][
+            "review_examples"]
+        self.assertTrue(cards)
+        for card in cards:
+            self.assertEqual(card["presentation_version"],
+                             "question_first_worked_review_v1")
+            self.assertEqual(card["scaffold_source"],
+                             "provider_authored_method_prompt_v1")
+            self.assertEqual(card["scaffold_input"],
+                             "question_and_recorded_answers_v1")
+            self.assertEqual(card["scaffold_validation"],
+                             "shape_only_requires_educator_review")
+            self.assertIsNone(card["solution_version"])
+            self.assertIn(card["question_id"],
+                          card["socratic_prompt"])
+            hints = card["progressive_hints"]
+            self.assertEqual(len(hints), 2)
+            self.assertIn(card["question_id"], hints[0])
+        released = service.release_feedback(sid, {
+            "message_sha256": detail["feedback_delivery"]
+            ["preview_sha256"]})
+        self.assertTrue(released["released"])
+        out = service._load_meta(sid)["feedback_release"][
+            "released_feedback"]
+        keys = ("socratic_prompt", "progressive_hints",
+                "scaffold_source", "scaffold_input",
+                "scaffold_validation")
+        self.assertEqual(
+            [{k: c[k] for k in keys} for c in out["review_examples"]],
+            [{k: c[k] for k in keys} for c in cards])
+
+    def test_question_first_rules_mode_uses_application_scaffolds(self):
+        # Rules mode keeps the full variant layout but every card's
+        # scaffold is the application fallback — no provider metadata.
+        service = DemoService(
+            root=Path(self.tmp.name) / "svc_qf_rules",
+            bank=self.bank, taxonomy=self.taxonomy,
+            diagnostics=fake_diagnostics(self.bank),
+            provider_mode="rules")
+        self.addCleanup(service.close, wait=True)
+        created = service.create_session(
+            feedback_variant="question_first")
+        sid, token = (created["session_id"], created["student_token"])
+        for row in self.rows:
+            service.submit_response(sid, token, row)
+        self.assertTrue(wait_for(
+            lambda: service._load_meta(sid)["provider_job"]["status"]
+            in ("ready", "fallback")))
+        cards = service.teacher_session(sid)["feedback_delivery"][
+            "preview"]["review_examples"]
+        self.assertTrue(cards)
+        for card in cards:
+            if card["status"] == "ready" and card["steps"]:
+                self.assertEqual(
+                    card["scaffold_source"],
+                    "application_authored_method_prompt_v1")
+                self.assertNotIn("scaffold_input", card)
+                self.assertNotIn("scaffold_validation", card)
+                self.assertTrue(card["socratic_prompt"])
+
     def test_grounded_two_field_reply_falls_back(self):
         # A legacy two-field reply no longer satisfies a grounded
         # request (worked-first or assessment-context question-first):
@@ -978,6 +1201,8 @@ class WorkedReviewWireTests(unittest.TestCase):
                     self.assertNotEqual(card.get("explanation_source"),
                                         "provider")
                     self.assertNotIn("checked_steps", card)
+                    self.assertNotIn("scaffold_source", card)
+                    self.assertNotIn("socratic_prompt", card)
                 # Provider wording never reaches the cards or the
                 # released-path preview.
                 self.assertNotIn(AUTHORED[0][0][0],

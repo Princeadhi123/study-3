@@ -12,7 +12,9 @@ from research_runtime import load_research_bank, teacher_content_context
 from worked_first_context import (
     CONTEXT_VERSION, INSTRUCTIONS, KT_BOUNDARY, PROMPT_VERSION,
     build_worked_first_context, validate_worked_first_context)
-from tests.helpers import make_bank, make_taxonomy, responses
+from tests.helpers import (
+    FROZEN_RESEARCH_FILES, make_bank, make_taxonomy,
+    requires_private_artifacts, responses)
 from tests.test_assessment_worked_review import (
     grounded_rows, make_grounded_bank, make_grounded_taxonomy, positions)
 from tests.test_kt_adapter import FakeKT
@@ -61,7 +63,7 @@ class WorkedFirstContextTests(unittest.TestCase):
 
     def test_prompt_version_and_instruction_contract(self):
         self.assertEqual(PROMPT_VERSION,
-                         "aitta_worked_first_evidence_author_v10")
+                         "aitta_worked_first_evidence_author_v11")
         self.assertEqual(CONTEXT_VERSION,
                          "worked_first_assessment_research_context_v2")
         for needle in (
@@ -164,6 +166,7 @@ class WorkedFirstContextTests(unittest.TestCase):
         # Validation never mutates the supplied bank/taxonomy context.
         self.assertEqual(self.assessment_context, before)
 
+    @requires_private_artifacts(*FROZEN_RESEARCH_FILES)
     def test_research_bank_leaves_match_teacher_content_context(self):
         # Real bound research banks: every graph leaf's description is
         # exactly the teacher-facing mathematical_task text for the

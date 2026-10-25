@@ -7,6 +7,7 @@ quality or educational content.
 """
 import json
 import socket
+import ssl
 import unittest
 import urllib.error
 
@@ -149,6 +150,67 @@ class StageTransitionTests(unittest.TestCase):
         self.assertEqual(transport["stage"], "open_failed")
         self.assertEqual(transport["failure_kind"], "transport_error")
         self.assertEqual(metadata["failure_stage"], "open_failed")
+
+    def test_urlerror_cert_reason_is_tls_certificate_error(self):
+        generator, _ = instrumented(FakeOpener(
+            error=urllib.error.URLError(ssl.SSLCertVerificationError(
+                1, f"certificate verify failed {FAKE_KEY}"))))
+        payload = opening_payload()
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(payload)
+        metadata = generator.last_metadata
+        transport = telemetry(metadata)
+        self.assertEqual(transport["stage"], "open_failed")
+        self.assertEqual(transport["failure_kind"],
+                         "tls_certificate_error")
+        self.assertEqual(transport["http_status"], None)
+        self.assertEqual(metadata["failure_stage"], "open_failed")
+        self.assertNotIn("certificate verify failed",
+                         json.dumps(metadata))
+        self.assertNotIn(FAKE_KEY, json.dumps(metadata))
+
+    def test_direct_cert_error_is_tls_certificate_error(self):
+        generator, _ = instrumented(FakeOpener(
+            error=ssl.SSLCertVerificationError(
+                1, f"certificate verify failed {FAKE_KEY}")))
+        payload = opening_payload()
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(payload)
+        metadata = generator.last_metadata
+        transport = telemetry(metadata)
+        self.assertEqual(transport["stage"], "open_failed")
+        self.assertEqual(transport["failure_kind"],
+                         "tls_certificate_error")
+        self.assertEqual(transport["http_status"], None)
+        self.assertNotIn(FAKE_KEY, json.dumps(metadata))
+
+    def test_urlerror_ssl_reason_is_tls_error(self):
+        generator, _ = instrumented(FakeOpener(
+            error=urllib.error.URLError(
+                ssl.SSLError(1, f"handshake failure {FAKE_KEY}"))))
+        payload = opening_payload()
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(payload)
+        metadata = generator.last_metadata
+        transport = telemetry(metadata)
+        self.assertEqual(transport["stage"], "open_failed")
+        self.assertEqual(transport["failure_kind"], "tls_error")
+        self.assertEqual(transport["http_status"], None)
+        self.assertNotIn("handshake failure", json.dumps(metadata))
+        self.assertNotIn(FAKE_KEY, json.dumps(metadata))
+
+    def test_direct_ssl_error_is_tls_error(self):
+        generator, _ = instrumented(FakeOpener(
+            error=ssl.SSLError(1, f"handshake failure {FAKE_KEY}")))
+        payload = opening_payload()
+        with self.assertRaises(AittaGenerationError):
+            generator.generate(payload)
+        metadata = generator.last_metadata
+        transport = telemetry(metadata)
+        self.assertEqual(transport["stage"], "open_failed")
+        self.assertEqual(transport["failure_kind"], "tls_error")
+        self.assertEqual(transport["http_status"], None)
+        self.assertNotIn(FAKE_KEY, json.dumps(metadata))
 
     def test_close_failure_recorded(self):
         class BadCloseResponse(FakeResponse):

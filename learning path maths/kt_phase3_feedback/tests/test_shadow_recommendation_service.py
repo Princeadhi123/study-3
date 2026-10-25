@@ -8,9 +8,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 import demo_api
+import research_runtime
 from demo_service import DemoService
 from shadow_practice import ShadowPracticeRecommender
 from tests.helpers import make_bank, make_taxonomy, responses
@@ -313,6 +315,30 @@ class RecommendationWiringTests(ServiceCase):
 
 
 class FutureKTPoolPathTests(ServiceCase):
+    """Unit boundary tests: the "current" pool is a synthetic
+    reference so rejection of arbitrary pools and injected
+    recommenders is exercised without the private frozen pool."""
+
+    def setUp(self):
+        super().setUp()
+        self.reference_pool = make_pool(("sC", "sD"))
+        patcher = mock.patch.object(
+            research_runtime, "load_current_practice_pool",
+            return_value=copy.deepcopy(self.reference_pool))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_current_pool_validator_accepts_reference_rejects_draft(self):
+        research_runtime.validate_current_practice_pool(
+            self.reference_pool)
+        for draft in (make_pool(), empty_pool()):
+            with self.subTest(draft=draft["questions"][0]
+                              ["question_id"] if draft["questions"]
+                              else "empty"):
+                with self.assertRaisesRegex(ValueError, "24-question"):
+                    research_runtime.validate_current_practice_pool(
+                        draft)
+
     def test_active_service_rejects_arbitrary_pool(self):
         with self.assertRaisesRegex(ValueError, "24-question"):
             self._service(practice_pool=make_pool(), practice_target_band=[0.5, 1.0])

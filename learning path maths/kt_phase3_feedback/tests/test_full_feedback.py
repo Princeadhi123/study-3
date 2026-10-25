@@ -1052,7 +1052,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
     def test_v12_prompt_wording_contract(self):
         self.assertEqual(
             self.full_input["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v12")
+            "aitta_assessment_grounded_two_topic_feedback_v13")
         opener = RecordingOpener(
             wire_reply(candidate_id=self.bundle["candidate_id"]))
         reply = self._generator(opener).generate(self.full_input)
@@ -1083,7 +1083,7 @@ class MultiFullFeedbackTests(unittest.TestCase):
         user = json.loads(body["messages"][1]["content"])
         self.assertEqual(
             user["prompt_version"],
-            "aitta_assessment_grounded_two_topic_feedback_v12")
+            "aitta_assessment_grounded_two_topic_feedback_v13")
 
     def test_stale_prompt_versions_rejected_before_request(self):
         for stale in (
@@ -1095,7 +1095,8 @@ class MultiFullFeedbackTests(unittest.TestCase):
                 "aitta_assessment_grounded_two_topic_feedback_v8",
                 "aitta_assessment_grounded_two_topic_feedback_v9",
                 "aitta_assessment_grounded_two_topic_feedback_v10",
-                "aitta_assessment_grounded_two_topic_feedback_v11"):
+                "aitta_assessment_grounded_two_topic_feedback_v11",
+                "aitta_assessment_grounded_two_topic_feedback_v12"):
             with self.subTest(stale=stale):
                 payload = copy.deepcopy(self.full_input)
                 payload["prompt_version"] = stale
@@ -1689,7 +1690,12 @@ class WorkedFirstWireTests(unittest.TestCase):
                  "steps": ["Follow the checked method shown for "
                            "this question."],
                  "reasoning_question":
-                     "Why does the checked method work here?"}
+                     "Why does the checked method work here?",
+                 "socratic_prompt":
+                     f"What is question {e['question_id']} asking?",
+                 "progressive_hints": [
+                     f"Hint one for {e['question_id']}.",
+                     "Hint two for the same question."]}
                 for e in expected])
 
     def test_worked_first_payload_schema_and_keys(self):

@@ -17,7 +17,9 @@ import phase3_paths  # noqa: F401 -- installs the Phase 2 import path
 import demo_api
 from demo_api import make_server
 from demo_service import DemoService
-from tests.helpers import make_bank, make_taxonomy, responses
+from tests.helpers import (
+    FROZEN_RESEARCH_FILES, make_bank, make_taxonomy,
+    requires_private_artifacts, responses)
 from tests.test_kt_adapter import FakeKT
 from live_diagnostics import LiveDiagnostics
 from tests.test_research_workspace import make_report, judgment
@@ -184,6 +186,7 @@ class DemoAPITests(ApiClientMixin, unittest.TestCase):
             headers={"X-Demo-Session-Token": token})
         self.assertEqual(status, 400)
 
+    @requires_private_artifacts(*FROZEN_RESEARCH_FILES)
     def test_research_bank_selection_over_http_uses_safe_response_tokens(self):
         from research_runtime import load_research_bank
         status, available, _ = self.request("GET", "/api/banks")

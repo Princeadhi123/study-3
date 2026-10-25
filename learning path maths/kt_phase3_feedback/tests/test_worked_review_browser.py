@@ -790,7 +790,15 @@ class WorkedReviewBrowserTests(unittest.TestCase):
                 return {"question_id": card["question_id"],
                         "steps": [f"Provider step for "
                                   f"{card['question_id']}."],
-                        "reasoning_question": "Provider check?"}
+                        "reasoning_question": "Provider check?",
+                        "socratic_prompt":
+                            f"Provider prompt for "
+                            f"{card['question_id']}?",
+                        "progressive_hints": [
+                            f"Provider hint one for "
+                            f"{card['question_id']}.",
+                            f"Provider hint two for "
+                            f"{card['question_id']}."]}
 
         class Full:
             supports_full_feedback = True
@@ -991,11 +999,43 @@ class WorkedReviewBrowserTests(unittest.TestCase):
         self.assertEqual(b.js(f"{sel2}.value"),
                          second_target["question_id"])
         first_text = b.js(f"{sel}.closest('fieldset').textContent")
-        self.assertIn("explanation was regenerated", first_text)
+        self.assertIn("scaffolds were regenerated", first_text)
         self.assertNotIn("being generated", first_text)
         second_text = b.js(
             f"{sel2}.closest('fieldset').textContent")
-        self.assertIn("explanation was regenerated", second_text)
+        self.assertIn("scaffolds were regenerated", second_text)
+
+        # The updated cards show their own question-specific AI-drafted
+        # scaffolds with the provenance label; the progressive hints and
+        # the reveal stay collapsed until opened.
+        first_prompt = f"Provider prompt for {target['question_id']}?"
+        first_hint = f"Provider hint one for {target['question_id']}."
+        second_prompt = (f"Provider prompt for "
+                         f"{second_target['question_id']}?")
+        self.assertTrue(wait_for(
+            lambda: first_prompt in (b.js(preview_text) or "")
+            and second_prompt in (b.js(preview_text) or ""),
+            timeout=15))
+        self.assertIn("AI-drafted prompts and hints; teacher review "
+                      "required.", b.js(preview_text))
+        self.assertNotIn("Application-authored prompts and hints.",
+                         b.js(preview_text))
+        hint_sel = (
+            "[...document.querySelectorAll('.worked-hint')]"
+            ".find(n => n.textContent.includes("
+            + json.dumps(first_hint) + "))")
+        self.assertTrue(b.js(f"Boolean({hint_sel})"))
+        self.assertFalse(b.js(f"{hint_sel}.open"))
+        nested = b.js(f"{hint_sel}.querySelector('.worked-hint')")
+        self.assertTrue(b.js(f"Boolean({nested})"))
+        self.assertFalse(b.js(
+            f"{hint_sel}.querySelector('.worked-hint').open"))
+        sol_sel = (
+            "[...document.querySelectorAll('.worked-solution')]"
+            ".find(n => n.textContent.includes("
+            + json.dumps(first_step) + "))")
+        self.assertTrue(b.js(f"Boolean({sol_sel})"))
+        self.assertFalse(b.js(f"{sol_sel}.open"))
 
         # A failing scoped adapter publishes the explicit checked
         # fallback warning, still without touching the narrative.
@@ -1028,10 +1068,13 @@ class WorkedReviewBrowserTests(unittest.TestCase):
             ["student_review"]["review_examples"]
             if c["question_id"] == another["question_id"])
         self.assertEqual(card["explanation_source"], "application")
-        # The chooser note also reports the checked-steps fallback.
+        # The chooser note also reports the checked-steps fallback,
+        # and the failed card shows application scaffold provenance.
         self.assertIn("AI generation did not complete", b.js(
             "document.querySelector('.worked-example-choice')"
             ".textContent"))
+        self.assertIn("Application-authored prompts and hints.",
+                      b.js(preview_text))
         self.assertEqual(b.errors, [])
 
     def test_scoped_second_pending_ignores_stale_detail(self):
@@ -1052,7 +1095,14 @@ class WorkedReviewBrowserTests(unittest.TestCase):
                 gates[idx].wait(15)
                 return {"question_id": card["question_id"],
                         "steps": [f"Scoped step {idx + 1}."],
-                        "reasoning_question": "Scoped check?"}
+                        "reasoning_question": "Scoped check?",
+                        "socratic_prompt":
+                            f"Scoped prompt for {card['question_id']}?",
+                        "progressive_hints": [
+                            f"Scoped hint one for "
+                            f"{card['question_id']}.",
+                            f"Scoped hint two for "
+                            f"{card['question_id']}."]}
 
         class Full:
             supports_full_feedback = True

@@ -1,4 +1,5 @@
 """Tests for the feedback_variant workflow and deterministic-only hosted wiring."""
+import copy
 import json
 import secrets
 import tempfile
@@ -35,6 +36,10 @@ WORKED_SECTIONS = {
     "observed_strengths": "Your correct answers show work you can build on together.",
     "review_focus": "A possible review starting point is the assessed topic your teacher selects.",
     "next_steps": "If your teacher approves, revisit the checked answers and explain each step."}
+QUESTION_FIRST_CARD_KEYS = (
+    "presentation_version", "scaffold_source", "socratic_prompt",
+    "progressive_hints", "option_contrast", "option_contrast_source",
+    "notice")
 
 
 class FullStubGenerator:
@@ -68,7 +73,15 @@ class FullStubGenerator:
                 {"question_id": e["question_id"],
                  "steps": ["Fixture authored step."],
                  "reasoning_question":
-                     "Why does the fixture step work?"}
+                     "Why does the fixture step work?",
+                 "socratic_prompt":
+                     f"What is question {e['question_id']} asking you "
+                     "to find?",
+                 "progressive_hints": [
+                     f"Hint one for {e['question_id']}: identify the "
+                     "given quantities.",
+                     f"Hint two for {e['question_id']}: which "
+                     "operation connects them?"]}
                 for e in expected]
         return reply
 
@@ -209,11 +222,13 @@ class FeedbackVariantTests(unittest.TestCase):
             {s["kind"]: s["title"] for s in preview["sections"]},
             STANDARD_TITLES)
         self.assertEqual(preview["total"], {"correct": 10, "out_of": 40})
-        # Question-first scaffolds are absent; checked cards intact.
+        # Provider scaffolds are stored on the cards but never
+        # presented question-first; the reveal is direct.
         for example in preview["review_examples"]:
             self.assertNotEqual(example.get("presentation_version"),
                                 "question_first_worked_review_v1")
-            self.assertIsNone(example.get("socratic_prompt"))
+            self.assertEqual(example.get("scaffold_source"),
+                             "provider_authored_method_prompt_v1")
             self.assertIn("correct_answer", example)
         released = service.release_feedback(
             sid, {"message_sha256":
@@ -233,7 +248,7 @@ class FeedbackVariantTests(unittest.TestCase):
         self.assertEqual(qpayload["schema"],
                          "phase3_worked_first_feedback_generation_v1")
         self.assertEqual(qpayload["prompt_version"],
-                         "aitta_worked_first_evidence_author_v10")
+                         "aitta_worked_first_evidence_author_v11")
         self.assertEqual(qpayload,
                          generator.payloads[0])
         qmeta = qservice._load_meta(qsid)
@@ -280,9 +295,14 @@ class FeedbackVariantTests(unittest.TestCase):
             self.assertEqual(qcard["presentation_version"],
                              "question_first_worked_review_v1")
             self.assertEqual(qcard["scaffold_source"],
-                             "application_authored_method_prompt_v1")
-            self.assertTrue(qcard["socratic_prompt"])
-            self.assertIn("progressive_hints", qcard)
+                             "provider_authored_method_prompt_v1")
+            self.assertEqual(qcard["scaffold_input"],
+                             "question_and_recorded_answers_v1")
+            self.assertIn(qcard["question_id"],
+                          qcard["socratic_prompt"])
+            self.assertEqual(len(qcard["progressive_hints"]), 2)
+            for hint in qcard["progressive_hints"]:
+                self.assertIn(qcard["question_id"], hint)
             for key in ("question_id", "prompt", "options",
                         "selected_answer", "correct_answer", "steps",
                         "reasoning_question", "status"):
@@ -424,7 +444,10 @@ class FeedbackVariantTests(unittest.TestCase):
                 edited["preview_sha256"]})
         self.assertTrue(released["released"])
 
-    def test_grounded_cards_match_across_variants(self):
+    def _grounded_variant_pair(self, label, generator_factory=None,
+                               **service_kwargs):
+        """Run the same grounded answers through both variants and
+        collect the teacher-facing results for parity assertions."""
         bank = make_grounded_bank()
         taxonomy = make_grounded_taxonomy(bank)
         wrong = sorted({positions(bank, "pct", 0)[0],
@@ -432,12 +455,15 @@ class FeedbackVariantTests(unittest.TestCase):
         rows = grounded_rows(bank, wrong)
         results = {}
         for variant in ("worked_first", "question_first"):
-            generator = FullStubGenerator()
+            kwargs = dict(service_kwargs)
+            generator = (generator_factory()
+                         if generator_factory is not None else None)
+            if generator is not None:
+                kwargs["generator"] = generator
             service = self._service(
-                root=Path(self.tmp.name) / variant, bank=bank,
-                taxonomy=taxonomy,
-                diagnostics=fake_diagnostics(bank),
-                provider_mode="hosted", generator=generator)
+                root=Path(self.tmp.name) / f"{variant}-{label}",
+                bank=bank, taxonomy=taxonomy,
+                diagnostics=fake_diagnostics(bank), **kwargs)
             sid, _ = self._complete(
                 service, rows=rows, feedback_variant=variant)
             detail = service.teacher_session(sid)
@@ -447,47 +473,61 @@ class FeedbackVariantTests(unittest.TestCase):
             self.assertTrue(
                 all(c["status"] == "ready" for c in cards))
             self.assertTrue(all(c["steps"] for c in cards))
-            self.assertEqual(generator.calls, 1)
+            if generator is not None:
+                self.assertEqual(generator.calls, 1)
             review = detail["checkpoints"]["end"]["student_review"]
             results[variant] = {
                 "cards": cards, "preview": preview, "review": review,
-                "payload": generator.payloads[0],
+                "generator": generator,
                 "meta": service._load_meta(sid),
                 "det_preview": detail["feedback_delivery"]
                 ["deterministic_preview"],
                 "evidence_total": review["sanitized_evidence"]["total"],
                 "selected": review["selected_candidate_ids"]}
-        self.assertEqual(results["worked_first"]["evidence_total"],
-                         results["question_first"]["evidence_total"])
-        self.assertEqual(results["worked_first"]["selected"],
-                         results["question_first"]["selected"])
-        self.assertEqual(results["worked_first"]["payload"],
-                         results["question_first"]["payload"])
+        return results
+
+    def _assert_variant_parity(self, results):
+        """Assert both variants share the same narrative, cards and
+        payloads; only the question-first scaffold/hint/reveal card
+        fields may differ."""
+        w, q = results["worked_first"], results["question_first"]
+        self.assertEqual(w["evidence_total"], q["evidence_total"])
+        self.assertEqual(w["selected"], q["selected"])
+        self.assertEqual(q["preview"]["sections"],
+                         w["preview"]["sections"])
+        self.assertEqual(q["preview"]["text"], w["preview"]["text"])
+        self.assertEqual(q["preview"].get("skills"),
+                         w["preview"].get("skills"))
+        self.assertEqual(q["preview"]["total"], w["preview"]["total"])
+        self.assertEqual(q["preview"].get("practice_activities"),
+                         w["preview"].get("practice_activities"))
+        self.assertEqual(q["preview"].get("practice"),
+                         w["preview"].get("practice"))
+        self.assertEqual(q["det_preview"]["sections"],
+                         w["det_preview"]["sections"])
         self.assertEqual(
-            results["worked_first"]["payload"]["worked_first_context"]
-            ["version"], "worked_first_assessment_research_context_v2")
+            w["preview"]["template_version"], WORKED_FIRST_TEMPLATE)
+        self.assertEqual(w["preview"]["review_presentation_version"],
+                         WORKED_FIRST_VERSION)
         self.assertEqual(
-            results["question_first"]["meta"]
-            ["review_presentation_version"],
-            "question_first_full_feedback_v2")
-        q_sections = {s["kind"]: s["text"] for s in
-                      results["question_first"]["preview"]["sections"]}
-        w_sections = {s["kind"]: s["text"] for s in
-                      results["worked_first"]["preview"]["sections"]}
-        self.assertEqual(q_sections, w_sections)
-        self.assertEqual(
-            {s["kind"]: s["text"] for s in
-             results["question_first"]["det_preview"]["sections"]},
-            {s["kind"]: s["text"] for s in
-             results["worked_first"]["det_preview"]["sections"]})
-        self.assertEqual(
-            results["question_first"]["preview"]["template_version"],
+            q["preview"]["template_version"],
             "phase3_student_feedback_question_first_full_v2")
+        self.assertEqual(q["preview"]["review_presentation_version"],
+                         "question_first_full_feedback_v2")
         self.assertEqual(
-            results["question_first"]["preview"]
-            ["review_presentation_version"],
+            q["meta"]["review_presentation_version"],
             "question_first_full_feedback_v2")
-        for card in results["question_first"]["cards"]:
+
+        def strip(cards):
+            normalized = []
+            for card in copy.deepcopy(cards):
+                for key in QUESTION_FIRST_CARD_KEYS:
+                    card.pop(key, None)
+                normalized.append(card)
+            return normalized
+
+        self.assertEqual(strip(q["cards"]), strip(w["cards"]))
+        for card in q["cards"]:
             self.assertEqual(card["presentation_version"],
                              "question_first_worked_review_v1")
             self.assertTrue(card["socratic_prompt"])
@@ -506,18 +546,50 @@ class FeedbackVariantTests(unittest.TestCase):
                     card["notice"],
                     "Explain your approach first. Use a hint if "
                     "needed, then reveal the checked worked steps.")
+
+    def test_grounded_cards_match_across_variants(self):
+        results = self._grounded_variant_pair(
+            "hosted", generator_factory=FullStubGenerator,
+            provider_mode="hosted")
+        w, q = results["worked_first"], results["question_first"]
+        self.assertEqual(w["generator"].payloads[0],
+                         q["generator"].payloads[0])
         self.assertEqual(
-            [c["steps"] for c in results["worked_first"]["cards"]],
-            [c["steps"] for c in results["question_first"]["cards"]])
-        self.assertEqual(
-            [c["correct_answer"] for c in results["worked_first"]["cards"]],
-            [c["correct_answer"] for c in
-             results["question_first"]["cards"]])
+            w["generator"].payloads[0]["worked_first_context"]
+            ["version"], "worked_first_assessment_research_context_v2")
+        self._assert_variant_parity(results)
+        w_sections = {s["kind"]: s["text"]
+                      for s in w["preview"]["sections"]}
         for kind, text in WORKED_SECTIONS.items():
             if kind == "review_focus":
                 self.assertTrue(w_sections[kind].startswith(text))
             else:
                 self.assertEqual(w_sections[kind], text)
+
+    def test_grounded_cards_match_across_variants_rules_mode(self):
+        results = self._grounded_variant_pair(
+            "rules", provider_mode="rules")
+        self._assert_variant_parity(results)
+
+    def test_grounded_cards_match_across_variants_invalid_provider(self):
+        def bad_generator():
+            return FullStubGenerator(sections={
+                "assessment_summary": "<script>alert(1)</script>",
+                "observed_strengths": "ok",
+                "review_focus": "ok",
+                "next_steps": "ok"})
+        results = self._grounded_variant_pair(
+            "invalid", generator_factory=bad_generator,
+            provider_mode="hosted")
+        for variant in ("worked_first", "question_first"):
+            self.assertEqual(
+                results[variant]["review"]["trace"]["fallback_reason"],
+                "invalid_generation")
+            self.assertEqual(
+                results[variant]["review"]["trace"]
+                ["guardrails_version"],
+                "application_owned_multi_feedback_v1")
+        self._assert_variant_parity(results)
 
     def test_api_export_includes_variant_and_narrative(self):
         service = self._service(provider_mode="hosted",
@@ -610,7 +682,7 @@ class FeedbackVariantTests(unittest.TestCase):
             wf["concept_graph"]["relation"], "is_part_of_not_prerequisite")
         self.assertEqual(
             generator.payloads[0]["prompt_version"],
-            "aitta_worked_first_evidence_author_v10")
+            "aitta_worked_first_evidence_author_v11")
         self.assertEqual(
             generator.payloads[0]["schema"],
             "phase3_worked_first_feedback_generation_v1")

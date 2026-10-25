@@ -55,7 +55,8 @@ STAGES = frozenset((
     "body_read_started", "body_received", "open_failed",
     "body_read_failed", "close_failed"))
 FAILURE_KINDS = frozenset(
-    ("timeout", "http_error", "network_error", "transport_error"))
+    ("timeout", "http_error", "network_error", "transport_error",
+     "tls_certificate_error", "tls_error"))
 BODY_RECEIVED_FAILURE = "response_contract_or_opening_validation"
 
 
@@ -69,11 +70,17 @@ def _classify(exc):
         reason = getattr(exc, "reason", None)
         if isinstance(reason, (TimeoutError, socket.timeout)):
             return "timeout", None
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return "tls_certificate_error", None
         if isinstance(reason, ssl.SSLError):
-            return "transport_error", None
+            return "tls_error", None
         return "network_error", None
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return "timeout", None
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return "tls_certificate_error", None
+    if isinstance(exc, ssl.SSLError):
+        return "tls_error", None
     return "transport_error", None
 
 

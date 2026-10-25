@@ -97,7 +97,7 @@ FULL_FEEDBACK_INSTRUCTIONS = (
 
 
 MULTI_FULL_FEEDBACK_SCHEMA = "phase3_multi_topic_feedback_generation_v2"
-MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v12"
+MULTI_FULL_FEEDBACK_PROMPT_VERSION = "aitta_assessment_grounded_two_topic_feedback_v13"
 MULTI_FEEDBACK_GUARDRAILS_VERSION = "application_owned_multi_feedback_v1"
 PROVIDER_FULL_NARRATIVE_GUARDRAILS_VERSION = (
     "provider_full_narrative_shape_checked_v2")
@@ -217,7 +217,22 @@ GROUNDED_WORKED_REVIEW_OUTPUT_INSTRUCTIONS = (
     "candidate_id, sections, and worked_reviews. Author worked_reviews with "
     "exactly one entry for each supplied review_example. Return an empty list "
     "when no review examples are supplied. Each entry has exactly question_id copied "
-    "from that example, steps, and reasoning_question. steps is a list of "
+    "from that example, steps, reasoning_question, socratic_prompt, and "
+    "progressive_hints. socratic_prompt is one nonempty plain-text English "
+    "question of at most 600 characters inviting the student to plan an "
+    "approach to this exact question before seeing its solution. "
+    "progressive_hints is a list of exactly two nonempty plain-text English "
+    "strings, each at most 600 characters. The first hint points to a "
+    "relevant quantity, relationship or feature in this question; the "
+    "second gives a more specific method cue without carrying out the "
+    "calculation. Neither scaffold may state the correct answer, identify "
+    "its option, give a completed calculation or repeat the worked solution. "
+    "Use this question's quantities or expression where helpful, not a "
+    "generic topic-only template. Do not infer the student's reasoning "
+    "or diagnose an error. If the question or key appears inconsistent, "
+    "ask the student to clarify the wording with their teacher rather "
+    "than implying a solution. Keep the full solution in steps and the "
+    "post-solution reasoning_question only. steps is a list of "
     "one to six nonempty plain-text strings, each at most 1000 characters. "
     "reasoning_question is one nonempty plain-text string of at most 600 "
     "characters. Develop the solution and explain why its method works "
@@ -800,8 +815,11 @@ def _without_scope(text):
 
 WORKED_REVIEW_STEP_MAX_CHARS = 1000
 WORKED_REVIEW_REASONING_MAX_CHARS = 600
+WORKED_REVIEW_SCAFFOLD_MAX_CHARS = 600
 WORKED_REVIEW_MAX_STEPS = 6
-WORKED_REVIEW_KEYS = ("question_id", "steps", "reasoning_question")
+WORKED_REVIEW_HINT_COUNT = 2
+WORKED_REVIEW_KEYS = ("question_id", "steps", "reasoning_question",
+                      "socratic_prompt", "progressive_hints")
 
 
 def _valid_worked_text(text, max_chars):
@@ -813,8 +831,9 @@ def _valid_worked_text(text, max_chars):
 
 def _normalize_worked_review(entry):
     """Shape-check one worked_reviews entry and build its normalized
-    copy (exact keys, 1..6 plain-text steps, plain-text reasoning).
-    Returns None for any malformed entry."""
+    copy (exact keys, 1..6 plain-text steps, plain-text reasoning,
+    scaffold prompt and exactly two hints). Returns None for any
+    malformed entry."""
     if (not isinstance(entry, dict)
             or set(entry) != set(WORKED_REVIEW_KEYS)):
         return None
@@ -828,9 +847,21 @@ def _normalize_worked_review(entry):
     if not _valid_worked_text(entry["reasoning_question"],
                               WORKED_REVIEW_REASONING_MAX_CHARS):
         return None
+    if not _valid_worked_text(entry["socratic_prompt"],
+                              WORKED_REVIEW_SCAFFOLD_MAX_CHARS):
+        return None
+    hints = entry["progressive_hints"]
+    if (not isinstance(hints, list)
+            or len(hints) != WORKED_REVIEW_HINT_COUNT
+            or any(not _valid_worked_text(
+                hint, WORKED_REVIEW_SCAFFOLD_MAX_CHARS)
+                for hint in hints)):
+        return None
     return {"question_id": entry["question_id"],
             "steps": [str(step) for step in steps],
-            "reasoning_question": entry["reasoning_question"]}
+            "reasoning_question": entry["reasoning_question"],
+            "socratic_prompt": entry["socratic_prompt"],
+            "progressive_hints": [str(hint) for hint in hints]}
 
 
 def validate_worked_reviews(value, review_examples):
@@ -1211,7 +1242,9 @@ class FullFeedbackAittaGenerator:
             reply["worked_reviews"], review_examples)
         api_key = self._generator._api_key
         for entry in worked_reviews:
-            texts = entry["steps"] + [entry["reasoning_question"]]
+            texts = (entry["steps"] + [entry["reasoning_question"],
+                                       entry["socratic_prompt"]]
+                     + entry["progressive_hints"])
             if any(api_key in text for text in texts):
                 self._reject_response("secret_in_worked_reviews")
         return worked_reviews
