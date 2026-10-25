@@ -88,6 +88,7 @@ from worked_first_context import (
     build_worked_first_context)
 
 DEFAULT_ROOT = phase3_paths.ARTIFACTS / "live_demo_runtime"
+HOSTED_AITTA_MODEL = "openai/gpt-oss-120b"
 SESSION_ID_RE = re.compile(r"\A[a-f0-9]{32}\Z")
 META_SCHEMA = "phase3_live_demo_session_meta_v1"
 CHECKPOINT_LENGTHS = {"midpoint": HALF_LENGTH, "end": FULL_LENGTH}
@@ -437,10 +438,16 @@ class DemoService:
 
         Review-focus selection is deterministic rules for every demo
         mode; hosted wiring covers only the Aitta draft generator. The
+        demo pins the Aitta model to ``HOSTED_AITTA_MODEL`` (GPT-OSS);
+        ``AITTA_MODEL`` is ignored for the model choice only, while
+        credentials and base URL still come from ``from_env``. The
         deprecated ``jev_env_file`` argument is accepted for backward
         compatibility and ignored.
         """
         inner = AittaGenerator.from_env()
+        # Keep the demo model fixed even when the shell has a stale model
+        # override.
+        inner._model = HOSTED_AITTA_MODEL
         inner._timeout = timeout
         # One credential read; the shallow copy gives the midpoint
         # adapter its own opener slot so each observer stays separate.

@@ -110,7 +110,7 @@ const ENGLISH_QUESTION_TEXT = Object.freeze({
 // Presentation only. Keep stored drafts and editable source text unchanged.
 // Unsupported notation stays visible; never interpret generated text as HTML.
 function readableMathText(value) {
-  const original = String(value ?? "").replace(/⁄/g, "/");
+  const original = String(value ?? "").replaceAll("⁄", "/");
   if (!/\\(?:[dt]?frac|times|cdot|div)(?![a-zA-Z])/.test(original))
     return original;
   let text = original.replace(/(\d)(?=\\[dt]?frac\b)/g, "$1 ")
@@ -141,7 +141,7 @@ function normalizeDisplayText(value) {
 }
 
 function englishSkillName(name) {
-  return Object.prototype.hasOwnProperty.call(ENGLISH_SKILL_NAMES, name)
+  return Object.hasOwn(ENGLISH_SKILL_NAMES, name)
     ? ENGLISH_SKILL_NAMES[name] : name;
 }
 
@@ -171,7 +171,7 @@ const ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS = Object.freeze({
 
 function englishMidpointTopicDescription(name) {
   const english = englishSkillName(name);
-  return Object.prototype.hasOwnProperty.call(
+  return Object.hasOwn(
     ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS, english)
     ? ENGLISH_MIDPOINT_TOPIC_DESCRIPTIONS[english]
     : "Questions about this topic.";
@@ -231,7 +231,7 @@ function renderMidpointSummary(container, message) {
 
 function englishQuestionText(question) {
   const text = normalizeDisplayText(question && question.text);
-  if (Object.prototype.hasOwnProperty.call(ENGLISH_QUESTION_TEXT, text)) {
+  if (Object.hasOwn(ENGLISH_QUESTION_TEXT, text)) {
     return ENGLISH_QUESTION_TEXT[text];
   }
   const percentage = text.match(/^(\d+) % luvusta (\d+)$/);

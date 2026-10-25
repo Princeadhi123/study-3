@@ -142,7 +142,10 @@ is rejected.
 Aitta is configured separately through environment variables or the
 workspace-root `.env` file (`AITTA_API_KEY`, `AITTA_BASE_URL`, optional
 `AITTA_MODEL`) — not a Phase 3-local `.env`. Do not print or commit those
-values.
+values. The hosted demo pins `openai/gpt-oss-120b` in code
+(`HOSTED_AITTA_MODEL` in `demo_service.py`); `AITTA_MODEL` still applies
+to standalone adapters built via `AittaGenerator.from_env()`, not to this
+demo.
 
 `--teacher-pin` may supply a six-digit local demo PIN. If omitted, the server
 generates one and prints it at startup. Do not commit the PIN.
